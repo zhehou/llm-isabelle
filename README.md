@@ -129,8 +129,21 @@ From proof attempt logs:
 python -m prover.train_reranker_sklearn
 python -m prover.train_reranker_xgb
 
-
 This produces a saved model under models/, automatically loaded by the runtime reranker.
+
+3.8 Integration with Isabelle/HOL Jedit GUI
+
+Keep an HTTP server running in a terminal window.
+
+python -m prover.httpd
+
+Linux and Mac users copy llm-isabelle/isabelle_ui/LLM_Suggest.bsh to (Create the folder if it doesn't exist)
+~/.isabelle/Isabelle2025/jedit/macros/LLM_Prover
+
+Windows users may need to put it under the user profile directory, e.g.,
+C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover\LLM_Suggest.bsh
+
+Open Isabelle/HOL jEdit GUI, and run the tool via Macros -> LLM Prover -> LLM Suggest at a proof state.
 
 4. Project Structure
 README.md

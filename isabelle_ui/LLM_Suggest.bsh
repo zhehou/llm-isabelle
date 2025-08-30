@@ -1,0 +1,176 @@
+// LLM_Suggest.bsh — Isabelle/jEdit macro: call your prover HTTP API
+// Usage: place caret anywhere near a lemma; run Macros → LLM_Prover → LLM_Suggest
+// - Auto-detects goal from nearest:   lemma "…"
+// - Inserts steps without replacing lemma text
+// - If only a `by …` is returned and caret is on the lemma line, appends inline:  lemma "… " by …
+
+import org.gjt.sp.jedit.*;
+import javax.swing.JOptionPane;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.Charset;
+
+// ---------- settings ----------
+String SERVER = "http://127.0.0.1:5005/prove";
+int    BUDGET = 8;                 // seconds
+String MODEL  = "";                // e.g., "qwen3-coder:30b" or "" to use server default
+int    BACKSCAN_CHARS = 4000;      // how far back to scan for lemma/theorem
+// --------------------------------
+
+EditPane ep = view.getEditPane();
+JEditTextArea ta = ep.getTextArea();
+Buffer buf = ta.getBuffer();
+int caret = ta.getCaretPosition();
+
+// Helper: line info at caret (we might override this if we find the lemma line)
+int line = ta.getCaretLine();
+int lineStart = ta.getLineStartOffset(line);
+int lineEnd = ta.getLineEndOffset(line);
+String lineText = buf.getText(lineStart, lineEnd - lineStart);
+
+// 1) Decide the goal text to send
+String sel = ta.getSelectedText();
+String goal;
+if (sel != null && sel.trim().length() > 0) {
+    goal = sel.trim();
+} else {
+    // scan backwards for nearest   ^\s*(lemma|theorem)\s+"..."
+    int scanStart = Math.max(0, caret - BACKSCAN_CHARS);
+    int scanLen = Math.min(buf.getLength() - scanStart, BACKSCAN_CHARS + 2000);
+    String window = buf.getText(scanStart, scanLen);
+
+    int bestPos = -1, bestLineStart = -1, bestLineEnd = -1;
+    String bestQuoted = null;
+    java.util.regex.Pattern pat = java.util.regex.Pattern.compile("(?m)^\\s*(lemma|theorem)\\s+\"([^\"]+)\"");
+    java.util.regex.Matcher m = pat.matcher(window);
+    while (m.find()) {
+        int absStart = scanStart + m.start();
+        if (absStart <= caret) {
+            bestPos = absStart;
+            bestQuoted = m.group(2);
+            int localLineStart = window.lastIndexOf('\n', m.start());
+            int localLineEnd = window.indexOf('\n', m.end());
+            if (localLineStart < 0) localLineStart = -1;
+            if (localLineEnd < 0) localLineEnd = window.length();
+            bestLineStart = scanStart + (localLineStart + 1);
+            bestLineEnd = scanStart + localLineEnd;
+        }
+    }
+    if (bestQuoted == null) {
+        JOptionPane.showMessageDialog(view,
+          "No selection and no nearby 'lemma \"…\"' found. Select the goal text and run again.",
+          "LLM Prover", JOptionPane.WARNING_MESSAGE);
+        return;
+    }
+    goal = bestQuoted;
+    if (caret >= bestLineStart && caret <= bestLineEnd) {
+        lineStart = bestLineStart;
+        lineEnd = bestLineEnd;
+        lineText = buf.getText(lineStart, lineEnd - lineStart);
+        line = ta.getLineOfOffset(lineStart);
+    }
+}
+
+// 2) Build payload
+String jsonGoal = goal.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "").replace("\n", "\\n");
+String payload = "{\"goal\":\"" + jsonGoal + "\",\"budget_s\":" + BUDGET
+               + (MODEL.length() > 0 ? ",\"model\":\"" + MODEL.replace("\\","\\\\").replace("\"","\\\"") + "\"" : "")
+               + "}";
+
+// 3) POST to server
+HttpURLConnection conn = null;
+InputStream is = null;
+String resp = "";
+try {
+    URL url = new URL(SERVER);
+    conn = (HttpURLConnection) url.openConnection();
+    conn.setRequestMethod("POST");
+    conn.setDoOutput(true);
+    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+    OutputStream os = conn.getOutputStream();
+    os.write(payload.getBytes("UTF-8"));
+    os.flush(); os.close();
+
+    int code = conn.getResponseCode();
+    is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+    BufferedReader br = new BufferedReader(new InputStreamReader(is, Charset.forName("UTF-8")));
+    StringBuilder sb = new StringBuilder();
+    String lineS = null;
+    while ((lineS = br.readLine()) != null) sb.append(lineS);
+    br.close();
+    resp = sb.toString();
+} catch (Exception e) {
+    JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Prover", JOptionPane.ERROR_MESSAGE);
+    return;
+} finally {
+    try { if (is != null) is.close(); } catch (Exception _e) {}
+    try { if (conn != null) conn.disconnect(); } catch (Exception _e) {}
+}
+
+// 4) Parse steps array (lightweight JSON string array)
+java.util.List steps = new java.util.ArrayList();
+try {
+    int idx = resp.indexOf("\"steps\"");
+    if (idx >= 0) {
+        int lb = resp.indexOf('[', idx);
+        int rb = (lb >= 0) ? resp.indexOf(']', lb) : -1;
+        if (lb >= 0 && rb > lb) {
+            String arr = resp.substring(lb + 1, rb);
+            boolean inStr = false, esc = false;
+            StringBuilder cur = new StringBuilder();
+            for (int i = 0; i < arr.length(); i++) {
+                char c = arr.charAt(i);
+                if (!inStr) {
+                    if (c == '\"') { inStr = true; cur.setLength(0); }
+                } else {
+                    if (esc) { cur.append(c); esc = false; }
+                    else if (c == '\\') { esc = true; }
+                    else if (c == '\"') { inStr = false; steps.add(cur.toString()); }
+                    else { cur.append(c); }
+                }
+            }
+        }
+    }
+} catch (Exception _e) {}
+
+// 5) Choose insertion content
+String byFinisher = "";
+java.util.List applies = new java.util.ArrayList();
+for (int i = 0; i < steps.size(); i++) {
+    String s = ((String) steps.get(i)).trim();
+    if (s.length() == 0) continue;
+    if (s.startsWith("by ")) { byFinisher = s; break; }
+    if (s.startsWith("apply")) { applies.add(s); }
+}
+if (steps.size() == 0) {
+    JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Prover",
+                                  JOptionPane.INFORMATION_MESSAGE);
+    return;
+}
+
+// 6) Insert WITHOUT replacing lemma text
+ta.selectNone();  // ensure no replacement happens
+
+if (byFinisher.length() > 0 && applies.size() == 0) {
+    // append inline at end of lemma line if caret is on that lemma line; else insert on new line
+    if (lineText.matches("(?s).*\\b(lemma|theorem)\\b.*\".*\".*")) {
+        int insertPos = lineEnd - 1; // before newline
+        ta.setCaretPosition(insertPos);
+        ta.setSelectedText(" " + byFinisher);  // INSERT
+    } else {
+        int insertPos = ta.getCaretPosition();
+        ta.setCaretPosition(insertPos);
+        ta.setSelectedText("\n  " + byFinisher + "\n");  // INSERT
+    }
+} else {
+    // insert applies (and optional by) on new lines with indentation
+    StringBuilder script = new StringBuilder();
+    script.append("\n");
+    for (int i = 0; i < applies.size(); i++) {
+        script.append("  ").append((String) applies.get(i)).append("\n");
+    }
+    if (byFinisher.length() > 0) script.append("  ").append(byFinisher).append("\n");
+    int insertPos = ta.getCaretPosition();
+    ta.setCaretPosition(insertPos);
+    ta.setSelectedText(script.toString());  // INSERT (no replace)
+}
