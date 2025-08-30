@@ -1,0 +1,9 @@
+0 + n = n
+n + 0 = n
+n + Suc m = Suc (n + m)
+Suc n ≠ 0
+n ≤ n
+min n n = n
+max n n = n
+n + m = m + n
+n + (m + k) = (n + m) + k

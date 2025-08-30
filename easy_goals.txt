@@ -1,0 +1,46 @@
+rev (rev xs) = xs
+xs @ [] = xs
+[] @ xs = xs
+rev (xs @ ys) = rev ys @ rev xs
+map id xs = xs
+map f (xs @ ys) = map f xs @ map f ys
+map f (rev xs) = rev (map f xs)
+length (xs @ ys) = length xs + length ys
+length (rev xs) = length xs
+take (length xs) (xs @ ys) = xs
+drop (length xs) (xs @ ys) = ys
+take n xs @ drop n xs = xs
+set (xs @ ys) = set xs ∪ set ys
+x ∈ set xs ⟹ x ∈ set (xs @ ys)
+x ∈ set ys ⟹ x ∈ set (xs @ ys)
+distinct xs ⟹ distinct (rev xs)
+filter p (xs @ ys) = filter p xs @ filter p ys
+map f (filter p xs) = filter (λx. p x) (map f xs)  (* sometimes tricky; good for attempts *)
+
+0 + n = n
+n + 0 = n
+n + Suc m = Suc (n + m)
+Suc n ≠ 0
+n ≤ n
+min n n = n
+max n n = n
+(n + m) = (m + n)
+(n + (m + k)) = ((n + m) + k)
+
+{x} ∪ A = insert x A
+x ∈ insert y A ⟷ (x = y ∨ x ∈ A)
+A ∩ (B ∪ C) = (A ∩ B) ∪ (A ∩ C)
+A ⊆ A ∪ B
+A ∩ B ⊆ A
+(A ⊆ B ∧ B ⊆ C) ⟹ A ⊆ C
+(A ⊆ B ∧ B ⊆ A) ⟹ A = B
+
+(True ∧ P) ⟷ P
+(P ∧ True) ⟷ P
+(P ∨ False) ⟷ P
+(¬ ¬ P) ⟷ P
+(P ⟶ Q) ⟷ (¬ P ∨ Q)
+
+map (f ∘ g) xs = map f (map g xs)
+concat (map rev (map rev xss)) = concat xss
+rev (concat xss) = concat (rev (map rev xss))

@@ -1,0 +1,18 @@
+rev (rev xs) = xs
+xs @ [] = xs
+[] @ xs = xs
+rev (xs @ ys) = rev ys @ rev xs
+map id xs = xs
+map f (xs @ ys) = map f xs @ map f ys
+map f (rev xs) = rev (map f xs)
+length (xs @ ys) = length xs + length ys
+length (rev xs) = length xs
+take (length xs) (xs @ ys) = xs
+drop (length xs) (xs @ ys) = ys
+take n xs @ drop n xs = xs
+set (xs @ ys) = set xs ∪ set ys
+x ∈ set xs ⟹ x ∈ set (xs @ ys)
+x ∈ set ys ⟹ x ∈ set (xs @ ys)
+distinct xs ⟹ distinct (rev xs)
+filter p (xs @ ys) = filter p xs @ filter p ys
+map f (filter p xs) = filter (λx. p x) (map f xs)

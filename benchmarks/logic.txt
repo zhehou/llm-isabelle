@@ -1,0 +1,5 @@
+(True ∧ P) ⟷ P
+(P ∧ True) ⟷ P
+(P ∨ False) ⟷ P
+(¬ ¬ P) ⟷ P
+(P ⟶ Q) ⟷ (¬ P ∨ Q)
