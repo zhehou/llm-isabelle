@@ -1,0 +1,136 @@
+// LLM_PlanOutline.bsh — anchor to PREVIOUS lemma; force outline; insert below it.
+// Menu: Macros → LLM_Prover → LLM_PlanOutline
+
+import org.gjt.sp.jedit.*;
+import javax.swing.JOptionPane;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.Charset;
+import java.util.regex.*;
+
+String SERVER = "http://127.0.0.1:5005/plan_fill";
+int    BUDGET = 12;
+String MODEL  = "";  // optional
+
+Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
+  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
+  int caretLine = ta.getCaretLine();
+  int minLine = Math.max(0, caretLine - 200);
+  for (int li = caretLine; li >= minLine; li--) {
+    int ls = ta.getLineStartOffset(li);
+    int le = ta.getLineEndOffset(li);
+    String L = buf.getText(ls, le - ls);
+    Matcher m = pat.matcher(L);
+    if (m.find()) {
+      int insertPos = le - 1;
+      String goal = m.group(2);
+      return new Object[] { new Integer(insertPos), goal };
+    }
+  }
+  return null;
+}
+
+String jsonUnescape(String s) {
+  StringBuilder out = new StringBuilder();
+  boolean esc = false;
+  for (int i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if (esc) {
+      if (c=='n') out.append('\n');
+      else if (c=='t') out.append('\t');
+      else if (c=='r') out.append('\r');
+      else if (c=='b') out.append('\b');
+      else if (c=='f') out.append('\f');
+      else if (c=='\\') out.append('\\');
+      else if (c=='"') out.append('"');
+      else out.append(c);
+      esc = false;
+    } else if (c=='\\') {
+      esc = true;
+    } else {
+      out.append(c);
+    }
+  }
+  return out.toString();
+}
+
+EditPane ep = view.getEditPane();
+JEditTextArea ta = ep.getTextArea();
+Buffer buf = ta.getBuffer();
+
+Object[] anchor = findPrevLemma(buf, ta);
+if (anchor == null) {
+  JOptionPane.showMessageDialog(view, "Put the caret under a lemma line.", "LLM PlanOutline", JOptionPane.WARNING_MESSAGE);
+  return;
+}
+int insertPos = ((Integer)anchor[0]).intValue();
+String goal    = (String) anchor[1];
+
+// Payload: force outline
+String payload = "{"
+  + "\"goal\":\"" + goal.replace("\\","\\\\").replace("\"","\\\"") + "\","
+  + "\"budget_s\":" + BUDGET + ","
+  + "\"mode\":\"outline\""
+  + (MODEL.length()>0 ? ",\"model\":\"" + MODEL.replace("\\","\\\\").replace("\"","\\\"") + "\"" : "")
+  + "}";
+
+// POST
+HttpURLConnection conn = null;
+InputStream is = null;
+String resp = "";
+try {
+  URL url = new URL(SERVER);
+  conn = (HttpURLConnection) url.openConnection();
+  conn.setRequestMethod("POST");
+  conn.setDoOutput(true);
+  conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+  OutputStream os = conn.getOutputStream();
+  os.write(payload.getBytes("UTF-8"));
+  os.flush(); os.close();
+  int code = conn.getResponseCode();
+  is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+  BufferedReader br = new BufferedReader(new InputStreamReader(is, Charset.forName("UTF-8")));
+  StringBuilder sb = new StringBuilder();
+  String line;
+  while ((line = br.readLine()) != null) sb.append(line);
+  br.close();
+  resp = sb.toString();
+} catch (Exception e) {
+  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM PlanOutline", JOptionPane.ERROR_MESSAGE);
+  return;
+} finally {
+  try { if (is != null) is.close(); } catch (Exception _e) {}
+  try { if (conn != null) conn.disconnect(); } catch (Exception _e) {}
+}
+
+// Extract "outline"
+String marker = "\"outline\":\"";
+int pos = resp.indexOf(marker);
+if (pos < 0) {
+  JOptionPane.showMessageDialog(view, "No outline in response:\n" + resp, "LLM PlanOutline", JOptionPane.INFORMATION_MESSAGE);
+  return;
+}
+int i = pos + marker.length();
+StringBuilder raw = new StringBuilder();
+boolean esc = false;
+for (; i < resp.length(); i++) {
+  char c = resp.charAt(i);
+  if (esc) { raw.append('\\').append(c); esc=false; continue; }
+  if (c=='\\') { esc=true; continue; }
+  if (c=='"') break;
+  raw.append(c);
+}
+String outline = jsonUnescape(raw.toString());
+
+// Strip duplicate lemma header if present
+String lemmaPrefix = "lemma \"" + goal + "\"";
+String outlineTrim = outline.trim();
+if (outlineTrim.startsWith(lemmaPrefix)) {
+  int nl = outline.indexOf('\n');
+  outline = (nl >= 0) ? outline.substring(nl + 1) : "";
+}
+
+// Insert below the previous lemma line
+ta.selectNone();
+ta.setCaretPosition(insertPos);
+ta.setSelectedText("\n" + outline + (outline.endsWith("\n") ? "" : "\n"));

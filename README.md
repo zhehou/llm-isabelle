@@ -137,38 +137,25 @@ Keep an HTTP server running in a terminal window.
 
 python -m prover.httpd
 
-Linux and Mac users copy llm-isabelle/isabelle_ui/LLM_Suggest.bsh to (Create the folder if it doesn't exist)
+Linux and Mac users copy the .bsh files in 
+
+llm-isabelle/isabelle_ui/
+
+to (Create the folder if it doesn't exist)
+
 ~/.isabelle/Isabelle2025/jedit/macros/LLM_Prover
 
-Windows users may need to put it under the user profile directory, e.g.,
-C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover\LLM_Suggest.bsh
+Windows users may need to put them under the user profile directory, e.g.,
+C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover
 
-Open Isabelle/HOL jEdit GUI, and run the tool via Macros -> LLM Prover -> LLM Suggest at a proof state.
+Open Isabelle/HOL jEdit GUI, and run the tools via Macros -> LLM Prover at a proof state.
 
 4. Project Structure
 README.md
 benchmarks/              # Benchmark goal suites and results
-prover/
-  ├── cli.py             # CLI entrypoint
-  ├── prover.py          # Core beam search prover
-  ├── llm.py             # LLM proposal integration
-  ├── heuristics.py      # Heuristic ranking and fact augmentation
-  ├── features.py        # Feature extraction for reranker training
-  ├── ranker.py          # Runtime reranker loader
-  ├── train_reranker_*   # Scripts to train reranker models
-  ├── mining.py          # Lemma/fact mining via Isabelle
-  ├── sledge.py          # Sledgehammer integration
-  ├── prechecks.py       # Quickcheck / Nitpick pruning
-  ├── minimize.py        # Proof script minimization
-  ├── variants.py        # Structured proof variants
-  ├── macros.py          # Macro continuation mining
-  ├── logging_utils.py   # JSONL logging utilities
-  ├── proof_io.py        # File output (theory files)
-  ├── isabelle_api.py    # Isabelle client wrapper
-  ├── bench.py           # Benchmark harness
-  ├── regress.py         # Regression testing harness
-  ├── aggregate.py       # Results aggregation
-  └── config.py          # Runtime defaults
+isabelle_ui/             # Isabelle/HOL jEdit integration
+planner/                 # Proof outline planner
+prover/                  # Stepwise prover
 
 5. Notes & Tips
 
