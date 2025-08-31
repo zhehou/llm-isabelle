@@ -135,7 +135,7 @@ This produces a saved model under models/, automatically loaded by the runtime r
 
 Keep an HTTP server running in a terminal window.
 
-python -m prover.httpd
+python3 -m isabelle_ui.serve
 
 Linux and Mac users copy the .bsh files in 
 

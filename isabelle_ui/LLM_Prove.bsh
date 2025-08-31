@@ -1,5 +1,5 @@
-// LLM_Suggest.bsh — robust: anchor to the PREVIOUS lemma; insert on a NEW line after it.
-// Menu: Macros → LLM_Prover → LLM_Suggest
+// LLM_Prove.bsh — robust: anchor to the PREVIOUS lemma; insert on a NEW line after it.
+// Menu: Macros → LLM_Prover → LLM_Prove
 
 import org.gjt.sp.jedit.*;
 import javax.swing.JOptionPane;
@@ -37,7 +37,7 @@ Buffer buf = ta.getBuffer();
 
 Object[] anchor = findPrevLemma(buf, ta);
 if (anchor == null) {
-  JOptionPane.showMessageDialog(view, "Could not find a lemma/theorem above the caret.", "LLM Suggest", JOptionPane.WARNING_MESSAGE);
+  JOptionPane.showMessageDialog(view, "Could not find a lemma/theorem above the caret.", "LLM Prove", JOptionPane.WARNING_MESSAGE);
   return;
 }
 int insertPos = ((Integer)anchor[0]).intValue();
@@ -71,7 +71,7 @@ try {
   br.close();
   resp = sb.toString();
 } catch (Exception e) {
-  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Suggest", JOptionPane.ERROR_MESSAGE);
+  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Prove", JOptionPane.ERROR_MESSAGE);
   return;
 } finally {
   try { if (is != null) is.close(); } catch (Exception _e) {}
@@ -104,7 +104,7 @@ try {
 } catch (Exception _e) {}
 
 if (steps.isEmpty()) {
-  JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Suggest", JOptionPane.INFORMATION_MESSAGE);
+  JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Prove", JOptionPane.INFORMATION_MESSAGE);
   return;
 }
 
@@ -116,7 +116,7 @@ for (int i=0;i<steps.size();i++) {
   if (s.startsWith("by ") || s.startsWith("apply")) script.append("  ").append(s).append("\n");
 }
 if (script.length()==0) {
-  JOptionPane.showMessageDialog(view, "No tactic-like steps found.\nRaw response:\n" + resp, "LLM Suggest", JOptionPane.INFORMATION_MESSAGE);
+  JOptionPane.showMessageDialog(view, "No tactic-like steps found.\nRaw response:\n" + resp, "LLM Prove", JOptionPane.INFORMATION_MESSAGE);
   return;
 }
 

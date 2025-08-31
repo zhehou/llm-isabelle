@@ -7,9 +7,9 @@ from typing import Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from .isabelle_api import start_isabelle_server, get_isabelle_client
-from .prover import prove_goal
-from .config import MODEL as DEFAULT_MODEL
+from prover.isabelle_api import start_isabelle_server, get_isabelle_client
+from prover.prover import prove_goal
+from prover.config import MODEL as DEFAULT_MODEL
 
 from planner.driver import plan_and_fill
 
