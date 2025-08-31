@@ -1,5 +1,5 @@
-// LLM_Prove.bsh — robust: anchor to the PREVIOUS lemma; insert on a NEW line after it.
-// Menu: Macros → LLM_Prover → LLM_Prove
+// LLM_Prover.bsh — Suggest steps at caret if inside lemma; else below lemma header.
+// Menu: Macros → LLM_Prover → LLM_Prover
 
 import org.gjt.sp.jedit.*;
 import javax.swing.JOptionPane;
@@ -9,47 +9,104 @@ import java.nio.charset.Charset;
 import java.util.regex.*;
 
 String SERVER = "http://127.0.0.1:5005/prove";
-int    BUDGET = 8;
+int    BUDGET = 30;
 String MODEL  = "";  // optional model override
 
-// Return { Integer insertPos, String goal } for the previous lemma/theorem above caret
+// Find the previous lemma/theorem line above caret; return {lemmaLineIndex, insertAfterLemmaPos, goal}
 Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
   Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
   int caretLine = ta.getCaretLine();
-  int minLine = Math.max(0, caretLine - 200); // scan up to 200 lines upward
+  int minLine = Math.max(0, caretLine - 500);
   for (int li = caretLine; li >= minLine; li--) {
     int ls = ta.getLineStartOffset(li);
     int le = ta.getLineEndOffset(li);
     String L = buf.getText(ls, le - ls);
     Matcher m = pat.matcher(L);
     if (m.find()) {
-      int insertPos = le - 1;           // insert after this line
+      int insertPos = le - 1;      // default insert right after lemma line
       String goal = m.group(2);
-      return new Object[] { new Integer(insertPos), goal };
+      return new Object[] { new Integer(li), new Integer(insertPos), goal };
     }
   }
   return null;
+}
+
+// Find the next lemma/theorem header after a given line; return its line index or -1 if none
+int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
+  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
+  int total = ta.getLineCount();
+  int maxLine = Math.min(total - 1, fromLine + 500);
+  for (int li = fromLine + 1; li <= maxLine; li++) {
+    int ls = ta.getLineStartOffset(li);
+    int le = ta.getLineEndOffset(li);
+    String L = buf.getText(ls, le - ls);
+    Matcher m = pat.matcher(L);
+    if (m.find()) return li;
+  }
+  return -1;
+}
+
+// Get indentation (leading spaces) of a buffer line
+String getIndent(Buffer buf, JEditTextArea ta, int lineIndex) {
+  int ls = ta.getLineStartOffset(lineIndex);
+  int le = ta.getLineEndOffset(lineIndex);
+  String L = buf.getText(ls, le - ls);
+  int i = 0;
+  while (i < L.length()) {
+    char c = L.charAt(i);
+    if (c != ' ' && c != '\t') break;
+    i++;
+  }
+  return L.substring(0, i);
+}
+
+// Build payload JSON safely
+String jsonEsc(String s) {
+  return s.replace("\\","\\\\").replace("\"","\\\"");
 }
 
 EditPane ep = view.getEditPane();
 JEditTextArea ta = ep.getTextArea();
 Buffer buf = ta.getBuffer();
 
+// 1) Anchor: previous lemma
 Object[] anchor = findPrevLemma(buf, ta);
 if (anchor == null) {
-  JOptionPane.showMessageDialog(view, "Could not find a lemma/theorem above the caret.", "LLM Prove", JOptionPane.WARNING_MESSAGE);
+  JOptionPane.showMessageDialog(view, "Put the caret near or within a lemma/theorem.", "LLM Prover", JOptionPane.WARNING_MESSAGE);
   return;
 }
-int insertPos = ((Integer)anchor[0]).intValue();
-String goal    = (String) anchor[1];
+int lemmaLine = ((Integer)anchor[0]).intValue();
+int afterLemmaPos = ((Integer)anchor[1]).intValue();
+String goal = (String) anchor[2];
 
-// Build payload
-String payload = "{\"goal\":\"" + goal.replace("\\","\\\\").replace("\"","\\\"") + "\","
+// 2) Decide insertion location
+int caretLine = ta.getCaretLine();
+int nextLemmaLine = findNextLemmaLine(buf, ta, lemmaLine);
+
+// Are we inside the lemma block? (strictly after lemma line, and before next lemma or EOF)
+boolean caretInsideLemma =
+    (caretLine > lemmaLine) &&
+    ((nextLemmaLine == -1) || (caretLine < nextLemmaLine));
+
+// Compute insert position and indentation:
+// - If inside: insert after current line, with current line's indent
+// - Else: insert after lemma line, with lemma line's indent + two spaces
+int insertPos;
+String baseIndent;
+if (caretInsideLemma) {
+  insertPos = ta.getLineEndOffset(caretLine) - 1;
+  baseIndent = getIndent(buf, ta, caretLine);
+} else {
+  insertPos = afterLemmaPos;
+  baseIndent = getIndent(buf, ta, lemmaLine) + "  ";
+}
+
+// 3) Call server
+String payload = "{\"goal\":\"" + jsonEsc(goal) + "\","
                + "\"budget_s\":" + BUDGET
-               + (MODEL.length()>0 ? ",\"model\":\"" + MODEL.replace("\\","\\\\").replace("\"","\\\"") + "\"" : "")
+               + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
                + "}";
 
-// POST
 HttpURLConnection conn = null;
 InputStream is = null;
 String resp = "";
@@ -71,14 +128,14 @@ try {
   br.close();
   resp = sb.toString();
 } catch (Exception e) {
-  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Prove", JOptionPane.ERROR_MESSAGE);
+  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Prover", JOptionPane.ERROR_MESSAGE);
   return;
 } finally {
   try { if (is != null) is.close(); } catch (Exception _e) {}
   try { if (conn != null) conn.disconnect(); } catch (Exception _e) {}
 }
 
-// Parse steps (JSON string array under "steps")
+// 4) Parse steps array from JSON
 java.util.List steps = new java.util.ArrayList();
 try {
   int idx = resp.indexOf("\"steps\"");
@@ -104,22 +161,26 @@ try {
 } catch (Exception _e) {}
 
 if (steps.isEmpty()) {
-  JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Prove", JOptionPane.INFORMATION_MESSAGE);
+  JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Prover", JOptionPane.INFORMATION_MESSAGE);
   return;
 }
 
-// Keep only tactic-like lines, always insert on a NEW line
+// 5) Build script: only tactic-like lines, indented under baseIndent
 StringBuilder script = new StringBuilder();
 for (int i=0;i<steps.size();i++) {
   String s = ((String)steps.get(i)).trim();
   if (s.length()==0) continue;
-  if (s.startsWith("by ") || s.startsWith("apply")) script.append("  ").append(s).append("\n");
+  if (s.startsWith("by ") || s.startsWith("apply")) {
+    script.append(baseIndent).append(s).append("\n");
+  }
 }
 if (script.length()==0) {
-  JOptionPane.showMessageDialog(view, "No tactic-like steps found.\nRaw response:\n" + resp, "LLM Prove", JOptionPane.INFORMATION_MESSAGE);
+  JOptionPane.showMessageDialog(view, "No tactic-like steps found.\nRaw response:\n" + resp, "LLM Prover", JOptionPane.INFORMATION_MESSAGE);
   return;
 }
 
+// 6) Insert: always new line before the script
 ta.selectNone();
 ta.setCaretPosition(insertPos);
-ta.setSelectedText("\n" + script.toString());
+String toInsert = "\n" + script.toString();
+ta.setSelectedText(toInsert);
