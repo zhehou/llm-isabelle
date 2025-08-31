@@ -1,4 +1,4 @@
-// LLM_PlanFill.bsh — If caret is inside the current lemma, paste after caret line; else below lemma line.
+// LLM_PlanFill.bsh — Paste after caret if caret is inside the lemma; else just below lemma line.
 // Menu: Macros → LLM_Prover → LLM_PlanFill
 
 import org.gjt.sp.jedit.*;
@@ -9,21 +9,21 @@ import java.nio.charset.Charset;
 import java.util.regex.*;
 
 String SERVER = "http://127.0.0.1:5005/plan_fill";
-int    BUDGET = 60;
+int    BUDGET = 10;
 String MODEL  = "";  // optional
 
 // Find previous lemma/theorem above caret; return {lemmaLineIndex, insertAfterLemmaPos, goal}
 Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
   Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
   int caretLine = ta.getCaretLine();
-  int minLine = Math.max(0, caretLine - 500);
+  int minLine = Math.max(0, caretLine - 1000);
   for (int li = caretLine; li >= minLine; li--) {
     int ls = ta.getLineStartOffset(li);
     int le = ta.getLineEndOffset(li);
     String L = buf.getText(ls, le - ls);
     Matcher m = pat.matcher(L);
     if (m.find()) {
-      int insertPos = le - 1;
+      int insertPos = le - 1; // below lemma line
       String goal = m.group(2);
       return new Object[] { new Integer(li), new Integer(insertPos), goal };
     }
@@ -35,7 +35,7 @@ Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
 int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
   Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
   int total = ta.getLineCount();
-  int maxLine = Math.min(total - 1, fromLine + 500);
+  int maxLine = Math.min(total - 1, fromLine + 1000);
   for (int li = fromLine + 1; li <= maxLine; li++) {
     int ls = ta.getLineStartOffset(li);
     int le = ta.getLineEndOffset(li);
@@ -44,29 +44,6 @@ int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
     if (m.find()) return li;
   }
   return -1;
-}
-
-// Does there appear to be a 'proof' or tactic line between lemmaLine (exclusive) and limitLine (inclusive)?
-boolean hasProofLikeBetween(Buffer buf, JEditTextArea ta, int lemmaLine, int limitLine) {
-  Pattern proofPat = Pattern.compile("^\\s*(proof\\b|by\\s+|apply\\b)", Pattern.MULTILINE);
-  int from = Math.max(lemmaLine + 1, 0);
-  for (int li = from; li <= limitLine; li++) {
-    int ls = ta.getLineStartOffset(li);
-    int le = ta.getLineEndOffset(li);
-    String L = buf.getText(ls, le - ls);
-    if (proofPat.matcher(L).find()) return true;
-  }
-  return false;
-}
-
-// Get indentation of a line
-String getIndent(Buffer buf, JEditTextArea ta, int lineIndex) {
-  int ls = ta.getLineStartOffset(lineIndex);
-  int le = ta.getLineEndOffset(lineIndex);
-  String L = buf.getText(ls, le - ls);
-  int i = 0;
-  while (i < L.length()) { char c = L.charAt(i); if (c!=' ' && c!='\t') break; i++; }
-  return L.substring(0, i);
 }
 
 // JSON helpers
@@ -90,9 +67,9 @@ String parseOutline(String resp) {
   // unescape
   String s = raw.toString();
   StringBuilder out = new StringBuilder();
-  boolean e = false;
+  boolean e=false;
   for (int k=0;k<s.length();k++){
-    char c = s.charAt(k);
+    char c=s.charAt(k);
     if (e) {
       if (c=='n') out.append('\n');
       else if (c=='t') out.append('\t');
@@ -119,27 +96,16 @@ if (anchor == null) {
   JOptionPane.showMessageDialog(view, "Put the caret near or within a lemma/theorem.", "LLM Plan&Fill", JOptionPane.WARNING_MESSAGE);
   return;
 }
-int lemmaLine = ((Integer)anchor[0]).intValue();
-int afterLemmaPos = ((Integer)anchor[1]).intValue();
-String goal = (String) anchor[2];
+int lemmaLine      = ((Integer)anchor[0]).intValue();
+int afterLemmaPos  = ((Integer)anchor[1]).intValue();
+String goal        = (String) anchor[2];
 
-// Decide insertion placement
-int caretLine = ta.getCaretLine();
-int nextLemmaLine = findNextLemmaLine(buf, ta, lemmaLine);
+// Decide insertion placement: inside lemma → after caret line; else → after lemma line
+int caretLine      = ta.getCaretLine();
+int nextLemmaLine  = findNextLemmaLine(buf, ta, lemmaLine);
 boolean caretInsideLemma = (caretLine > lemmaLine) && ((nextLemmaLine == -1) || (caretLine < nextLemmaLine));
 
-// Avoid inserting mid-proof: only paste at caret if there is NO proof/tactic line between lemma and caret.
-boolean safeCaret = caretInsideLemma && !hasProofLikeBetween(buf, ta, lemmaLine, caretLine);
-
-int insertPos;
-String baseIndent;
-if (safeCaret) {
-  insertPos = ta.getLineEndOffset(caretLine) - 1;
-  baseIndent = getIndent(buf, ta, caretLine); // not used for outline text, but kept for symmetry
-} else {
-  insertPos = afterLemmaPos;
-  baseIndent = getIndent(buf, ta, lemmaLine); // outline already has its own structure/indent
-}
+int insertPos = caretInsideLemma ? (ta.getLineEndOffset(caretLine) - 1) : afterLemmaPos;
 
 // Call server
 String payload = "{"
