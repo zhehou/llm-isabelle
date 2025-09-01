@@ -4,7 +4,12 @@ import re
 from typing import List, Tuple, Optional, Dict, Any
 from isabelle_client import start_isabelle_server, get_isabelle_client, IsabelleResponse
 
-HEADER = "theory Scratch\nimports Main\nbegin\n"
+from .config import EXTRA_IMPORTS
+
+def _header(imports=None):
+    imps = ["Main"] + list(imports or []) + list(EXTRA_IMPORTS or [])
+    return f"theory Scratch\nimports {' '.join(imps)}\nbegin\n"
+
 FOOTER = "end\n"
 
 _use_calls = 0
@@ -42,7 +47,7 @@ def build_theory(steps: List[str], add_print_state: bool, end_with: Optional[str
     body = [steps[0]] + ["  " + s for s in steps[1:]]
     if add_print_state: body.append("  print_state")
     if end_with: body.append("  " + end_with)
-    return textwrap.dedent(HEADER + "\n".join(body) + "\n\n" + FOOTER)
+    return textwrap.dedent(_header() + "\n".join(body) + "\n\n" + FOOTER)
 
 def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResponse]:
     global _use_calls

@@ -157,6 +157,39 @@ C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover
 
 Open Isabelle/HOL jEdit GUI, and run the tools via Macros -> LLM Prover at a proof state.
 
+3.9 Training dataset generation
+
+As a curriculum, first generate easy datasets from built-in HOL library.
+
+python datasets/hol_extract_goals.py \
+  --isabelle-hol /Applications/Isabelle2025.app/src/HOL \
+  --out datasets
+
+Partition the datasets based on topic.
+
+python datasets/hol_route_by_imports.py \
+  --in datasets/hol_goals.jsonl \
+  --out datasets
+
+Run the prover per topic to collect data.
+
+python -m prover.regress --file datasets/hol_main.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
+
+python -m prover.regress --file datasets/hol_sets_lists.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
+
+EXTRA_IMPORTS="Number_Theory" \
+python -m prover.regress --file datasets/hol_number_theory.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
+
+EXTRA_IMPORTS="Complex_Main" \
+python -m prover.regress --file datasets/hol_complex.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
+
+EXTRA_IMPORTS="Groups Rings Fields Vector_Spaces" \
+python -m prover.regress --file datasets/hol_algebra.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
+
+
+
+
+
 4. Project Structure
 README.md
 benchmarks/              # Benchmark goal suites and results

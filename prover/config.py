@@ -83,6 +83,9 @@ RUNS_LOG: str = str(LOG_DIR / _env_str("RUNS_LOG", "runs.log.jsonl"))
 # ---------- Isabelle ----------
 ISABELLE_SESSION: str = _env_str("ISABELLE_SESSION", "HOL")
 
+# extra imports for the Scratch theory (space-separated), default empty
+EXTRA_IMPORTS = os.getenv("EXTRA_IMPORTS", "").split()
+
 # ---------- Snapshot ----------
 @dataclass
 class Snapshot:
