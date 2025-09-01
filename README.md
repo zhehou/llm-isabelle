@@ -124,12 +124,19 @@ python -m prover.aggregate --best-only --top-k 2
 
 3.7 Training a reranker
 
-From proof attempt logs:
+From proof attempt logs train a regression model reranker
 
 python -m prover.train_reranker_sklearn
 python -m prover.train_reranker_xgb
 
 This produces a saved model under models/, automatically loaded by the runtime reranker.
+
+From proof attempts and general logs train a reinforcement learning state-action agent that uses the reranker
+
+python -m prover.train_qranker_xgb --mode bandit \
+  --attempts logs/attempts.log.jsonl \
+  --runs logs/runs.log.jsonl \
+  --min_rows 200
 
 3.8 Integration with Isabelle/HOL Jedit GUI
 
