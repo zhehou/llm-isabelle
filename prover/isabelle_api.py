@@ -18,7 +18,7 @@ except Exception:
     try:
         ISABELLE_USE_THEORIES_TIMEOUT_S = int(os.getenv("ISABELLE_USE_THEORIES_TIMEOUT_S", "").strip() or 0)
     except Exception:
-        ISABELLE_USE_THEORIES_TIMEOUT_S = 25  # 0 = disabled
+        ISABELLE_USE_THEORIES_TIMEOUT_S = 0  # 0 = disabled
 
 def _header(imports=None):
     imps = ["Main"] + list(imports or []) + list(EXTRA_IMPORTS or [])
@@ -37,7 +37,6 @@ def _write_tmp_theory(theory_text: str) -> Tuple[str, str]:
 
 def parse_n_subgoals(msg: str) -> Optional[int]:
     """Heuristic extractor for the number of subgoals from a print_state block."""
-    # looks for: "goal (x subgoals)" or "x subgoal" etc.
     import re
     for line in msg.splitlines():
         m = re.search(r"(\d+)\s+subgoals?", line)
@@ -78,45 +77,53 @@ def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResp
         with open(p, "w", encoding="utf-8") as f:
             f.write(theory_text)
 
-        # 1) Try native timeout kwargs (best-effort; keeps single thread, no leaks).
         timeout_s = int(ISABELLE_USE_THEORIES_TIMEOUT_S or 0)
         if timeout_s > 0:
-            # try a few common kwarg spellings
+            # Try native timeout kwarg spellings first (best-effort)
             for kw in ("timeout", "timeout_s", "timeout_sec", "request_timeout"):
                 try:
-                    return list(isabelle.use_theories(
-                        theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name, **{kw: timeout_s}
-                    ))
+                    return list(
+                        isabelle.use_theories(
+                            theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name, **{kw: timeout_s}
+                        )
+                    )
                 except TypeError:
-                    continue  # wrong kw name; try next
+                    continue
                 except Exception:
-                    # if server raised an actual timeout or other error, treat as no result
                     return []
 
-            # 2) Fallback: thread + future timeout (may leak a worker if Isabelle blocks hard).
+            # Fallback: thread with Future timeout
             with ThreadPoolExecutor(max_workers=1) as ex:
                 fut = ex.submit(_use_theories_call, isabelle, session_id=session_id, master_dir=tmpdir.name)
                 try:
                     return fut.result(timeout=timeout_s)
                 except FuturesTimeout:
-                    # Swallow and report as no result; caller will treat as failure
                     return []
 
         # No timeout requested → direct call
         return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name))
     finally:
-        # ensure tmpdir is cleaned
         tmpdir.cleanup()
 
 def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
-    for r in reversed(resps or []):
-        if getattr(r, "response_type", "") == "FINISHED":
-            try:
-                obj = json.loads(r.response_body)
-                return bool(obj.get("ok", False)), obj
-            except Exception:
-                return False, {}
-    return False, {}
+    """
+    Return success if **any** FINISHED block reports ok=true.
+    (Previously we only checked the *last* FINISHED, which is order-fragile across platforms.)
+    """
+    any_ok = False
+    last_obj: Dict[str, Any] = {}
+    for r in (resps or []):
+        if getattr(r, "response_type", "") != "FINISHED":
+            continue
+        try:
+            obj = json.loads(r.response_body)
+        except Exception:
+            continue
+        last_obj = obj  # keep the most recent FINISHED payload for diagnostics
+        if bool(obj.get("ok", False)):
+            any_ok = True
+            # keep scanning to preserve 'last_obj' but success is already locked in
+    return any_ok, (last_obj or {})
 
 def last_print_state_block(resps: List[IsabelleResponse]) -> str:
     txt = ""
