@@ -64,6 +64,41 @@ int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
 
 String jsonEsc(String s) { return s.replace("\\","\\\\").replace("\"","\\\""); }
 
+String stripLeadingHeadersAndToProof(String s) {
+  if (s == null) return "";
+  String out = s.trim();
+  // Drop any leading 'lemma ...' or 'theorem ...' lines (possibly multiple)
+  // and any blank lines immediately after them.
+  String[] lines = out.split("\\r?\\n");
+  StringBuilder sb = new StringBuilder();
+  boolean dropping = true;
+  for (int i = 0; i < lines.length; i++) {
+    String L = lines[i];
+    String Lt = L.trim();
+    if (dropping) {
+      if (Lt.matches("^(lemma|theorem)\\b.*")) {
+        continue; // skip header
+      }
+      if (Lt.isEmpty()) {
+        continue; // skip leading blanks following header
+      }
+      dropping = false;
+    }
+    sb.append(L).append("\n");
+  }
+  out = sb.toString().trim();
+
+  // If there is a 'proof' later, keep from the first 'proof' to the end.
+  // (Models sometimes emit an extra header or text before the actual proof.)
+  // We search at line starts to avoid matching words like 'proofs'.
+  java.util.regex.Pattern proofPat = java.util.regex.Pattern.compile("(?m)^\\s*proof\\b");
+  java.util.regex.Matcher pm = proofPat.matcher(out);
+  if (pm.find()) {
+    out = out.substring(pm.start()).trim();
+  }
+  return out;
+}
+
 String parseOutline(String resp) {
   String marker = "\"outline\":\"";
   int pos = resp.indexOf(marker);
@@ -163,12 +198,7 @@ if (outline == null) {
 }
 
 // Strip duplicate lemma header if present
-String lemmaPrefix = "lemma \"" + goal + "\"";
-String outlineTrim = outline.trim();
-if (outlineTrim.startsWith(lemmaPrefix)) {
-  int nl = outline.indexOf('\n');
-  outline = (nl >= 0) ? outline.substring(nl + 1) : "";
-}
+outline = stripLeadingHeadersAndToProof(outline);
 
 // Insert: always start on a new line
 ta.selectNone();

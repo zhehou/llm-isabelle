@@ -39,12 +39,12 @@ def _env_bool(name: str, default: bool) -> bool:
 
 # ---------- Ollama / LLM ----------
 OLLAMA_HOST: str = _env_str("OLLAMA_HOST", "http://127.0.0.1:11434")
-MODEL: str = _env_str("OLLAMA_MODEL", "qwen3-coder:30b")
+MODEL: str = _env_str("OLLAMA_MODEL", "gemma3:27b")
 
 # Modern names
 OLLAMA_TEMP: float = _env_float("OLLAMA_TEMP", 0.2)
 OLLAMA_TOP_P: float = _env_float("OLLAMA_TOP_P", 0.95)
-OLLAMA_TIMEOUT_S: int = _env_int("OLLAMA_TIMEOUT_S", 60)
+OLLAMA_TIMEOUT_S: int = _env_int("OLLAMA_TIMEOUT_S", 120)
 OLLAMA_NUM_PREDICT: int = _env_int("OLLAMA_NUM_PREDICT", 256)
 
 # Legacy aliases (kept for compatibility with llm.py/logging_utils.py)

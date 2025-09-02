@@ -86,7 +86,7 @@ def plan_and_fill(
     isa = get_isabelle_client(server_info)
     session = isa.session_start(session=ISABELLE_SESSION)
     try:
-        skel: Skeleton = propose_isar_skeleton(goal, model=model, force_outline=force_outline)
+        skel: Skeleton = propose_isar_skeleton(goal, model=model, temp=0.4, force_outline=force_outline)
         full = skel.text
         spans = find_sorry_spans(full)
 

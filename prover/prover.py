@@ -117,7 +117,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
             mined = mine_lemmas_from_state(isabelle, session_id, state_hint, max_lemmas=hint_lemmas) if state_hint else []
-            finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas, facts=facts_for_depth)
+            finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas, facts=facts_for_depth, temp=0.2)
             finishers = (sledge_sugs + finishers_llm) if (j == 0 and sledge_sugs) else finishers_llm
             for fin in finishers:
                 if time_left_s() <= 0: break
@@ -155,7 +155,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         for _, steps, state_hint, _ in beam:
             if time_left_s() <= 0: break
             cands = propose_steps(model_list, goal, steps, state_hint,
-                      facts=facts_for_depth, reranker=reranker, depth=depth)
+                      facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.2)
             if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
             if not cands: continue
             best_local: List[Tuple[int, List[str], str, Optional[int]]] = []

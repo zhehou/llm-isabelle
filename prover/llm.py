@@ -4,7 +4,7 @@ from typing import List
 from .config import OLLAMA_HOST, TEMP, TOP_P, TIMEOUT_S, NUM_CANDIDATES
 from .prompts import SYSTEM_STEPS, SYSTEM_FINISH, USER_TEMPLATE, parse_ollama_lines
 
-def _ollama_generate(system_prompt: str, user_prompt: str, model: str) -> str:
+def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *, temperature: float | None = None) -> str:
     url = f"{OLLAMA_HOST}/api/generate"
     payload = {
         "model": model,
@@ -32,12 +32,16 @@ def merge_candidates(list_of_lists: List[List[str]], limit: int) -> List[str]:
     return merged
 
 def propose_steps(models: List[str], goal: str, steps_so_far: List[str], state_hint: str = "",
-                  facts: List[str] | None = None, reranker=None, depth:int=0) -> List[str]:
-    user = USER_TEMPLATE.format(goal=goal, steps="\n".join(steps_so_far) or "(none)",
-                                state_hint=(state_hint.strip() or "(none)"))
+                  facts: List[str] | None = None, reranker=None, depth:int=0, *, temp: float | None = None) -> List[str]:
+    user = USER_TEMPLATE.format(
+        goal=goal,
+        steps="\n".join(steps_so_far) or "(none)",
+        state_hint=(state_hint.strip() or "(none)"),
+        facts=("\n".join(facts) if facts else "(none)")
+    )
     all_lists: List[List[str]] = []
     for m in models:
-        raw = _ollama_generate(SYSTEM_STEPS, user, m)
+        raw = _ollama_generate(SYSTEM_STEPS, user, m, temperature=temp)
         cands = parse_ollama_lines(raw, ["apply ", "apply("], NUM_CANDIDATES)
         all_lists.append(cands)
     from .heuristics import augment_with_facts_for_steps, rank_candidates
@@ -49,12 +53,16 @@ def propose_steps(models: List[str], goal: str, steps_so_far: List[str], state_h
 
 def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], state_hint: str,
                       mined_lemmas: List[str], hint_lemmas_limit: int,
-                      facts: List[str] | None = None) -> List[str]:
-    user = USER_TEMPLATE.format(goal=goal, steps="\n".join(steps_so_far) or "(none)",
-                                state_hint=(state_hint.strip() or "(none)"))
+                      facts: List[str] | None = None, *, temp: float | None = None) -> List[str]:
+    user = USER_TEMPLATE.format(
+        goal=goal,
+        steps="\n".join(steps_so_far) or "(none)",
+        state_hint=(state_hint.strip() or "(none)"),
+        facts=("\n".join(facts) if facts else "(none)")
+    )
     base_lists: List[List[str]] = []
     for m in models:
-        raw = _ollama_generate(SYSTEM_FINISH, user, m)
+        raw = _ollama_generate(SYSTEM_FINISH, user, m, temperature=temp)
         base = parse_ollama_lines(raw, ["done", "by "], max(3, min(NUM_CANDIDATES, 8)))
         base_lists.append(base)
     base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or \

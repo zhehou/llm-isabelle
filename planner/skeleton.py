@@ -16,14 +16,71 @@ from prover.config import (
 )
 
 # --- Prompt that prefers an OUTLINE, but we won't force it unless requested ---
-SKELETON_PROMPT = """You are an Isabelle/HOL assistant.
+SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
 
-TASK: Given a lemma statement, produce a CLEAN Isar PROOF OUTLINE that shows the structure
-(e.g., proof method, cases/induction skeleton). Prefer to leave nontrivial steps as `sorry`.
-Output ONLY Isabelle text (no explanations). Start at or after a line:
+TASK
+Given a lemma statement, produce a CLEAN Isar proof OUTLINE that exposes the decomposition strategy
+(e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof` with intermediate `have`/`show` steps).
+That is, your aim is to analyse the problem (proof goal) and break it into smaller problems (sub-goals) that are easier to solve.
+Leave nontrivial reasoning steps as `sorry` so that a lower-level prover can fill them later.
+
+OUTPUT REQUIREMENTS
+- Output ONLY Isabelle text (no explanations, no code fences).
+- Start at or after a line exactly of the form:
   lemma "{goal}"
-and conclude with:
+- Ensure there is a well-formed block:
+  proof
+    … (case/induction structure, `have` / `show` stubs, etc., with `sorry` where reasoning is omitted) …
   qed
+- Prefer *structured* outlines:
+  • For lists or natural numbers: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`.
+  • For booleans or sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)`.
+  • For set/algebraic goals: include helpful rewrites as hints (e.g., `using` lines or `simp add: <facts>` before a `sorry`).
+- Keep each subcase minimal: introduce the case with `case …`, then `then show ?thesis` followed by `sorry`.
+
+EXAMPLES OF STYLE
+lemma "{goal}"
+proof (induction xs)
+  case Nil
+  then show ?thesis by simp
+next
+  case (Cons x xs)
+  (* outline only; details left to the micro prover *)
+  have H1: "…"
+    sorry
+  then show ?thesis
+    sorry
+qed
+
+lemma "{goal}"
+proof (cases b)
+  case True
+  then show ?thesis
+    sorry
+next
+  case False
+  then show ?thesis
+    sorry
+qed
+
+lemma "{goal}"
+proof
+  show "P"
+    sorry
+next
+  show "Q"
+    sorry
+qed
+
+lemma "{goal}"
+proof -
+  have "A ⟹ B"
+    sorry
+  moreover have "B ⟹ C"
+    sorry
+  ultimately show ?thesis
+    sorry
+qed
 """
 
 @dataclass
@@ -121,7 +178,7 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
 def propose_isar_skeleton(
     goal: str,
     model: Optional[str] = None,
-    temp: float = 0.2,
+    temp: float = 0.35,
     *,
     force_outline: bool = False,
 ) -> Skeleton:
