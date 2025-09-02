@@ -18,7 +18,7 @@ except Exception:
     try:
         ISABELLE_USE_THEORIES_TIMEOUT_S = int(os.getenv("ISABELLE_USE_THEORIES_TIMEOUT_S", "").strip() or 0)
     except Exception:
-        ISABELLE_USE_THEORIES_TIMEOUT_S = 0  # 0 = disabled
+        ISABELLE_USE_THEORIES_TIMEOUT_S = 60  # 0 = disabled
 
 def _header(imports=None):
     imps = ["Main"] + list(imports or []) + list(EXTRA_IMPORTS or [])
@@ -108,34 +108,137 @@ def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResp
 def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
     """
     Return success if **any** FINISHED block reports ok=true.
-    (Previously we only checked the *last* FINISHED, which is order-fragile across platforms.)
+
+    Robust across client variants:
+      - response type can be Enum (e.g., IsabelleResponseType.FINISHED) or str
+      - response body may be bytes or already-dict
+      - dict-like or attribute-style access
     """
+    def _normalize_type(rt: Any) -> str:
+        # Handle Enums (e.g., IsabelleResponseType.FINISHED) and plain strings.
+        try:
+            if hasattr(rt, "name"):  # Enum.name -> 'FINISHED'
+                return str(rt.name).strip().upper()
+            if hasattr(rt, "value"):  # Enum.value -> 'FINISHED'
+                v = getattr(rt, "value")
+                if isinstance(v, str):
+                    return v.strip().upper()
+                return str(v).strip().upper()
+            s = str(rt)
+            su = s.upper()
+            # Cope with representations like "<IsabelleResponseType.OK: 'OK'>"
+            if "FINISHED" in su:
+                return "FINISHED"
+            if su.endswith(".OK") or su == "OK" or "OK'" in su:
+                return "OK"
+            if "NOTE" in su:
+                return "NOTE"
+            return s.strip().upper()
+        except Exception:
+            return ""
+
+    def _get_field(obj: Any, names: Tuple[str, ...]) -> Any:
+        # dict-like
+        if isinstance(obj, dict):
+            for n in names:
+                if n in obj:
+                    return obj[n]
+        # attribute-style
+        for n in names:
+            if hasattr(obj, n):
+                return getattr(obj, n)
+        return None
+
+    def _decode_body(body: Any) -> Optional[Dict[str, Any]]:
+        if body is None:
+            return None
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                body = body.decode("utf-8", "replace")
+            except Exception:
+                try:
+                    body = body.decode(errors="replace")
+                except Exception:
+                    body = str(body)
+        if isinstance(body, dict):
+            return body
+        try:
+            return json.loads(body)
+        except Exception:
+            return None
+
     any_ok = False
     last_obj: Dict[str, Any] = {}
+
     for r in (resps or []):
-        if getattr(r, "response_type", "") != "FINISHED":
+        rt_raw = _get_field(r, ("response_type", "type", "kind", "tag", "name"))
+        rt_norm = _normalize_type(rt_raw)
+        if rt_norm != "FINISHED":
             continue
-        try:
-            obj = json.loads(r.response_body)
-        except Exception:
+
+        body_raw = _get_field(r, ("response_body", "body", "message", "payload"))
+        obj = _decode_body(body_raw)
+        if not isinstance(obj, dict):
             continue
-        last_obj = obj  # keep the most recent FINISHED payload for diagnostics
+
+        last_obj = obj  # track last FINISHED
+
         if bool(obj.get("ok", False)):
             any_ok = True
-            # keep scanning to preserve 'last_obj' but success is already locked in
+        elif str(obj.get("result", "")).lower() == "ok":
+            any_ok = True
+
     return any_ok, (last_obj or {})
 
 def last_print_state_block(resps: List[IsabelleResponse]) -> str:
+    def _get_field(obj: Any, names: Tuple[str, ...]) -> Any:
+        if isinstance(obj, dict):
+            for n in names:
+                if n in obj:
+                    return obj[n]
+        for n in names:
+            if hasattr(obj, n):
+                return getattr(obj, n)
+        return None
+
+    def _normalize_type(rt: Any) -> str:
+        try:
+            if hasattr(rt, "name"):
+                return str(rt.name).strip().upper()
+            if hasattr(rt, "value"):
+                v = getattr(rt, "value")
+                if isinstance(v, str):
+                    return v.strip().upper()
+                return str(v).strip().upper()
+            s = str(rt)
+            su = s.upper()
+            if "NOTE" in su:
+                return "NOTE"
+            if "FINISHED" in su:
+                return "FINISHED"
+            if "OK" in su:
+                return "OK"
+            return s.strip().upper()
+        except Exception:
+            return ""
+
     txt = ""
     for r in (resps or []):
-        if getattr(r, "response_type", "") != "NOTE":
+        rt = _get_field(r, ("response_type", "type", "kind", "tag", "name"))
+        if _normalize_type(rt) != "NOTE":
             continue
+        body = _get_field(r, ("response_body", "body", "message", "payload"))
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                body = body.decode("utf-8", "replace")
+            except Exception:
+                body = str(body)
         try:
-            body = json.loads(r.response_body)
+            obj = body if isinstance(body, dict) else json.loads(body)
         except Exception:
             continue
-        if body.get("kind") == "writeln":
-            msg = str(body.get("message", ""))
+        if obj.get("kind") == "writeln":
+            msg = str(obj.get("message", ""))
             if ("subgoal" in msg) or ("goal (" in msg) or ("goal\n" in msg):
                 txt = msg
     return txt
