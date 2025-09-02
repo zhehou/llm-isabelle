@@ -12,6 +12,24 @@ String SERVER = "http://127.0.0.1:5005/plan_fill";
 int    BUDGET = 12;
 String MODEL  = "";  // optional
 
+// --- SAFE SLICE GUARD: prevent ArrayIndexOutOfBounds in getText ---
+int clampInt(int x, int lo, int hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
+String getTextSafe(JEditBuffer buffer, int startOffset, int endOffset) {
+    // If next-boundary wasn't found, endOffset might be -1; use doc end.
+    int docLen = buffer.getLength();
+    int start = clampInt(startOffset, 0, docLen);
+    int end   = (endOffset < 0) ? docLen : clampInt(endOffset, 0, docLen);
+    if (end < start) { int t = start; start = end; end = t; }
+    int len = end - start;
+    if (len <= 0) return "";
+    return buffer.getText(start, len);
+}
+
 Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
   Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
   int caretLine = ta.getCaretLine();
@@ -19,7 +37,7 @@ Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
   for (int li = caretLine; li >= minLine; li--) {
     int ls = ta.getLineStartOffset(li);
     int le = ta.getLineEndOffset(li);
-    String L = buf.getText(ls, le - ls);
+    String L = getTextSafe(buf, ls, le);
     Matcher m = pat.matcher(L);
     if (m.find()) {
       int insertPos = le - 1;
@@ -37,7 +55,7 @@ int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
   for (int li = fromLine + 1; li <= maxLine; li++) {
     int ls = ta.getLineStartOffset(li);
     int le = ta.getLineEndOffset(li);
-    String L = buf.getText(ls, le - ls);
+    String L = getTextSafe(buf, ls, le);
     Matcher m = pat.matcher(L);
     if (m.find()) return li;
   }
