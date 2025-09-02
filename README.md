@@ -18,6 +18,7 @@ Experiment harnesses: benchmarking (prover/bench.py), regression testing (prover
 Command-line interface (prover/cli.py) for proving single goals, goal files, or quick demos.
 
 1. Installation
+
 Prerequisites
 
 Python 3.10+
@@ -30,8 +31,11 @@ Install from ollama.ai
  and pull desired models, e.g.:
 
 ollama pull qwen3-coder:30b
+
 ollama pull gemma3:27b
+
 ollama pull gpt-oss:20b
+
 ollama pull deepseek-r1:8b
 
 
@@ -42,8 +46,11 @@ Python dependencies
 From the repo root, run:
 
 python3 -m venv .venv
+
 source .venv/bin/activate
+
 pip install -U pip
+
 pip install -r requirements.txt
 
 
@@ -65,6 +72,7 @@ OLLAMA_TIMEOUT_S – per-request timeout.
 RERANKER_OFF=1 – disable reranker (even if model file exists).
 
 3. Usage
+
 3.1 Quick demo
 
 Prove the standard reverse lemma:
@@ -75,9 +83,11 @@ python -m prover.cli
 This will default to proving rev (rev xs) = xs using the configured model.
 
 3.2 Prove a single goal
+
 python -m prover.cli --goal "map f (xs @ ys) = map f xs @ map f ys" --model "qwen3-coder:30b"
 
 With more options
+
 python -m prover.cli --goal 'rev (rev xs) = xs' --model 'qwen3-coder:30b' --beam 3 --max-depth 8 --budget-s 20 --sledge --quickcheck --nitpick --facts-limit 6 --variants
 
 3.3 Prove multiple goals from a file
@@ -127,6 +137,7 @@ python -m prover.aggregate --best-only --top-k 2
 From proof attempt logs train a regression model reranker
 
 python -m prover.train_reranker_sklearn
+
 python -m prover.train_reranker_xgb
 
 This produces a saved model under models/, automatically loaded by the runtime reranker.
@@ -153,6 +164,7 @@ to (Create the folder if it doesn't exist)
 ~/.isabelle/Isabelle2025/jedit/macros/LLM_Prover
 
 Windows users may need to put them under the user profile directory, e.g.,
+
 C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover
 
 Open Isabelle/HOL jEdit GUI, and run the tools via Macros -> LLM Prover at a proof state.
@@ -185,10 +197,6 @@ python -m prover.regress --file datasets/hol_complex.txt --beam 3 --max-depth 2 
 
 EXTRA_IMPORTS="Groups Rings Fields Vector_Spaces" \
 python -m prover.regress --file datasets/hol_algebra.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
-
-
-
 
 4. Project Structure
 README.md
