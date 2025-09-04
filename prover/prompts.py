@@ -19,7 +19,10 @@ Rules:
 
 Examples of acceptable lines:
 apply simp
+apply (unfolding my_fun_def)
 apply (simp add: Let_def)
+apply (simp add: my_fun_def)
+apply (subst my_fun_def[symmetric])
 apply (simp split: if_splits option.splits prod.splits sum.splits list.splits)
 apply auto
 apply (auto simp add: algebra_simps)

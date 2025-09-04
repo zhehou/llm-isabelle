@@ -44,6 +44,13 @@ def mk_finisher_variants(lemmas: List[str]) -> List[str]:
 def _heuristic_score(cmd: str, goal: str, state: str, facts: Optional[List[str]] = None) -> float:
     g = (goal + " " + state).lower()
     score = 0.0
+    # Prefer unfolding defs matching symbols in the goal/state (small nudge)
+    import re
+    m = re.search(r"([A-Za-z0-9_']+)_def\b", cmd)
+    if m:
+        stem = m.group(1).lower()
+        if stem and stem in g:
+            score -= 0.25
     if any(tok in g for tok in ["rev", "@", "append", "map", "take", "drop"]):
         if "induction" in cmd: score -= 1.2
         if "cases" in cmd: score -= 0.6
@@ -89,19 +96,24 @@ def rank_candidates(cands: List[str], goal: str, state_hint: str,
 
 def augment_with_facts_for_steps(cands: List[str], facts: List[str]) -> List[str]:
     if not facts: return cands
+    # Prefer *_def early
+    defs = [f for f in facts if f.endswith("_def")]
     aug = []
     for c in cands:
         aug.append(c)
         if c.startswith("apply simp"):
-            for f in facts[:3]:
+            for f in (defs[:3] or facts[:3]):
                 aug.append(f"apply (simp add: {f})")
+                aug.append(f"apply (simp only: {f})")
         elif c.startswith("apply auto"):
-            for f in facts[:3]:
+            for f in (defs[:3] or facts[:3]):
                 aug.append(f"apply (auto simp: {f})")
         elif c.startswith("apply (simp") and "add:" not in c:
-            aug.append(c.replace("(simp", f"(simp add: {facts[0]}", 1))
+            pref = (defs[0] if defs else facts[0])
+            aug.append(c.replace("(simp", f"(simp add: {pref}", 1))
         elif c.startswith("apply (auto") and "simp:" not in c:
-            aug.append(c.replace("(auto", f"(auto simp: {facts[0]}", 1))
+            pref = (defs[0] if defs else facts[0])
+            aug.append(c.replace("(auto", f"(auto simp: {pref}", 1))
         elif "metis" in c and "(" in c and ")" in c and facts:
             aug.append(c[:-1] + f" {facts[0]})")
     seen, dedup = set(), []
@@ -112,9 +124,13 @@ def augment_with_facts_for_steps(cands: List[str], facts: List[str]) -> List[str
 
 def augment_with_facts_for_finishers(base_finishers: List[str], facts: List[str], cap: int = 8) -> List[str]:
     if not facts: return base_finishers
+    defs = [f for f in facts if f.endswith("_def")]
+    pri = (defs[:6] or facts[:6])  # prefer defs when present
     extras = []
-    for f in facts[:6]:
+    for f in pri:
         extras.append(f"by (simp add: {f})")
+        extras.append(f"by (simp only: {f})")
+        extras.append(f"by (auto simp add: {f})")
         extras.append(f"by (metis {f})")
     seen, out = set(), []
     for x in (extras + base_finishers):

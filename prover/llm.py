@@ -49,7 +49,17 @@ def propose_steps(models: List[str], goal: str, steps_so_far: List[str], state_h
         all_lists.append(cands)
     from .heuristics import augment_with_facts_for_steps, rank_candidates
     merged = merge_candidates(all_lists, NUM_CANDIDATES) or \
-             ["apply simp", "apply auto", "apply clarsimp", "apply (induction xs)", "apply (cases xs)"]
+             ["apply simp", "apply auto", "apply clarsimp", "apply (simp only: foo_def)", "apply (simp add: foo_def)", "apply (induction xs)", "apply (cases xs)"]
+    # If no facts provided, synthesize a couple likely *_def guesses from goal words.
+    if not facts:
+        import re
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_']{2,}", (goal + " " + state_hint))
+        stems = [w for w in words if not w[0].isupper()]  # prefer constants/functions
+        stems = list(dict.fromkeys(stems))[:3]
+        for s in stems:
+            merged.insert(0, f"apply (simp add: {s}_def)")
+            merged.insert(0, f"apply (simp only: {s}_def)")    
+            merged.insert(0, f"apply (auto simp add: {s}_def)")  
     if facts:
         merged = augment_with_facts_for_steps(merged, facts)
     return rank_candidates(merged, goal, state_hint, facts, reranker=reranker, depth=depth)
@@ -69,7 +79,7 @@ def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], sta
         base = parse_ollama_lines(raw, ["done", "by "], max(3, min(NUM_CANDIDATES, 8)))
         base_lists.append(base)
     base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or \
-                  ["done", "by simp", "by auto", "by clarsimp", "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"]
+                  ["done", "by simp", "by auto", "by clarsimp", "by (simp only: foo_def)", "by (simp add: foo_def)", "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"]
     from .heuristics import suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers
     static_hints = suggest_common_lemmas(state_hint)
     dyn_hints = mined_lemmas[:max(0, hint_lemmas_limit)]

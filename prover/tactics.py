@@ -196,7 +196,12 @@ def mine_facts_prioritized(isabelle, session_id: str, state_hint: str, limit: in
     toks = list(dict.fromkeys(FIND_NAME_TOKENS.findall(state_hint)))
     if not toks:
         return []
+    # Pull general rules plus defs; defs are often decisive for user-defined symbols.
     theory_text = _build_find_theorems_filtered(toks, ["simp", "intro", "rule", "elim", "dest"])
+    # Then add a pass that prefers *_def by name (keep short and cheap)
+    def_name_patterns = [f'name: "{stem}_def"' for stem in toks[:6]]
+    if def_name_patterns:
+        theory_text += "\n" + "\n".join(f"find_theorems {p} - 10" for p in def_name_patterns)
     freq: Dict[str, int] = {}
     for r in run_theory(isabelle, session_id, theory_text):
         if getattr(r, "response_type", "") != "NOTE":
