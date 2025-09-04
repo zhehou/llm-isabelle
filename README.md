@@ -186,6 +186,44 @@ python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --lis
 
 python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 
+3.7.3 Combining the above in curriculum training
+
+3.7.3.1 Create data for easy stage
+
+python -m prover.experiments bench --file datasets/hol_main_easy_goals.txt --beam 3 --max-depth 6 --budget-s 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge off --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+
+Train a bandit classifier
+
+python -m prover.train_reranker --algo xgb-classifier --target bandit
+
+3.7.3.2 Create data for mid stage
+
+python -m prover.experiments bench --file datasets/hol_main_mid_goals.txt --beam 4 --max-depth 8 --budget-s 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+
+Re-train bandit classifier
+
+python -m prover.train_reranker --algo xgb-classifier --target bandit
+
+And also train a Q-style regressor
+
+python -m prover.train_reranker --algo xgb-regressor --target q
+
+3.7.3.3 Create data for hard stage
+
+python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+
+Retrain Q-style regressor
+
+python -m prover.train_reranker --algo xgb-regressor --target q
+
+Train AWR++ with teacher-student distillation
+
+python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3
+
+Also train DQN
+
+python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+
 3.8 Integration with Isabelle/HOL Jedit GUI
 
 Keep an HTTP server running in a terminal window.
