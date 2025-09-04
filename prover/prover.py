@@ -1,24 +1,27 @@
 # prover/prover.py
 from collections import defaultdict
-from .utils import color, parse_subgoals, state_fingerprint
-import time, json, re
+import time, json, re, os
 from typing import List, Tuple, Optional, Dict, Any
-from .config import (BEAM_WIDTH, MAX_DEPTH, HINT_LEMMAS, FACTS_LIMIT,
-                     MINIMIZE_DEFAULT, MINIMIZE_TIMEOUT, VARIANTS_DEFAULT,
-                     VARIANT_TIMEOUT, VARIANT_TRIES)
-from .logging_utils import RunLogger
+
+from .utils import color, parse_subgoals, state_fingerprint, RunLogger, slugify_goal, write_theory_file
+from .config import (
+    BEAM_WIDTH, MAX_DEPTH, HINT_LEMMAS, FACTS_LIMIT,
+    MINIMIZE_DEFAULT, MINIMIZE_TIMEOUT, VARIANTS_DEFAULT,
+    VARIANT_TIMEOUT, VARIANT_TRIES
+)
 from .llm import propose_steps, propose_finishers
 from .isabelle_api import build_theory, run_theory, finished_ok, last_print_state_block, use_calls_count
-from .utils import color, parse_subgoals
-from .mining import mine_lemmas_from_state, mine_facts_prioritized
-from .sledge import sledgehammer_finishers
-from .prechecks import precheck_quickcheck_refutes, precheck_nitpick_refutes
+
+# Replaced 4 imports with a single tactics module
+from .tactics import (
+    mine_lemmas_from_state, mine_facts_prioritized,
+    sledgehammer_finishers,
+    precheck_quickcheck_refutes, precheck_nitpick_refutes,
+    try_structured_variants, suggest_continuations,
+)
+
 from .minimize import minimize_proof
-from .variants import try_structured_variants
-from .proof_io import slugify_goal, write_theory_file
-from .macros import suggest_continuations
 from .ranker import SklearnReranker
-import os
 
 _result_cache: Dict[Tuple[Tuple[str, ...], str], Tuple[bool, Optional[int], str]] = {}
 
@@ -87,7 +90,8 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             logger.finish(False, best[1], depth, use_calls_count())
             if save_dir:
                 name = slugify_goal(goal) + ".thy.partial"
-                write_theory_file(os.path.join(save_dir, name), build_theory(best[1] + ["sorry"], False, None))
+                from .isabelle_api import build_theory as _bt
+                write_theory_file(os.path.join(save_dir, name), _bt(best[1] + ["sorry"], False, None))
             return {"goal": goal, "success": False, "steps": best[1], "depth": depth,
                     "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model, "timeout": True}
 
@@ -112,7 +116,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 if trace and sledge_sugs:
                     print(color(use_color, "yellow", f"Sledgehammer finishers: {sledge_sugs}"))
             except Exception as e:
-                if trace: print(color(use_color, "yellow", f"Sledgehammer error ignored: {e}"))
+                if trace: print(color(use_color, "yellow", f" Sledgehammer error ignored: {e}"))
 
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
@@ -130,23 +134,24 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     final = steps + [fin]
                     if do_minimize:
                         try:
-                            final = minimize_proof(isabelle, session_id, final, timeout_s=minimize_timeout, trace=trace, use_color=use_color)
+                            final = minimize_proof(isabelle, session_id, final, timeout_s=MINIMIZE_TIMEOUT, trace=trace, use_color=use_color)
                         except Exception as e:
                             if trace: print(color(use_color, "yellow", f"Minimize error ignored: {e}"))
                     if do_variants:
                         try:
                             from .heuristics import suggest_common_lemmas
-                            seed_facts = suggest_common_lemmas(goal)
+                            seed_facts = suggest_common_lemmas(state_hint)
                             variant = try_structured_variants(isabelle, session_id, goal, final,
-                                                              facts_seed=seed_facts, timeout_s=variant_timeout,
-                                                              max_tries=variant_tries, trace=trace, use_color=use_color)
+                                                              facts_seed=seed_facts, timeout_s=VARIANT_TIMEOUT,
+                                                              max_tries=VARIANT_TRIES, trace=trace, use_color=use_color)
                             if variant: final = variant
                         except Exception as e:
                             if trace: print(color(use_color, "yellow", f"Variants error ignored: {e}"))
                     logger.finish(True, final, depth_reached, use_calls_count())
                     if save_dir:
                         name = slugify_goal(goal) + ".thy"
-                        write_theory_file(os.path.join(save_dir, name), build_theory(final, False, None))
+                        from .isabelle_api import build_theory as _bt
+                        write_theory_file(os.path.join(save_dir, name), _bt(final, False, None))
                     if trace: print(color(use_color, "green", "✔ PROVED"))
                     return {"goal": goal, "success": True, "steps": final, "depth": depth_reached,
                             "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
@@ -154,24 +159,23 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Expand ----
         for _, steps, state_hint, _ in beam:
             if time_left_s() <= 0: break
-            cands = propose_steps(model_list, goal, steps, state_hint,
-                      facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.2)
+            cands = propose_steps(model_list, goal, steps, state_hint, facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.2)
             if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
             if not cands: continue
             best_local: List[Tuple[int, List[str], str, Optional[int]]] = []
             for c in cands:
                 if time_left_s() <= 0: break
                 pruned = False
-                if use_qc and depth % max(1, qc_every) == 0:
+                if use_qc and depth % max(1, 1) == 0:
                     try:
-                        if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=qc_timeout):
+                        if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=2):
                             pruned = True
                             if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by quickcheck]"))
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {e}"))
-                if not pruned and use_np and depth % max(1, np_every) == 0:
+                if not pruned and use_np and depth % max(1, 2) == 0:
                     try:
-                        if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=np_timeout):
+                        if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=5):
                             pruned = True
                             if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by nitpick]"))
                     except Exception as e:
@@ -187,16 +191,15 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     cache = color(use_color, "dim", " [cache]") if cache_hit else ""
                     print(f"  step  {tag} {c}{extra} ({round(elapsed_ms)}ms){cache}")
                 if not ok: continue
-                score = n_sub if n_sub is not None else 9999                
+                score = n_sub if n_sub is not None else 9999
                 fp = state_fingerprint(hint or "")
                 if fp in visited_by_depth[depth_reached]:
-                    # already reached this state at this depth — prune
                     continue
                 visited_by_depth[depth_reached].add(fp)
-                # immediate macro continuation (two-step macro)
+                # immediate macro continuation
                 if macro_map:
-                    for cont in suggest_continuations(c, macro_map, k=1):  # try the top continuation only
-                        # Try applying the continuation immediately after 'c'
+                    from .macros import suggest_continuations
+                    for cont in suggest_continuations(c, macro_map, k=1):
                         ok2, n_sub2, hint2, cache_hit2, elapsed_ms2 = try_step_cached(isabelle, session_id, steps + [c], cont)
                         logger.log_attempt("expand_macro", steps + [c], cont, ok2, n_sub2, cache_hit2, elapsed_ms2, depth_reached)
                         if ok2:
@@ -204,9 +207,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                             if fp2 not in visited_by_depth[depth_reached]:
                                 visited_by_depth[depth_reached].add(fp2)
                                 score2 = n_sub2 if n_sub2 is not None else 9999
-                                # push the *two-step* progress as a better local candidate
                                 best_local.append((score2, steps + [c, cont], hint2, n_sub2))
-                        # Only try the top-1 continuation for speed
                         break
                 best_local.append((score, steps + [c], hint, n_sub))
             best_local.sort(key=lambda t: (t[0], len("\n".join(t[1]))))
@@ -217,7 +218,8 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             logger.finish(False, best[1], depth_reached, use_calls_count())
             if save_dir:
                 name = slugify_goal(goal) + ".thy.partial"
-                write_theory_file(os.path.join(save_dir, name), build_theory(best[1] + ["sorry"], False, None))
+                from .isabelle_api import build_theory as _bt
+                write_theory_file(os.path.join(save_dir, name), _bt(best[1] + ["sorry"], False, None))
             if trace: print(color(use_color, "red", "✖ Search exhausted at this depth"))
             return {"goal": goal, "success": False, "steps": best[1], "depth": depth_reached,
                     "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
@@ -231,7 +233,6 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             seen_fp.add(fp)
             dedup_beam.append(it)
         beam = dedup_beam[:beam_w]
-
 
     best = min(beam, key=lambda t: (t[0], len("\n".join(t[1]))))
     logger.finish(False, best[1], max_depth, use_calls_count())

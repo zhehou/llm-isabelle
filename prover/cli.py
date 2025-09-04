@@ -4,7 +4,7 @@ from .config import (MODEL, BEAM_WIDTH, MAX_DEPTH, HINT_LEMMAS, FACTS_LIMIT,
                      MINIMIZE_TIMEOUT, MINIMIZE_MAX_FACT_TRIES,
                      VARIANT_TIMEOUT, VARIANT_TRIES, MINIMIZE_DEFAULT, VARIANTS_DEFAULT)
 from .prover import prove_goal
-from .proof_io import write_theory_file, slugify_goal
+from .utils import write_theory_file, slugify_goal
 from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .macros import mine_two_step_macros
 

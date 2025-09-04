@@ -1,21 +1,36 @@
 LLM-Guided Isabelle/HOL Prover
 
-This repository implements a stepwise Isabelle/HOL theorem prover guided by Large Language Models (LLMs).
-It integrates Isabelle’s proof engine with modern LLMs (via Ollama) and optional ML rerankers.
+This repository implements a stepwise Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via Ollama) and an optional machine-learned reranker.
 
-Core features include:
+Core Features
 
 Stepwise proof search with beam search (prover/prover.py).
 
-LLM proposal generation (prover/llm.py) with fact augmentation and heuristic reranking.
+LLM proposal generation (prover/llm.py) with fact mining, heuristic scoring, and reranker integration.
 
-Optional ML reranker (prover/ranker.py) trained from proof attempt logs.
+Optional ML reranker (prover/ranker.py) trained from logs of past proof attempts.
 
-Auxiliary tools: Sledgehammer integration, lemma mining, quickcheck/nitpick prefilters, proof minimization, structured variants.
+Auxiliary tactics (prover/tactics.py):
 
-Experiment harnesses: benchmarking (prover/bench.py), regression testing (prover/regress.py), result aggregation (prover/aggregate.py).
+Quickcheck/Nitpick pre-filters
 
-Command-line interface (prover/cli.py) for proving single goals, goal files, or quick demos.
+Sledgehammer finisher suggestions
+
+Lemma/fact mining from Isabelle state
+
+Structured proof variants (induction/cases)
+
+Auto-mined macros for frequent step continuations
+
+Experiment harness (prover/experiments.py):
+
+Benchmarking (bench)
+
+Regression testing (regress)
+
+Result aggregation (aggregate)
+
+Command-line interface (prover/cli.py) for single goals, goal files, or quick demos.
 
 1. Installation
 
@@ -23,12 +38,12 @@ Prerequisites
 
 Python 3.10+
 
-Isabelle/HOL (tested with Isabelle2024+).
-Ensure the isabelle binary is on your $PATH.
+Isabelle/HOL (tested with Isabelle2024+). Ensure isabelle is on your $PATH.
 
-Ollama running locally for LLM inference.
-Install from ollama.ai
- and pull desired models, e.g.:
+Ollama running locally for LLM inference:
+https://ollama.ai
+
+Example model pulls:
 
 ollama pull qwen3-coder:30b
 
@@ -39,11 +54,9 @@ ollama pull gpt-oss:20b
 ollama pull deepseek-r1:8b
 
 
-System packages: GNU Make, g++, etc. (for Isabelle and Python libs to build).
+System packages: GNU Make, g++, etc. (needed by Isabelle and Python libs)
 
 Python dependencies
-
-From the repo root, run:
 
 python3 -m venv .venv
 
@@ -53,109 +66,112 @@ pip install -U pip
 
 pip install -r requirements.txt
 
-
 2. Configuration
 
-Configuration defaults are defined in prover/config.py
-.
+Defaults are in prover/config.py.
+Runtime overrides via environment variables:
 
-You can override runtime settings with environment variables:
+OLLAMA_MODEL – default LLM model (e.g. qwen3-coder:30b)
 
-OLLAMA_MODEL – default model if not passed on CLI (e.g. qwen3-coder:30b).
+OLLAMA_TEMP, OLLAMA_TOP_P – sampling hyperparameters
 
-OLLAMA_TEMP – sampling temperature.
+OLLAMA_TIMEOUT_S – per-request timeout
 
-OLLAMA_TOP_P – nucleus sampling probability.
+RERANKER_OFF=1 – disable reranker even if a model exists
 
-OLLAMA_TIMEOUT_S – per-request timeout.
-
-RERANKER_OFF=1 – disable reranker (even if model file exists).
+RERANKER_DIR – directory to load/save reranker model (default .models/)
 
 3. Usage
 
 3.1 Quick demo
 
-Prove the standard reverse lemma:
-
 python -m prover.cli
 
-
-This will default to proving rev (rev xs) = xs using the configured model.
+(Default goal: rev (rev xs) = xs)
 
 3.2 Prove a single goal
 
 python -m prover.cli --goal "map f (xs @ ys) = map f xs @ map f ys" --model "qwen3-coder:30b"
 
-With more options
+With more options:
 
-python -m prover.cli --goal 'rev (rev xs) = xs' --model 'qwen3-coder:30b' --beam 3 --max-depth 8 --budget-s 20 --sledge --quickcheck --nitpick --facts-limit 6 --variants
+python -m prover.cli --goal 'rev (rev xs) = xs' \
+  --model 'qwen3-coder:30b' --beam 3 --max-depth 8 --budget-s 20 \
+  --sledge --quickcheck --nitpick --facts-limit 6 --variants
 
-3.3 Prove multiple goals from a file
+3.3 Multiple goals from a file
 
-Goals should be listed in a text file (benchmarks/*.txt format). For example:
-
-python -m prover.cli --goals-file benchmarks/lists.txt --models "qwen3-coder:30b,llama3.1:8b-instruct"
+python -m prover.cli --goals-file benchmarks/lists.txt \
+  --model "qwen3-coder:30b"
 
 3.4 Benchmarking
 
-Run a full benchmark suite:
+python -m prover.experiments bench --suite lists
 
-python -m prover.bench --suite lists
-
-
-Compare sledge on/off:
-
-python -m prover.bench --suite sets --sledge both --budget-s 20
-
-
-All results are written as CSV under benchmarks/results/.
+All results are saved as CSV under benchmarks/results/.
 
 3.5 Regression testing
 
-Save a baseline on the lists suite:
+Test and save baseline
 
-python -m prover.regress --suite lists --save-baseline benchmarks/baselines/lists.json
+python -m prover.experiments regress --suite lists \
+  --save-baseline benchmarks/baselines/lists.json
 
+Test and compare baseline
 
-Later runs compare to the baseline and exit nonzero on regression:
-
-python -m prover.regress --suite lists --baseline benchmarks/baselines/lists.json
+python -m prover.experiments regress --suite lists \
+  --baseline benchmarks/baselines/lists.json
 
 3.6 Aggregating results
 
-Summarize all results under benchmarks/results/:
-
-python -m prover.aggregate
-
-
-With top-k configs only:
-
-python -m prover.aggregate --best-only --top-k 2
+python -m prover.experiments aggregate --best-only --top-k 2
 
 3.7 Training a reranker
 
-From proof attempt logs train a regression model reranker
+Supervised rerankers (sklearn / XGBoost)
 
-python -m prover.train_reranker_sklearn
+These models treat reranking as binary classification:
+given features of a candidate step (depth, subgoal count, step type, etc.), predict probability of success.
 
-python -m prover.train_reranker_xgb
+Examples:
 
-This produces a saved model under models/, automatically loaded by the runtime reranker.
+# Logistic regression
 
-From proof attempts and general logs train a reinforcement learning state-action agent that uses the reranker
+python -m prover.train_reranker --algo sklearn-logreg --target bandit
 
-python -m prover.train_qranker_xgb --mode bandit \
-  --attempts logs/attempts.log.jsonl \
-  --runs logs/runs.log.jsonl \
-  --min_rows 200
+# XGBoost classifier
+
+python -m prover.train_reranker --algo xgb-classifier --target bandit
+
+RL-style reranker (Q-estimation)
+
+This variant uses reinforcement learning signals:
+step/state pairs are labeled with discounted success values, and an XGBoost regressor is trained to approximate Q-values. At runtime, it exposes a predict_proba interface just like the classifiers.
+
+Example:
+
+python -m prover.train_reranker --algo xgb-regressor --target q \
+  --attempts logs/attempts.log.jsonl --runs logs/runs.log.jsonl
+
+How they compare:
+
+Supervised rerankers are simple and data-efficient: they quickly capture correlations like “apply simp tends to succeed at depth 1”.
+
+RL-style reranker goes further: it learns expected long-term success of a step in context, not just immediate success.
+
+Both share the same feature schema (prover/features.py) and output format (sk_reranker.joblib).
+
+You can train them separately and swap them in/out; often, start with supervised to get a stable baseline, then refine with RL training as logs accumulate. The supervised model stabilizes early exploration; the RL model injects longer-horizon guidance.
+
+At runtime, prover/ranker.py just loads whatever model is present and feeds it into the search.
 
 3.8 Integration with Isabelle/HOL Jedit GUI
 
 Keep an HTTP server running in a terminal window.
 
-python3 -m isabelle_ui.serve
+python3 -m isabelle_ui.server
 
-Linux and Mac users copy the .bsh files in 
+Linux and Mac users copy the .bsh files in
 
 llm-isabelle/isabelle_ui/
 
@@ -165,57 +181,31 @@ to (Create the folder if it doesn't exist)
 
 Windows users may need to put them under the user profile directory, e.g.,
 
-C:\Users\<YourName>\.isabelle\Isabelle2025\jedit\macros\LLM_Prover
+C:\Users<YourName>.isabelle\Isabelle2025\jedit\macros\LLM_Prover
 
 Open Isabelle/HOL jEdit GUI, and run the tools via Macros -> LLM Prover at a proof state.
 
-3.9 Training dataset generation
-
-As a curriculum, first generate easy datasets from built-in HOL library.
-
-python datasets/hol_extract_goals.py \
-  --isabelle-hol /Applications/Isabelle2025.app/src/HOL \
-  --out datasets
-
-Partition the datasets based on topic.
-
-python datasets/hol_route_by_imports.py \
-  --in datasets/hol_goals.jsonl \
-  --out datasets
-
-Run the prover per topic to collect data.
-
-python -m prover.regress --file datasets/hol_main.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
-python -m prover.regress --file datasets/hol_sets_lists.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
-EXTRA_IMPORTS="Number_Theory" \
-python -m prover.regress --file datasets/hol_number_theory.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
-EXTRA_IMPORTS="Complex_Main" \
-python -m prover.regress --file datasets/hol_complex.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
-EXTRA_IMPORTS="Groups Rings Fields Vector_Spaces" \
-python -m prover.regress --file datasets/hol_algebra.txt --beam 3 --max-depth 2 --budget-s 30 --facts-limit 6 --quickcheck --sledge --no-minimize
-
 4. Project Structure
-README.md
-benchmarks/              # Benchmark goal suites and results
-isabelle_ui/             # Isabelle/HOL jEdit integration
-planner/                 # Proof outline planner
-prover/                  # Stepwise prover
+
+benchmarks/        # Goal suites and CSV results
+
+isabelle_ui/       # Isabelle/jEdit integration macros
+
+planner/           # Proof outline planner 
+
+prover/            # Step prover package
 
 5. Notes & Tips
 
-Start Isabelle/HOL once per run; the harness scripts (bench.py, regress.py) manage this automatically.
+Isabelle server is started once per benchmark/regression run; scripts manage lifecycle automatically.
 
-Macros are automatically mined from past runs to speed up common proof patterns.
+Macros are auto-mined from past runs to accelerate recurring proof patterns.
 
-Proof minimization is on by default; disable with --no-minimize to debug raw proof search.
+Proof minimization is on by default; disable with --no-minimize when debugging.
 
-Use ensembles (--models) for better robustness across goal suites, but it requires very large RAM.
+Use ensemble models (--models) for robustness, but they consume more RAM.
 
-The reranker improves success rates modestly; retrain it regularly with new logs.
+Retrain the reranker periodically; the RL mode benefits from longer runs and richer logs.
 
 6. License
 
