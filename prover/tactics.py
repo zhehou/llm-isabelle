@@ -20,6 +20,47 @@ from typing import List, Optional, Dict, Tuple
 
 from .isabelle_api import build_theory, run_theory, finished_ok  # reuse shared API
 
+# --- Variant step templates (tiny helper) ---
+VAR_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9_']*)\b")
+
+def _likely_vars_from_state_hint(state_hint: str, k: int = 3) -> List[str]:
+    if not state_hint:
+        return []
+    toks = [t for t in VAR_TOKEN.findall(state_hint)]
+    if not toks:
+        return []
+    # Prefer common names; then short identifiers
+    prefer = ["n", "m", "k", "xs", "ys", "zs", "x", "y", "z"]
+    seen, ordered = set(), []
+    for p in prefer:
+        if p in toks and p not in seen:
+            seen.add(p); ordered.append(p)
+    for t in sorted(toks, key=lambda s: (len(s), s)):
+        if t not in seen:
+            seen.add(t); ordered.append(t)
+    return ordered[:k]
+
+def variant_step_templates(state_hint: str, limit: int = 4) -> List[str]:
+    vars_ = _likely_vars_from_state_hint(state_hint, k=3)
+    out, seen = [], set()
+    for v in vars_:
+        # Lists/sequences → try induction & cases; naturals → induction; otherwise cases.
+        if v in ("xs", "ys", "zs") or v.endswith("s"):
+            for c in (f"apply (induction {v})", f"apply (cases {v})"):
+                if c not in seen:
+                    seen.add(c); out.append(c)
+        elif v in ("n", "m", "k"):
+            c = f"apply (induction {v})"
+            if c not in seen:
+                seen.add(c); out.append(c)
+        else:
+            c = f"apply (cases {v})"
+            if c not in seen:
+                seen.add(c); out.append(c)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
 # =============================================================================
 # Prechecks (Quickcheck / Nitpick)
 # =============================================================================
@@ -155,7 +196,7 @@ def mine_facts_prioritized(isabelle, session_id: str, state_hint: str, limit: in
     toks = list(dict.fromkeys(FIND_NAME_TOKENS.findall(state_hint)))
     if not toks:
         return []
-    theory_text = _build_find_theorems_filtered(toks, ["simp", "intro", "rule"])
+    theory_text = _build_find_theorems_filtered(toks, ["simp", "intro", "rule", "elim", "dest"])
     freq: Dict[str, int] = {}
     for r in run_theory(isabelle, session_id, theory_text):
         if getattr(r, "response_type", "") != "NOTE":
@@ -265,6 +306,77 @@ def try_structured_variants(isabelle, session_id: str, goal: str,
 # =============================================================================
 # Macros (continuation suggestions) — moved from macros.py
 # =============================================================================
+import os
+import json
+from collections import Counter, defaultdict
+from typing import Iterable
+
+# Environment-driven defaults
+MACRO_MIN_COUNT = int(os.environ.get("MACRO_MIN_COUNT", "2"))
+MACRO_MAX_PER_HEAD = int(os.environ.get("MACRO_MAX_PER_HEAD", "5"))
+
+from .config import RUNS_LOG
+
+ContinuationMap = Dict[str, List[Tuple[str, int]]]
+
+def _iter_success_runs(paths: Iterable[str]) -> Iterable[List[str]]:
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("success") and isinstance(rec.get("final_steps"), list):
+                        yield rec["final_steps"]
+                    elif rec.get("success") and isinstance(rec.get("steps"), list):
+                        yield rec["steps"]
+        except FileNotFoundError:
+            continue
+
+def mine_two_step_macros(
+    paths: Optional[List[str]] = None,
+    min_count: Optional[int] = None,
+    max_per_head: Optional[int] = None,
+) -> ContinuationMap:
+    """
+    Build a mapping: first_step -> list of (second_step, count), sorted by freq.
+
+    Args:
+      paths         : runs.jsonl paths (defaults to [RUNS_LOG])
+      min_count     : minimum frequency to keep a pair (env MACRO_MIN_COUNT if None)
+      max_per_head  : cap continuations per head (env MACRO_MAX_PER_HEAD if None)
+
+    Returns:
+      Dict[str, List[Tuple[str, int]]]
+    """
+    paths = paths or [RUNS_LOG]
+    min_count = MACRO_MIN_COUNT if min_count is None else int(min_count)
+    max_per_head = MACRO_MAX_PER_HEAD if max_per_head is None else int(max_per_head)
+
+    pair_freq: Dict[Tuple[str, str], int] = Counter()
+    for steps in _iter_success_runs(paths):
+        # Ignore lemma line (index 0) and finisher (last)
+        if not steps or len(steps) < 3:
+            continue
+        mid = [s for s in steps[1:-1] if s.strip().startswith("apply")]
+        for a, b in zip(mid, mid[1:]):
+            pair_freq[(a, b)] += 1
+
+    conts: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
+    for (a, b), c in pair_freq.items():
+        if c >= min_count:
+            conts[a].append((b, c))
+
+    # sort and truncate per head
+    for a in list(conts.keys()):
+        conts[a].sort(key=lambda t: (-t[1], len(t[0]), t[0]))
+        conts[a] = conts[a][:max_per_head]
+    return dict(conts)
+
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().split())
 

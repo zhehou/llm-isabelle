@@ -27,6 +27,7 @@ def _header(imports=None):
 FOOTER = "end\n"
 
 _use_calls = 0
+_use_timeouts = 0
 
 def _write_tmp_theory(theory_text: str) -> Tuple[str, str]:
     tmpdir = tempfile.TemporaryDirectory()
@@ -98,6 +99,8 @@ def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResp
                 try:
                     return fut.result(timeout=timeout_s)
                 except FuturesTimeout:
+                    global _use_timeouts
+                    _use_timeouts += 1
                     return []
 
         # No timeout requested → direct call
@@ -245,3 +248,6 @@ def last_print_state_block(resps: List[IsabelleResponse]) -> str:
 
 def use_calls_count() -> int:
     return _use_calls
+
+def use_timeouts_count() -> int:
+    return int(_use_timeouts)

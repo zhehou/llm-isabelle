@@ -135,7 +135,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Unified reranker trainer")
     ap.add_argument("--attempts", nargs="*", default=None, help="attempts log paths")
     ap.add_argument("--runs", nargs="*", default=None, help="runs log paths")
-    ap.add_argument("--out", default=None, help="output model path (defaults to RERANKER_DIR/sk_reranker.joblib)")
+    ap.add_argument("--out", default=None, help="output model path (default: timestamped under RERANKER_DIR)")
     ap.add_argument("--target", choices=["bandit","q"], default="bandit")
     ap.add_argument("--algo", choices=["xgb-classifier","sklearn-logreg","xgb-regressor"], default="xgb-classifier")
     ap.add_argument("--min_rows", type=int, default=200)
@@ -163,7 +163,12 @@ def main(argv=None) -> int:
         return 1
 
     out_dir = Path(os.environ.get("RERANKER_DIR", str(config.RERANKER_DIR))); out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(args.out) if args.out else (out_dir / "sk_reranker.joblib")
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        import time
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        out_path = out_dir / f"reranker-{stamp}-{args.algo}-{args.target}.joblib"
 
     if args.algo == "xgb-classifier":
         try:
@@ -197,6 +202,32 @@ def main(argv=None) -> int:
             objective="reg:squarederror", n_jobs=4, random_state=42,
         )
         reg.fit(X, y); dump(_RLQXGBWrapper(reg), out_path); print(f"[ok] RL-XGB regressor on {n} rows → {out_path}")
+    
+    # --- Update 'latest.joblib' pointer in out_dir ---
+    latest = out_dir / "latest.joblib"
+    try:
+        if latest.exists() or latest.is_symlink():
+            latest.unlink()
+        # Prefer a relative symlink (same dir) on POSIX
+        try:
+            latest.symlink_to(out_path.name)
+        except Exception:
+            # Fall back to a plain file copy (Windows/no symlink perms)
+            import shutil
+            shutil.copyfile(out_path, latest)
+    except Exception:
+        pass
+    # Optional manifest for auditing
+    try:
+        (out_dir / "latest.json").write_text(
+            json.dumps(
+                {"path": out_path.name, "algo": args.algo, "target": args.target, "rows": n},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     return 0
 

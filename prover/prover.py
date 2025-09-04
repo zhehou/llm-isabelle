@@ -1,6 +1,6 @@
 # prover/prover.py
-from collections import defaultdict
-import time, json, re, os
+from collections import defaultdict, OrderedDict
+import time, json, re, os, hashlib
 from typing import List, Tuple, Optional, Dict, Any
 
 from .utils import color, parse_subgoals, state_fingerprint, RunLogger, slugify_goal, write_theory_file
@@ -18,12 +18,41 @@ from .tactics import (
     sledgehammer_finishers,
     precheck_quickcheck_refutes, precheck_nitpick_refutes,
     try_structured_variants, suggest_continuations,
+    variant_step_templates,
 )
 
 from .minimize import minimize_proof
-from .ranker import SklearnReranker
+from .features import flags_from_goal
+from .ranker import Reranker
 
 _result_cache: Dict[Tuple[Tuple[str, ...], str], Tuple[bool, Optional[int], str]] = {}
+
+_GLOBAL_CACHE_MAX = int(os.getenv("GLOBAL_STEP_CACHE_MAX", "8192"))
+_global_result_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+
+_GOAL_LINE = re.compile(r'lemma\s+"(.*)"')
+
+def _global_cache_key(steps: List[str], cand: str) -> tuple:
+    lemma_line = steps[0] if steps else ""
+    m = _GOAL_LINE.search(lemma_line)
+    goal_s = m.group(1) if m else lemma_line
+    prefix = "\n".join(steps[:-1]) if len(steps) > 1 else ""
+    g = hashlib.sha1(goal_s.encode("utf-8")).hexdigest()[:12]
+    p = hashlib.sha1(prefix.encode("utf-8")).hexdigest()[:12]
+    return (g, p, cand)
+
+def _global_cache_get(k: tuple):
+    v = _global_result_cache.get(k)
+    if v is not None:
+        _global_result_cache.move_to_end(k)
+    return v
+
+def _global_cache_put(k: tuple, v: tuple):
+    _global_result_cache[k] = v
+    _global_result_cache.move_to_end(k)
+    if len(_global_result_cache) > _GLOBAL_CACHE_MAX:
+        _global_result_cache.popitem(last=False)
+
 
 def try_step_raw(isabelle, session_id: str, steps: List[str], cand: str) -> Tuple[bool, Optional[int], str, float]:
     t0 = time.monotonic()
@@ -35,13 +64,27 @@ def try_step_raw(isabelle, session_id: str, steps: List[str], cand: str) -> Tupl
     return ok, n, hint, (time.monotonic() - t0) * 1000
 
 def try_step_cached(isabelle, session_id: str, steps: List[str], cand: str) -> Tuple[bool, Optional[int], str, bool, float]:
+    # 1) Global LRU across runs
+    gkey = _global_cache_key(steps, cand)
+    gval = _global_cache_get(gkey)
+    if gval is not None:
+        ok, n_sub, hint = gval
+        return ok, n_sub, hint, True, 0.0
+
+    # 2) Per-run memo
     key = (tuple(steps), cand)
     if key in _result_cache:
         ok, n_sub, hint = _result_cache[key]
+        # also refresh global LRU
+        _global_cache_put(gkey, (ok, n_sub, hint))
         return ok, n_sub, hint, True, 0.0
+
+    # 3) Fresh eval
     ok, n_sub, hint, elapsed_ms = try_step_raw(isabelle, session_id, steps, cand)
     _result_cache[key] = (ok, n_sub, hint)
+    _global_cache_put(gkey, (ok, n_sub, hint))
     return ok, n_sub, hint, False, elapsed_ms
+
 
 def try_finish(isabelle, session_id: str, steps: List[str], fin: str) -> Tuple[bool, float]:
     t0 = time.monotonic()
@@ -63,8 +106,8 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                enable_reranker: bool = True) -> Dict[str, Any]:
 
     reranker = None
-    if enable_reranker and os.environ.get("RERANKER_DISABLE", "0") not in ("1", "true", "True"):
-        reranker = SklearnReranker()
+    if enable_reranker and os.environ.get("RERANKER_OFF", "0") not in ("1", "true", "True"):
+        reranker = Reranker()
 
     global _result_cache
     _result_cache = {}
@@ -79,6 +122,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
     seed_steps = [f'lemma "{goal}"']
     beam: List[Tuple[int, List[str], str, Optional[int]]] = [(9999, seed_steps, "", None)]
     visited_by_depth = defaultdict(set)  # depth -> set(state_fingerprint)
+
+    last_best_n: Optional[int] = None
+    stagnant_depths = 0
 
     if trace:
         print(color(use_color, "bold", f"\n▶ Goal: {goal}"))
@@ -97,6 +143,16 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
 
         depth_reached = depth + 1
         new_beam: List[Tuple[int, List[str], str, Optional[int]]] = []
+
+        valid_ns = [n for _, _, _, n in beam if isinstance(n, int)]
+        best_n_now = min(valid_ns) if valid_ns else None
+        if best_n_now is not None:
+            if last_best_n is None or best_n_now < last_best_n:
+                stagnant_depths = 0
+            else:
+                stagnant_depths += 1
+            last_best_n = best_n_now
+        variant_burst = do_variants and (stagnant_depths >= 2)
 
         # Facts from top-of-beam
         facts_for_depth: List[str] = []
@@ -159,21 +215,31 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Expand ----
         for _, steps, state_hint, _ in beam:
             if time_left_s() <= 0: break
-            cands = propose_steps(model_list, goal, steps, state_hint, facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.2)
+            extra_cands = variant_step_templates(state_hint) if variant_burst else []
+            cands = extra_cands + propose_steps(model_list, goal, steps, state_hint, facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.5)
+            seen_c, dedup_c = set(), []
+            for c in cands:
+                if c not in seen_c:
+                    seen_c.add(c); dedup_c.append(c)
+            cands = dedup_c
             if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
             if not cands: continue
             best_local: List[Tuple[int, List[str], str, Optional[int]]] = []
+            _flags = flags_from_goal(goal, state_hint or "")
+            _should_boolean_precheck = bool(_flags.get("has_q", 0) or _flags.get("is_bool", 0))
             for c in cands:
                 if time_left_s() <= 0: break
                 pruned = False
-                if use_qc and depth % max(1, 1) == 0:
+                # Gate QC on boolean-ish shape (quantifiers/booleans in goal or state)
+                if use_qc and _should_boolean_precheck and depth % max(1, 1) == 0:
                     try:
                         if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=2):
                             pruned = True
                             if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by quickcheck]"))
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {e}"))
-                if not pruned and use_np and depth % max(1, 2) == 0:
+                # Gate Nitpick similarly (heavier than QC)
+                if not pruned and use_np and _should_boolean_precheck and depth % max(1, 2) == 0:
                     try:
                         if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=5):
                             pruned = True
@@ -198,7 +264,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 visited_by_depth[depth_reached].add(fp)
                 # immediate macro continuation
                 if macro_map:
-                    from .macros import suggest_continuations
+                    from .tactics import suggest_continuations
                     for cont in suggest_continuations(c, macro_map, k=1):
                         ok2, n_sub2, hint2, cache_hit2, elapsed_ms2 = try_step_cached(isabelle, session_id, steps + [c], cont)
                         logger.log_attempt("expand_macro", steps + [c], cont, ok2, n_sub2, cache_hit2, elapsed_ms2, depth_reached)

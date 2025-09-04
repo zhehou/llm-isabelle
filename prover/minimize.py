@@ -13,7 +13,7 @@ def _check_finish(isabelle, session_id: str, lemma_line: str, mid_steps: List[st
     return ok
 
 def _try_one_liners(isabelle, session_id: str, lemma_line: str) -> str | None:
-    for fin in ["by simp", "by auto", "by blast", "by (simp)", "by (auto)"]:
+    for fin in ["by simp", "by auto", "by clarsimp", "by arith", "by presburger", "by fastforce", "by blast", "by (simp)", "by (auto)"]:
         if _check_finish(isabelle, session_id, lemma_line, [], fin):
             return fin
     return None

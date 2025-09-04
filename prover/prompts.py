@@ -23,6 +23,7 @@ apply (simp add: Let_def)
 apply (simp split: if_splits option.splits prod.splits sum.splits list.splits)
 apply auto
 apply (auto simp add: algebra_simps)
+apply (simp only: append_assoc)
 apply arith
 apply (clarsimp)
 apply (cases xs)

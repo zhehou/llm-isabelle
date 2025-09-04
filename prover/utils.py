@@ -148,6 +148,11 @@ class RunLogger:
         self.depth_reached = int(depth_reached or 0)
         self.use_calls = int(use_calls or 0)
         self.elapsed_s = time.time() - self.start_ts
+        try:
+            from .isabelle_api import use_timeouts_count as _utc
+            _timeouts = int(_utc())
+        except Exception:
+            _timeouts = 0
         write_jsonl(RUNS_LOG, {
             "run_id": self.run_id,
             "ts": time.time(),

@@ -1,7 +1,7 @@
 # prover/llm.py
 import requests
 from typing import List
-from .config import OLLAMA_HOST, TEMP, TOP_P, TIMEOUT_S, NUM_CANDIDATES
+from .config import OLLAMA_HOST, TEMP, TOP_P, TIMEOUT_S, NUM_CANDIDATES, OLLAMA_NUM_PREDICT
 from .prompts import SYSTEM_STEPS, SYSTEM_FINISH, USER_TEMPLATE, parse_ollama_lines
 
 def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *, temperature: float | None = None) -> str:
@@ -9,7 +9,10 @@ def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *, temper
     payload = {
         "model": model,
         "prompt": f"<<SYS>>\n{system_prompt}\n<</SYS>>\n\n{user_prompt}",
-        "temperature": float(TEMP), "top_p": float(TOP_P), "stream": False,
+        "temperature": float(temperature if temperature is not None else TEMP),
+        "top_p": float(TOP_P),
+        "num_predict": int(OLLAMA_NUM_PREDICT),
+        "stream": False,
     }
     try:
         resp = requests.post(url, json=payload, timeout=int(TIMEOUT_S))
@@ -46,7 +49,7 @@ def propose_steps(models: List[str], goal: str, steps_so_far: List[str], state_h
         all_lists.append(cands)
     from .heuristics import augment_with_facts_for_steps, rank_candidates
     merged = merge_candidates(all_lists, NUM_CANDIDATES) or \
-             ["apply (induction xs)", "apply (cases xs)", "apply simp", "apply auto"]
+             ["apply simp", "apply auto", "apply clarsimp", "apply (induction xs)", "apply (cases xs)"]
     if facts:
         merged = augment_with_facts_for_steps(merged, facts)
     return rank_candidates(merged, goal, state_hint, facts, reranker=reranker, depth=depth)
@@ -66,7 +69,7 @@ def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], sta
         base = parse_ollama_lines(raw, ["done", "by "], max(3, min(NUM_CANDIDATES, 8)))
         base_lists.append(base)
     base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or \
-                  ["done", "by simp", "by auto", "by blast", "by (metis)"]
+                  ["done", "by simp", "by auto", "by clarsimp", "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"]
     from .heuristics import suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers
     static_hints = suggest_common_lemmas(state_hint)
     dyn_hints = mined_lemmas[:max(0, hint_lemmas_limit)]
@@ -77,5 +80,5 @@ def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], sta
         if x not in seen:
             seen.add(x); combined.append(x)
         if len(combined) >= 8: break
-    order = ["done", "by simp", "by auto", "by blast", "by (simp", "by (auto", "by (metis"]
+    order = ["done", "by simp", "by clarsimp", "by auto", "by fastforce", "by blast", "by arith", "by presburger", "by (simp", "by (auto", "by (metis", "by (meson"]
     return sorted(combined, key=lambda cmd: next((i for i,k in enumerate(order) if cmd.startswith(k)), len(order)))

@@ -135,11 +135,11 @@ given features of a candidate step (depth, subgoal count, step type, etc.), pred
 
 Examples:
 
-# Logistic regression
+Logistic regression
 
 python -m prover.train_reranker --algo sklearn-logreg --target bandit
 
-# XGBoost classifier
+XGBoost classifier
 
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 

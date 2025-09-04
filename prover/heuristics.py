@@ -73,7 +73,9 @@ def rank_candidates(cands: List[str], goal: str, state_hint: str,
     scored = []
     for i, c in enumerate(cands):
         s = _heuristic_score(c, goal, state_hint, facts)
-        # blend sklearn score (higher prob = better; our sort is ascending)
+        # gentle length penalty to prefer shorter, cheaper steps
+        s += 0.003 * max(0, len(c) - 24)
+        # blend reranker score (higher prob = better; our sort is ascending)
         if reranker and getattr(reranker, "available", lambda: False)():
             feats = live_features_for(c, goal, state_hint, depth)
             try:

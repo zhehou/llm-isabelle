@@ -1,5 +1,5 @@
 # prover/ranker.py
-import os
+import os, glob
 from pathlib import Path
 from typing import List, Optional, Any
 from joblib import load
@@ -10,9 +10,10 @@ except Exception:
     CFG_RERANKER_DIR = Path(os.environ.get("RERANKER_DIR", ".models"))
     CFG_RERANKER_OFF = os.environ.get("RERANKER_OFF", "0").lower() in ("1", "true", "yes", "on")
 
-MODEL_BASENAME = "sk_reranker.joblib"
+MODEL_BASENAME = "reranker.joblib"
+LATEST_POINTER = "latest.joblib"
 
-class SklearnReranker:
+class Reranker:
     """
     Joblib-saved model wrapper (classifier or regressor-wrapper).
 
@@ -27,14 +28,31 @@ class SklearnReranker:
             self._try_load()
 
     def _try_load(self):
-        p = Path(CFG_RERANKER_DIR) / MODEL_BASENAME
+        dirp = Path(CFG_RERANKER_DIR)
+        candidates = []
+        # 1) explicit "latest" pointer (file/symlink/copy)
+        p_latest = dirp / LATEST_POINTER
+        if p_latest.exists():
+            candidates.append(p_latest)
+        # 2) newest *.joblib artifact in directory
         try:
-            if p.exists():
-                self.model = load(p)
-            else:
-                self.model = None
+            joblibs = sorted((Path(p) for p in glob.glob(str(dirp / "*.joblib"))),
+                             key=lambda p: p.stat().st_mtime, reverse=True)
+            candidates.extend(joblibs)
         except Exception:
-            self.model = None
+            pass
+        # 3) stable basenames for back-compat (new then legacy)
+        candidates.append(dirp / MODEL_BASENAME)          # "reranker.joblib"
+        candidates.append(dirp / "sk_reranker.joblib")    # legacy name
+
+        self.model = None
+        for p in candidates:
+            try:
+                if p.exists():
+                    self.model = load(p)
+                    break
+            except Exception:
+                continue
 
     def available(self) -> bool:
         return (not self._disabled) and (self.model is not None)
