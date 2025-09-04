@@ -93,7 +93,7 @@ def _make_bandit(attempts: List[str], runs: Optional[List[str]]) -> Tuple[List[L
     X: List[List[float]] = []; y: List[int] = []
     succ = _runs_success([Path(p) for p in (runs or [])]) if runs else {}
     for rec in _iter_jsonl([Path(p) for p in attempts]):
-        if rec.get("type") != "expand": continue
+        if rec.get("type") not in ("expand","expand_macro"): continue
         rid = rec.get("run_id")
         label = succ.get(rid, 1 if rec.get("ok") else 0)
         X.append(_row_from_attempt(rec)); y.append(int(label))
@@ -103,10 +103,19 @@ def _make_q(attempts: List[str], runs: Optional[List[str]], discount: float = 0.
     X: List[List[float]] = []; q: List[float] = []
     succ = _runs_success([Path(p) for p in (runs or [])]) if runs else {}
     for rec in _iter_jsonl([Path(p) for p in attempts]):
-        if rec.get("type") != "expand": continue
+        if rec.get("type") not in ("expand","expand_macro"): continue
         rid = rec.get("run_id")
-        success = succ.get(rid, 1 if rec.get("ok") else 0)
-        X.append(_row_from_attempt(rec)); q.append(float(discount) * float(success))
+        success = float(succ.get(rid, 1 if rec.get("ok") else 0))
+        # dense shaping: progress per millisecond
+        sb = rec.get("subgoals_before")
+        sa = rec.get("n_subgoals")
+        el = float(rec.get("elapsed_ms", 0.0) or 0.0)
+        dsub = 0.0
+        if isinstance(sb, int) and isinstance(sa, int):
+            dsub = max(0.0, float(sb - sa))
+        rate = dsub / max(1.0, el)  # clamp time to avoid div-by-zero
+        target = 0.5 * discount * success + 0.5 * min(1.0, rate)
+        X.append(_row_from_attempt(rec)); q.append(target)
     return X, q
 
 # ---------- wrapper for regressor so ranker can call predict_proba ----------

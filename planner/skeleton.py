@@ -21,8 +21,7 @@ SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
 TASK
 Given a lemma statement, produce a CLEAN Isar proof OUTLINE that exposes the decomposition strategy
 (e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof` with intermediate `have`/`show` steps).
-That is, your aim is to analyse the problem (proof goal) and break it into smaller problems (sub-goals) that are easier to solve.
-Leave nontrivial reasoning steps as `sorry` so that a lower-level prover can fill them later.
+That is, your aim is to analyse the problem (proof goal) and break it into smaller problems (sub-goals) that are easier to solve. Think about how you can prove it in English, and then translate the proof outline into Isar syntax. Leave nontrivial reasoning steps as `sorry` so that a lower-level prover can fill them later.
 
 OUTPUT REQUIREMENTS
 - Output ONLY Isabelle text (no explanations, no code fences).

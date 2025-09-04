@@ -153,6 +153,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 stagnant_depths += 1
             last_best_n = best_n_now
         variant_burst = do_variants and (stagnant_depths >= 2)
+        # temperature schedule based on stagnation
+        steps_temp  = min(0.9, 0.5 + 0.10 * stagnant_depths)
+        finish_temp = min(0.6, 0.2 + 0.05 * stagnant_depths)        
 
         # Facts from top-of-beam
         facts_for_depth: List[str] = []
@@ -177,12 +180,14 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
             mined = mine_lemmas_from_state(isabelle, session_id, state_hint, max_lemmas=hint_lemmas) if state_hint else []
-            finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas, facts=facts_for_depth, temp=0.2)
+            finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas,
+                                              facts=facts_for_depth, temp=finish_temp, reranker=reranker)
             finishers = (sledge_sugs + finishers_llm) if (j == 0 and sledge_sugs) else finishers_llm
             for fin in finishers:
                 if time_left_s() <= 0: break
                 ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin)
-                logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached)
+                origin = "sledge" if (j == 0 and sledge_sugs and fin in sledge_sugs) else "llm"
+                logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached, extra={"origin": origin})
                 if trace:
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
                     print(f"  finish {tag} {fin}  ({round(elapsed_ms)}ms)")
@@ -213,10 +218,12 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                             "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
 
         # ---- Expand ----
-        for _, steps, state_hint, _ in beam:
+        for _, steps, state_hint, prev_n in beam:
             if time_left_s() <= 0: break
             extra_cands = variant_step_templates(state_hint) if variant_burst else []
-            cands = extra_cands + propose_steps(model_list, goal, steps, state_hint, facts=facts_for_depth, reranker=reranker, depth=depth, temp=0.5)
+            cands = extra_cands + propose_steps(model_list, goal, steps, state_hint,
+                                               facts=facts_for_depth, reranker=reranker,
+                                               depth=depth, temp=steps_temp)
             seen_c, dedup_c = set(), []
             for c in cands:
                 if c not in seen_c:
@@ -224,10 +231,15 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             cands = dedup_c
             if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
             if not cands: continue
+            # Stable group id for this proposal batch (per run/depth/prefix/state)
+            import hashlib
+            state_fp_before = state_fingerprint(state_hint or "")
+            pid_seed = f"{logger.run_id}|d={depth_reached}|{state_fp_before}|{len(steps)}|{steps[-2:] if steps else ''}"
+            proposal_id = hashlib.sha1(pid_seed.encode('utf-8')).hexdigest()[:12]
             best_local: List[Tuple[int, List[str], str, Optional[int]]] = []
             _flags = flags_from_goal(goal, state_hint or "")
             _should_boolean_precheck = bool(_flags.get("has_q", 0) or _flags.get("is_bool", 0))
-            for c in cands:
+            for k, c in enumerate(cands):
                 if time_left_s() <= 0: break
                 pruned = False
                 # Gate QC on boolean-ish shape (quantifiers/booleans in goal or state)
@@ -247,10 +259,26 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  nitpick error ignored: {e}"))
                 if pruned:
-                    logger.log_attempt("expand", steps, c, False, None, False, 0.0, depth_reached)
+                    logger.log_attempt(
+                        "expand", steps, c, False, None, False, 0.0, depth_reached,
+                        subgoals_before=prev_n,
+                        extra={"proposal_id": proposal_id, "proposal_k": int(k),
+                               "state_fp_before": state_fp_before,
+                               "origin": ("variant" if c in extra_cands else "llm")}
+                    )
                     continue
                 ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(isabelle, session_id, steps, c)
-                logger.log_attempt("expand", steps, c, ok, n_sub, cache_hit, elapsed_ms, depth_reached)
+                logger.log_attempt(
+                    "expand", steps, c, ok, n_sub, cache_hit, elapsed_ms, depth_reached,
+                    subgoals_before=prev_n,
+                    extra={
+                        "proposal_id": proposal_id,
+                        "proposal_k": int(k),
+                        "state_fp_before": state_fp_before,
+                        "state_fp_after": state_fingerprint(hint or "") if ok else None,
+                        "origin": ("variant" if c in extra_cands else "llm"),
+                    }
+                )
                 if trace:
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
                     extra = f" n_sub={n_sub}" if n_sub is not None else ""
@@ -267,7 +295,16 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     from .tactics import suggest_continuations
                     for cont in suggest_continuations(c, macro_map, k=1):
                         ok2, n_sub2, hint2, cache_hit2, elapsed_ms2 = try_step_cached(isabelle, session_id, steps + [c], cont)
-                        logger.log_attempt("expand_macro", steps + [c], cont, ok2, n_sub2, cache_hit2, elapsed_ms2, depth_reached)
+                        logger.log_attempt(
+                            "expand_macro", steps + [c], cont, ok2, n_sub2, cache_hit2, elapsed_ms2, depth_reached,
+                            subgoals_before=n_sub,
+                            extra={
+                                "proposal_id": proposal_id,
+                                "proposal_k": int(k),
+                                "state_fp_before": state_fingerprint(hint or ""),
+                                "state_fp_after": state_fingerprint(hint2 or "") if ok2 else None
+                            }
+                        )
                         if ok2:
                             fp2 = state_fingerprint(hint2 or "")
                             if fp2 not in visited_by_depth[depth_reached]:

@@ -332,7 +332,10 @@ def cmd_regress(args: argparse.Namespace) -> None:
             "quickcheck": args.quickcheck, "nitpick": args.nitpick,
             "facts_limit": args.facts_limit, "minimize": (not args.no_minimize),
             "variants": args.variants, "model": args.model, "models": models_list,
-            "shuffle_seed": args.shuffle_seed,
+            # keep the seed we actually used in the stored config row
+            "shuffle_seed": (args.shuffle_seed
+                             if args.shuffle_seed is not None
+                             else (args.seed if args.shuffle else -1)),
         }
         model_tag = ("ensemble_" + "_".join(models_list)) if models_list else (args.model or os.environ.get("OLLAMA_MODEL", "env_default"))
         config_name = f"beam{args.beam}_d{args.max_depth}_t{args.budget_s}_rron_sdg{'on' if args.sledge else 'off'}__model_{model_tag}"
@@ -340,9 +343,16 @@ def cmd_regress(args: argparse.Namespace) -> None:
         rows: List[OneGoal] = []
         import random
         gs = list(goals)
-        if args.shuffle_seed != -1:
-            rnd = random.Random(args.shuffle_seed or int(time.time()))
-            rnd.shuffle(gs)
+        # Back-compat path: if legacy --shuffle-seed was given, use it
+        if args.shuffle_seed is not None:
+            if args.shuffle_seed != -1:
+                rnd = random.Random(args.shuffle_seed or int(time.time()))
+                rnd.shuffle(gs)
+        else:
+            # New path: --shuffle / --seed
+            if args.shuffle:
+                rnd = random.Random(args.seed or int(time.time()))
+                rnd.shuffle(gs)
 
         for i, g in enumerate(gs, 1):
             print(f"[{suite_name}] [{i}/{len(gs)}] {g}")
@@ -556,7 +566,10 @@ def main():
     pr.add_argument("--sledge", action="store_true")
     pr.add_argument("--model", type=str, default=None)
     pr.add_argument("--models", type=str, default=None)
-    pr.add_argument("--shuffle-seed", type=int, default=0)
+    pr.add_argument("--shuffle", action="store_true")
+    pr.add_argument("--seed", type=int, default=0)
+    # Back-compat: old flag (if provided, it overrides --shuffle/--seed)
+    pr.add_argument("--shuffle-seed", type=int, default=None)
     pr.add_argument("--baseline", type=str)
     pr.add_argument("--save-baseline", type=str)
     pr.add_argument("--out", type=str, default=None)

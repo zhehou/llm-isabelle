@@ -66,7 +66,7 @@ def propose_steps(models: List[str], goal: str, steps_so_far: List[str], state_h
 
 def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], state_hint: str,
                       mined_lemmas: List[str], hint_lemmas_limit: int,
-                      facts: List[str] | None = None, *, temp: float | None = None) -> List[str]:
+                      facts: List[str] | None = None, *, temp: float | None = None, reranker=None) -> List[str]:
     user = USER_TEMPLATE.format(
         goal=goal,
         steps="\n".join(steps_so_far) or "(none)",
@@ -91,4 +91,12 @@ def propose_finishers(models: List[str], goal: str, steps_so_far: List[str], sta
             seen.add(x); combined.append(x)
         if len(combined) >= 8: break
     order = ["done", "by simp", "by clarsimp", "by auto", "by fastforce", "by blast", "by arith", "by presburger", "by (simp", "by (auto", "by (metis", "by (meson"]
-    return sorted(combined, key=lambda cmd: next((i for i,k in enumerate(order) if cmd.startswith(k)), len(order)))
+    ranked = sorted(combined, key=lambda cmd: next((i for i,k in enumerate(order) if cmd.startswith(k)), len(order)))
+    if reranker and getattr(reranker, "available", lambda: False)():
+        from .heuristics import live_features_for
+        def rscore(cmd: str) -> float:
+            try: return float(reranker.score(live_features_for(cmd, goal, state_hint, depth=0)))
+            except Exception: return 0.5
+        # sort by model score desc, keep heuristic order as stable tiebreaker
+        ranked = sorted(ranked, key=lambda c: (-rscore(c), ranked.index(c)))
+    return ranked

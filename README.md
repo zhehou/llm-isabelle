@@ -66,6 +66,8 @@ pip install -U pip
 
 pip install -r requirements.txt
 
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 2. Configuration
 
 Defaults are in prover/config.py.
@@ -153,17 +155,36 @@ Example:
 python -m prover.train_reranker --algo xgb-regressor --target q \
   --attempts logs/attempts.log.jsonl --runs logs/runs.log.jsonl
 
-How they compare:
+To train a heavier Deep RL model, run
 
-Supervised rerankers are simple and data-efficient: they quickly capture correlations like “apply simp tends to succeed at depth 1”.
+python -m prover.train_deeprl --algo awr \
+  --attempts logs/attempts.log.jsonl \
+  --runs     logs/runs.log.jsonl \
+  --epochs 8 --batch 1024 --lr 1e-3 --val_split 0.1 --tau 0.6
 
-RL-style reranker goes further: it learns expected long-term success of a step in context, not just immediate success.
+τ (tau): start 0.5–0.8. Lower = peakier weights (trust top actions more); higher = smoother.
 
-Both share the same feature schema (prover/features.py) and output format (sk_reranker.joblib).
+Batch: 512–2048 is fine on CPU.
 
-You can train them separately and swap them in/out; often, start with supervised to get a stable baseline, then refine with RL training as logs accumulate. The supervised model stabilizes early exploration; the RL model injects longer-horizon guidance.
+Val split: keep 0.1 so you can spot overfit; stop if val loss turns up.
 
-At runtime, prover/ranker.py just loads whatever model is present and feeds it into the search.
+At runtime, prover/ranker.py just loads whatever model is present and feeds it into the search. Prefers Deep RL model over sklearn and xgboost models.
+
+Advanced training:
+
+3.7.1 AWR++ (with teacher & listwise):
+
+Train teacher first
+
+python -m prover.train_reranker --algo xgb-ranker
+
+Then train AWR++ using knowledge distilled from teacher
+
+python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3
+
+3.7.2 DQN (safe, offline, uses your logged next states)
+
+python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 
 3.8 Integration with Isabelle/HOL Jedit GUI
 

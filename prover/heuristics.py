@@ -2,6 +2,9 @@
 
 # add at top of prover/heuristics.py
 from .features import STEP_TYPES
+import os
+_RR_W = float(os.environ.get("RERANKER_WEIGHT", "0.5"))
+_SAFE_TOPM = int(os.environ.get("RERANKER_SAFE_TOPM", "0"))  # 0 = no gating
 
 def live_features_for(cmd: str, goal: str, state_hint: str,
                       depth: int) -> list[float]:
@@ -76,23 +79,38 @@ def _heuristic_score(cmd: str, goal: str, state: str, facts: Optional[List[str]]
 
 def rank_candidates(cands: List[str], goal: str, state_hint: str,
                     facts: Optional[List[str]] = None,
-                    reranker=None, depth:int=0) -> List[str]:
-    scored = []
+                    reranker=None, depth: int = 0) -> List[str]:
+    # 1) Heuristic-only pass (including your gentle length penalty)
+    base = []
     for i, c in enumerate(cands):
         s = _heuristic_score(c, goal, state_hint, facts)
-        # gentle length penalty to prefer shorter, cheaper steps
         s += 0.003 * max(0, len(c) - 24)
-        # blend reranker score (higher prob = better; our sort is ascending)
-        if reranker and getattr(reranker, "available", lambda: False)():
-            feats = live_features_for(c, goal, state_hint, depth)
+        base.append((s, len(c), i, c))
+
+    # 2) If no reranker, return pure heuristic order
+    if not (reranker and getattr(reranker, "available", lambda: False)()):
+        base.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [c for *_, c in base]
+
+    # 3) Safe top-M gating: apply ML only to the top M by heuristic score
+    base.sort(key=lambda t: (t[0], t[1], t[2]))
+    M = _SAFE_TOPM if _SAFE_TOPM > 0 else len(base)
+
+    rescored = []
+    for rank, (s, L, i, c) in enumerate(base):
+        s_adj = s
+        if rank < M:
             try:
-                p = reranker.score(feats)  # 0..1
-                s += -0.5 * p              # subtract to prefer higher p
+                feats = live_features_for(c, goal, state_hint, depth)
+                p = float(reranker.score(feats))  # 0..1
+                s_adj += -_RR_W * p               # subtract so higher p ranks earlier
             except Exception:
                 pass
-        scored.append((s, len(c), i, c))
-    scored.sort(key=lambda t: (t[0], t[1], t[2]))
-    return [c for *_, c in scored]
+        rescored.append((s_adj, L, i, c))
+
+    rescored.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [c for *_, c in rescored]
+
 
 def augment_with_facts_for_steps(cands: List[str], facts: List[str]) -> List[str]:
     if not facts: return cands
