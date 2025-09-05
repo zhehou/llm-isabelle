@@ -1,36 +1,41 @@
-# prover/httpd.py
+# isabelle_ui/server.py
 from __future__ import annotations
 
+import os
 import atexit
 from typing import Optional
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from prover.isabelle_api import start_isabelle_server, get_isabelle_client
 from prover.prover import prove_goal
 from prover.config import MODEL as DEFAULT_MODEL
-
 from planner.driver import plan_and_fill
+from prover.llm import detect_backend_for_model
 
 app = FastAPI(title="LLM Isabelle Prover API")
+
+# Show whether prover.llm debug logging is enabled
+print(f"[server] LLM_DEBUG={'ON' if os.getenv('LLM_DEBUG') not in (None, '', '0', 'false', 'False', 'no', 'NO') else 'OFF'}")
 
 # Start Isabelle once and reuse the session
 server_info, proc = start_isabelle_server(name="isabelle", log_file="ui_server.log")
 isabelle = get_isabelle_client(server_info)
 SESSION = isabelle.session_start(session="HOL")
 
-
 @atexit.register
 def _shutdown():
-    try: isabelle.shutdown()
-    except Exception: pass
+    try:
+        isabelle.shutdown()
+    except Exception:
+        pass
     try:
         proc.terminate(); proc.wait(timeout=2)
     except Exception:
-        try: proc.kill(); proc.wait(timeout=2)
-        except Exception: pass
-
+        try:
+            proc.kill(); proc.wait(timeout=2)
+        except Exception:
+            pass
 
 # ---------- /prove ----------
 
@@ -58,11 +63,15 @@ class ProveResp(BaseModel):
     depth: int
     timeout: bool
     model: str
+    backend: str          # <-- new: echo which backend was selected
     steps: list[str]
 
 @app.post("/prove", response_model=ProveResp)
 def prove(req: ProveReq):
     model = req.model or DEFAULT_MODEL
+    backend = detect_backend_for_model(model)
+    print(f"[prove]   model={model} backend={backend} goal={req.goal[:80]}")
+
     res = prove_goal(
         isabelle, SESSION, req.goal,
         model_name_or_ensemble=model,
@@ -84,9 +93,9 @@ def prove(req: ProveReq):
         depth=int(res.get("depth", -1)),
         timeout=bool(res.get("timeout", False)),
         model=str(res.get("model", model)),
+        backend=backend,                      # <-- new
         steps=tactic_steps or raw_steps,
     )
-
 
 # ---------- /plan_fill ----------
 
@@ -94,25 +103,31 @@ class PlanFillReq(BaseModel):
     goal: str
     model: Optional[str] = None
     budget_s: int = 10
-    mode: str = "auto"    # "auto" (allow complete) or "outline" (force placeholders)
+    mode: str = "auto"    # "auto" or "outline"
 
 class PlanFillResp(BaseModel):
     success: bool
     outline: str
     fills: list[str]
     failed_holes: list[int]
+    model: str
+    backend: str
 
 @app.post("/plan_fill", response_model=PlanFillResp)
 def plan_fill(req: PlanFillReq):
     model = req.model or DEFAULT_MODEL
+    backend = detect_backend_for_model(model)
+    print(f"[plan_fill] model={model} backend={backend} mode={req.mode} goal={req.goal[:80]}")
+
     r = plan_and_fill(goal=req.goal, model=model, budget_s=req.budget_s, mode=req.mode)
     return PlanFillResp(
         success=bool(r.success),
         outline=str(r.outline),
         fills=[str(x) for x in r.fills],
         failed_holes=[int(i) for i in r.failed_holes],
+        model=model,
+        backend=backend,
     )
-
 
 if __name__ == "__main__":
     import uvicorn
