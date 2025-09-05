@@ -6,3 +6,4 @@ requests
 tabulate
 fastapi 
 uvicorn
+torch
