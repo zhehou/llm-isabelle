@@ -157,7 +157,7 @@ python -m prover.train_reranker --algo xgb-regressor --target q \
 
 To train a heavier Deep RL model, run
 
-python -m prover.train_deeprl --algo awr \
+python -m prover.train_reranker --algo awr \
   --attempts logs/attempts.log.jsonl \
   --runs     logs/runs.log.jsonl \
   --epochs 8 --batch 1024 --lr 1e-3 --val_split 0.1 --tau 0.6
@@ -180,11 +180,11 @@ python -m prover.train_reranker --algo xgb-ranker
 
 Then train AWR++ using knowledge distilled from teacher
 
-python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3
+python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
 
 3.7.2 DQN (safe, offline, uses your logged next states)
 
-python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 
 3.7.3 Combining the above in curriculum training
 
@@ -218,11 +218,11 @@ python -m prover.train_reranker --algo xgb-regressor --target q
 
 Train AWR++ with teacher-student distillation
 
-python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3
+python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
 
 Also train DQN
 
-python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 
 3.8 Integration with Isabelle/HOL Jedit GUI
 
