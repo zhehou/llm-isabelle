@@ -61,7 +61,8 @@ ollama pull deepseek-r1:8b
 We support **Gemini via the official `gemini` CLI**.
 
 ```bash
-# Install once (pick one)
+# Install Gemini CLI following the instructions here: https://www.geminicli.cc/docs/installation
+# Then install the following (pick one)
 pipx install gemini-cli    # preferred
 # or
 pip install gemini-cli
@@ -204,13 +205,13 @@ AWR++ (with teacher & listwise):
 # Train a teacher model first
 python -m prover.train_reranker --algo xgb-ranker
 # Then train an AWR++ with knowledge distilled from the teacher
-python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
-python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 ```
 
 Deep Q Network:
 ```bash
-python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 ```
 
 Combining the above in curriculum training
@@ -232,9 +233,9 @@ python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --bea
 # Retrain Q-style regressor
 python -m prover.train_reranker --algo xgb-regressor --target q
 # Train AWR++ with teacher knowledge distillation
-python -m prover.train_deeprl --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
+python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
 # Also train DQN
-python -m prover.train_deeprl --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
 # See which reranker works better.
 ```
 
