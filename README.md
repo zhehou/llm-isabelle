@@ -1,4 +1,4 @@
-# LLM-Guided Isabelle/HOL Prover
+# Isabellm: A playground for Free and Lightweight LLM-Guided Isabelle/HOL Provers
 
 This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face (hosted or local Transformers)**) and an optional machine-learned reranker.
 
