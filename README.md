@@ -250,6 +250,38 @@ Copy the `.bsh` macros from `isabelle_ui/` to your jEdit macros folder, e.g.
 
 Then in jEdit, use **Macros → LLM Prover** at a proof state.
 
+### 3.9 Evaluation using mini-F2F
+Download the dataset
+```bash
+git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/miniF2F  
+```
+
+Process the dataste for Isabelle/HOL
+```bash
+python datasets/prep_minif2f_isabelle.py \
+  --repo external/miniF2F \
+  --outdir datasets/mini_f2f
+# mini_f2f_validation.txt and mini_f2f_test.txt are the ones to use.
+```
+
+Build Isabelle session to include necessary imports (need ROOT and MiniF2F_Base.thy in datasets/mini_f2f)
+```bash
+# Make sure you have already registered AFP entries to Isabelle/HOL
+isabelle build -d datasets/mini_f2f -v MiniF2F_Base
+export ISABELLE_LOGIC=MiniF2F_Base
+```
+
+Run the prover on the validation datasets
+```bash
+# Validation 
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_validation.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+
+# Testing
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+```
+
+Maybe train rerankers using on the logs from the validation set, and then run the test set to see results.
+
 ---
 
 ## 4. Project Structure

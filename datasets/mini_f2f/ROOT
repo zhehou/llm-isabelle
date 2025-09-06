@@ -1,0 +1,10 @@
+session "MiniF2F_Base" = HOL +
+  options [document = false]
+  sessions
+    "HOL-Number_Theory"
+    "HOL-Computational_Algebra"
+    "HOL-Analysis"
+    "HOL-Library"
+    "Symmetric_Polynomials" 
+  theories
+    MiniF2F_Base

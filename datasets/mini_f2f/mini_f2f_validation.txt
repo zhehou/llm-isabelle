@@ -1,0 +1,244 @@
+⋀(n::nat). x 1 = 211 ⟹ x 2 = 375 ⟹ x 3 = 420 ⟹ x 4 = 523 ⟹ ((n\<ge>5) ⟹ (x n = x (n-1) - x (n-2) + x (n-3) - x (n-4))) ⟹ x 531 + x 753 + x 975 = 898
+t 1 = 20 ⟹ t 2 = 21 ⟹ \<forall> n \<ge> 3. t n = (5 * t (n - 1) + 1) / (25 * t (n - 2)) ⟹ let (a,b) = quotient_of (t 2020) in a +b = 626
+⋀(x::real) (y::real) (z::real) (m::rat). 0 < x \<and> 0 < y \<and> 0 < z ⟹ x * y * z = 1 ⟹ x + 1 / z = 5 ⟹ y + 1 / x = 29 ⟹ z + 1 / y = m ⟹ 0 < m ⟹ let (x,y) = quotient_of m in x + y = 5
+⋀(x::real). 0<x ⟹ x<pi ⟹ 12 \<le> ((9 * (x^2 * (sin x)^2)) + 4) / (x * sin x)
+⋀(x::real) (y::real) (z::real) (w::real). (x^2 / (2^2 - 1)) + (y^2 / (2^2 - 3^2)) + (z^2 / (2^2 - 5^2)) + (w^2 / (2^2 - 7^2)) = 1 ⟹ (x^2 / (4^2 - 1)) + (y^2 / (4^2 - 3^2)) + (z^2 / (4^2 - 5^2)) + (w^2 / (4^2 - 7^2)) = 1 ⟹ (x^2 / (6^2 - 1)) + (y^2 / (6^2 - 3^2)) + (z^2 / (6^2 - 5^2)) + (w^2 / (6^2 - 7^2)) = 1 ⟹ (x^2 / (8^2 - 1)) + (y^2 / (8^2 - 3^2)) + (z^2 / (8^2 - 5^2)) + (w^2 / (8^2 - 7^2)) = 1 ⟹ x^2 + y^2 + z^2 + w^2 = 36
+⋀(a::real) (b::real). (ln a) / (ln 8) + (ln (b^2)) / (ln 4) = 5 ⟹ (ln b) / (ln 8) + (ln (a^2)) / (ln 4) = 7 ⟹ a * b = 512
+⋀(n::nat). 0 < n ⟹ \<not> (\<exists>!k. (8 / 15 < n / (n+k)) \<and> n / (n+k) < 7/13) ⟹ n \<le> 112
+⋀(x::real). 0 < x ⟹ log 2 (log 8 x) = log 8 (log 2 x) ⟹ (log 2 x)^2 = 27
+⋀(n::nat) n. abs (a n) < 1 ⟹ (\<Sum>(k::nat) = 0..(n-1). (abs (a k))) = 19 + abs(\<Sum>(k::nat) = 0..(n-1). (a k)) ⟹ 20 \<le> n
+((52::real) + 6 * sqrt 43) powr (3/2) - ((52::real) - 6 * sqrt 43) powr (3/2) = 828
+⋀(x::nat) (y::nat). 0<x \<and> 0<y ⟹ x*y + (x+y) = 71 ⟹ x^2 * y + x * y^2=880 ⟹ x^2 + y^2=146
+⋀(r::real). (\<Sum> k \<in>{19::nat..<92}. (floor (r + k / 100))) = 546 ⟹ floor (100 * r) = 743
+⋀(n::nat). 0 < n ⟹ (\<Sum> k \<in> {1..<n+1}. floor (ln k / ln 2)) = 1994 ⟹ n = 312
+⋀(a::real) (b::real) (c::real) (r::real) (s::real) (t::real) x. f x = x^3 + 3 * x^2 + 4*x -11 ⟹ g x = x^3 + r * x^2 + s*x + t ⟹ f a = 0 ⟹ f b = 0 ⟹ f c = 0 ⟹ g (a+b) = 0 ⟹ g (b+c) = 0 ⟹ g (c+a) = 0 ⟹ a \<noteq> b ⟹ a \<noteq> c ⟹ b \<noteq> c ⟹ t=23
+⋀(x::real). x = (\<Sum>(n::nat) =1..44. cos(n*pi/180)) / (\<Sum>(n::nat) =1..44. sin(n*pi/180)) ⟹ floor (100*x) = 241
+⋀(x::complex). x^2 + 49 = (x + 7 * \<i>) * (x - 7 * \<i>)
+⋀(a::complex). (a-10) * (a+11) = a^2 + a -110
+⋀(a::complex) (b::complex). (a+a) * (a+b) = 2 * a^2 + 2 * (a*b)
+⋀(x::complex) (e::complex). x + e = 7 ⟹ 2 * x + e = 3 ⟹ e=11 \<and> x= (-4)
+⋀(a::complex) (b::complex) (c::complex) (d::complex). (a-d) * (a-c) * (a-b) = -(((a^2 - (b+c) * a) + c * b) * d) + (a^2 - (b+c) * a + c * b) * a
+⋀x. (x>0) ⟹ 2 - sqrt 2 \<ge> 2 - x - 1/ (2 * x)
+⋀(n::nat). \<forall>i. a i \<ge>0 ⟹ prod a {..<n} = 1 ⟹ sum a {..<n} \<ge> n
+⋀(x::real) (y::real). 0 < x \<and> 0 < y ⟹ y \<le> x ⟹ sqrt (x * y) * (x - y) = (x + y) ⟹ x + y \<ge> 4
+⋀(a::real) (b::real) (c::real). 0 < a \<and> 0 < b \<and> 0 < c ⟹ a^2 / b^2 + b^2 / c^2 + c^2 / a^2 \<ge> b / a + c / b + a / c
+⋀(a::real) (b::real). 0 < a \<and> 0 < b ⟹ (a+b)^4 \<le> 8 * (a^4 + b^4)
+⋀(a::real). 10 * a \<le> 28 * a^2 + 1
+⋀(e::complex) (r::complex). 2 * (e * r) + (e^2 + r^2) = (-r + (-e))^2
+⋀(a::complex) (b::complex) (c::complex). a+b = 2*c ⟹ c = \<i> ⟹ a*c+b*c=-2
+⋀(a::real) (c::real). 2 * a * (2+c) \<le> a^2 + c^2 + 4 * (1+c)
+⋀(a::real) (b::real). a^2 + b^2 = 2 ⟹ a * b <= 1
+⋀(z::real) (a::real). 36 * (a * z) - 9 * a^2 \<le> 36 * z^2
+⋀(a::real) (b::real). 4 * b * (a+1) \<le> 4 * b^2 + (a+1)^2
+⋀(x::int) (y::int) (z::int). (x-y)^2 + (y-z)^2 + (z-x)^2 = x * y * z ⟹ (x + y + z + 6) dvd (x^3 + y^3 + z^3)
+⋀(a::real) (b::real). a \<noteq> 0 ⟹ b \<noteq> 0 ⟹ a * b = a - b ⟹ a / b + b / a - a * b = 2
+\<forall> x. f (x / 3) = x^2 + x + 1 ⟹ (\<Sum>y\<in>f -` {7}. y / 3) = - 1 / 9
+⋀(x::real) (p::real). x<2 ⟹ \<bar>x -2\<bar> = p ⟹ x - p = 2 - 2 * p
+⋀(a::nat) (b::nat) (n::nat). 1 \<le> a \<and> a \<le> 9 ⟹ 0 \<le> b \<and> b \<le> 9 ⟹ n = 10 * a + b ⟹ n = a * b + a + b ⟹ b=9
+\<forall> x > 0. \<forall> y > 0. f (x * y) = f x / y ⟹ f 500 = 3 ⟹ f 600 = 5 / 2
+\<forall> x. f x = (2 * x + 3) * (x - 4) + (2 * x + 3) * (x - 6) ⟹ (\<Sum> y \<in> f -` {0}. y) = 7/2
+⋀(k::real) (a::nat) (b::nat). \<forall> x. f x = x^2 - 63 * x + k ⟹ f -` {0} = {of_nat a, of_nat b} ⟹ prime a ⟹ prime b ⟹ k=122
+⋀(n::nat). u 0 =4 ⟹ u 1=7 ⟹ \<forall> n \<ge> 2. u (n + 2) = (u n + u (n + 1)) mod 10 ⟹ (\<Sum> k \<in> {..n}. u k) > 10000 ⟹ 1999 \<le> n
+\<forall>n. u n = 2 *n ⟹ \<forall>n. v n= 2* n -1 ⟹ (\<Sum> k \<in>{1..2003}. u k) - (\<Sum> k \<in>{1..2003}. v k) = 2003
+⋀(a::real) (b::real). b\<le>a ⟹ 1<b ⟹ ln (a/b) / ln a + ln (b/a) / ln b \<le>0
+⋀(a::real) (b::real). b>0 ⟹ \<forall> x. f x = sqrt (a * x^2 + b * x) ⟹ {x. 0 \<le> f x} = f ` {x. 0 \<le> f x} ⟹ a=0 \<or> a = -4
+⋀(k::nat). k = 2008^2 + 2^2008 ⟹ (k^2 + 2^k) mod 10 = 6
+⋀(x::real). x * (1 / 2 + 2 / 3) = 1 ⟹ x = 6/7
+(\<Prod>k::nat=1..501. ((4::real) * k + 4) / (4 * k)) = 502
+⋀(x::real) (y::real). 0 < x \<and> 0 < y ⟹ y^3 = 1 ⟹ 6 * x^2 = 2 * (6 * y^2) ⟹ x^3 = 2 * sqrt 2
+⋀(n::nat). 0 < n ⟹ (\<Sum> k \<in> {1..<n+1}. (k * (\<i>^k))) = 48 + 49 * \<i> ⟹ n = 97
+(1 + (1 / (1 + (1 / (1 + 1))))) = (5::real) / 3
+⋀n. a 1 = 1 ⟹ a 2 = 1 / (sqrt 3) ⟹ a (n+2) = (a n + a (n+1)) / (1 - (a n) * (a (n+1))) ⟹ abs (a 2009) = 0
+⋀(x::real). x^3 - (x+1) * (x-1) * x = 5 ⟹ x^3 = 125
+⋀(a::real) (b::real) (c::real). \<forall> x. f (x+3) = 3 * x^2 + 7*x + 4 ⟹ \<forall> x. f x = a * x^2 + b * x + c ⟹ a+b+c=2
+⋀(p::real) (q::real) n. a (n+2) - a (n+1) = a (n+1) - a n ⟹ a 1 = p ⟹ a 2 = 9 ⟹ a 3 = 3 * p - q ⟹ a 4 = 3 * p + q ⟹ a 2010 = 8041
+⋀(x::real) (b::real). 0 < b ⟹ 7 powr (x + 7) = 8 powr x ⟹ x = ln (7^7) / ln b ⟹ b = 8 / 7
+⋀(x::real). 49 \<le> (\<Sum> k \<in> {1..<120}. abs (k * x - 1))
+⋀(x::real) (y::real). abs (x+y) + abs (x-y) = 2 ⟹ x^2 - 6 * x + y^2 \<le> 8
+⋀n. s (n+2) = s (n+1) + s n ⟹ s 9 = 110 ⟹ s 7 = 42 ⟹ s 4 = 10
+⋀(x::real) (y::real). x\<noteq>0 ⟹ y\<noteq>0 ⟹ x\<noteq>y ⟹ x + 2/x = y + 2/y ⟹ x * y = 2
+⋀(x::nat) (y::nat). 0<y ⟹ y<x ⟹ x+y + (x*y) = 80 ⟹ x=26
+⋀(x::nat). 10^x * 100^(2*x) = 1000^5 ⟹ x=3
+⋀x y. f x y = x - y * floor (x/y) ⟹ f ((3::real)/8) (- 2/5) = - 1/40
+⋀(x::real) (y::real). x \<noteq> 0 ⟹ y \<noteq> 0 ⟹ x + y = 4 * (x * y) ⟹ 1/x + 1/y = 4
+⋀n. f 1 = 2 ⟹ (1 < n \<and> even n) ⟹ f n = f (n - 1) + 1 ⟹ (1 < n \<and> odd n) ⟹ f n = f (n - 2) + 2 ⟹ f 2017 = 2018
+⋀(z::complex). z = (Complex (1/sqrt 2) (1/sqrt 2)) ⟹ (\<Sum>k::nat=1..12. (z^(k^2))) * (\<Sum> k::nat=1..12. 1/(z^(k^2))) =36
+a 1 = 1 ⟹ a 2 = 3 / 7 ⟹ \<forall> n. a (n + 2) = (a n * a (n + 1)) / (2 * a n - a (n + 1)) ⟹ fst (quotient_of (a 2019)) + snd (quotient_of (a 2019)) = 8078
+⋀(a::nat) (b::nat) (c::nat). 1 < a \<and> 1 < b \<and> 1 < c ⟹ \<forall>n>1. (n * ((n * (n powr (1 / c))) powr (1 / b))) powr (1 / a) = (n^25) powr (1 / 36) ⟹ b=3
+card {n :: nat. 5 dvd n \<and> lcm (fact 5) n = 5 * gcd (fact 10) n} = 48
+⋀(x::real) (y::real). 1 \<le> ((x * y) - 1)^2 + (x + y)^2
+⋀(a::nat) (b::nat). prime a ⟹ prime b ⟹ prime (a+b) ⟹ prime (a-b) ⟹ prime (a + b + (a - b + (a + b)))
+⋀(n::nat). n>0 ⟹ prime (n^2+2-3*n) ⟹ n=3
+⋀(a::real) (b::real). a \<noteq> 0 \<and> b \<noteq> 0 ⟹ \<forall> x. x^2 + a * x + b = (x - a) * (x - b) ⟹ a = 1 \<and> b = -2
+⋀(x::real) (y::real). x>0 ⟹ y>0 ⟹ ln (x * y^3) =1 ⟹ ln (x^2 * y) = 1 ⟹ ln (x*y) = 3/5
+⋀(a::real) (r::real). \<forall> k. u k = a * r^k ⟹ u 1= 2 ⟹ u 3=6 ⟹ u 0 = 2/ sqrt 3 \<or> u 0 = - 2/sqrt 3
+⋀(a::real) (b::real). \<forall> x. f x = a * x + b ⟹ f 6 - f 2 = 12 ⟹ f 12 - f 2 = 30
+⋀(x::nat) (y::nat). 2^x * 3^y = 1296 ⟹ x + y = 8
+⋀(a::nat) (b::nat). (5::real) / 8 * b - 2 / 3 * a = 7 ⟹ of_nat b - (5::real) / 8 * b - (a - 2 / 3 * a) = 7 ⟹ a = 42
+2 \<le> (\<Sum> k \<in> {x ::real. 0 < x \<and> x powr (2 powr (sqrt 2)) = (sqrt 2) powr (2 powr x)}. k) \<and> (\<Sum> k \<in> {x :: real. 0 < x \<and> x powr (2 powr (sqrt 2)) = (sqrt 2)powr (2 powr x)}. k) < 6
+⋀(x::real) (y::real) (z::real) (a::real) (b::real). 0 < x \<and> 0 < y \<and> 0 < z ⟹ x \<noteq> y ⟹ y \<noteq> z ⟹ z \<noteq> x ⟹ x + y + z = a ⟹ x^2 + y^2 + z^2 = b^2 ⟹ x * y = z^2 ⟹ 0<a \<and> b^2 < a^2 \<and> a^2 < 3*b^2
+⋀(x::real). (cos x)^2 + (cos (2 * x))^2 + (cos (3 * x))^2 = 1 ⟹ (\<exists>(m::int). x = pi/2 + m * pi) \<or> (\<exists>(m::int). x = pi/4 + m * pi/2) \<or> (\<exists>(m::int). x = pi/6 + m * pi/6) \<or> (\<exists>(m::int). x = 5*pi/6 + m * pi/6)
+⋀(n::nat). 7 dvd (2^n-1) ⟹ 3 dvd n
+⋀(n::nat). \<not> ((7::nat) dvd (2^n + 1))
+⋀(x::real). 0 \<le> x ⟹ x \<le> 2 * pi ⟹ 2 * cos x \<le> abs (sqrt (1 + sin (2 * x)) - sqrt (1 - sin (2 * x))) ⟹ abs (sqrt (1 + sin (2 * x)) - sqrt (1 - sin (2 * x))) \<le> sqrt 2 ⟹ pi / 4 \<le> x \<and> x \<le> 7 * pi / 4
+⋀(n::nat) (x::real) (k::nat) (m::int). k\<noteq>0 ⟹ x \<noteq> m * pi / (2^k) ⟹ 0 < n ⟹ (\<Sum>(k::nat) =1..n.(1 / sin ((2^k) * x))) = 1 / tan x - 1 / tan ((2^n) * x)
+a 1 > a 2 ⟹ a 2 > a 3 ⟹ a 3 > a 4 ⟹ abs (a 1 - a 2) * x 2 + abs (a 1 - a 3) * x 3 + abs (a 1 - a 4) * x 4 = 1 ⟹ abs (a 2 - a 1) * x 1 + abs (a 2 - a 3) * x 3 + abs (a 2 - a 4) * x 4 = 1 ⟹ abs (a 3 - a 1) * x 1 + abs (a 3 - a 2) * x 2 + abs (a 3 - a 4) * x 4 = 1 ⟹ abs (a 4 - a 1) * x 1 + abs (a 4 - a 2) * x 2 + abs (a 4 - a 3) * x 3 = 1 ⟹ x 2 = 0 \<and> x 3 = 0 \<and> x 1 = 1 / abs (a 1 - a 4) \<and> x 4 = 1 / abs (a 1 - a 4)
+⋀(k::nat) (m::nat) (n::nat) s. 0<k \<and> 0<m \<and> 0<n ⟹ c s = s * (s+1) ⟹ prime (k+m+1) ⟹ n+1 < k + m + 1 ⟹ (\<Prod>(i::nat) = 1..n.(c i)) dvd (\<Prod>(i::nat) = 1..n.(c (m+i)) - c k)
+⋀(a::real) (b::real). \<exists>x. x^4 + a * x^3 + b * x^2 + a*x + 1 = 0 ⟹ 4/5 \<le> a^2 + b^2
+⋀(a::real) (b::real) (c::real) (d::real) (s::real). a>0 ⟹ b>0 ⟹ c>0 ⟹ d>0 ⟹ s=a/(a+b+d) + b/(a+b+c) + c/(b+c+d) + d/(a+c+d) ⟹ 1<s \<and> s<2
+⋀(a::nat) (b::nat) (q::nat) (r::nat). r < a + b ⟹ a^2 + b^2 = (a+b) * q + r ⟹ q^2 + r = 1977 ⟹ (abs (int a - 22) = 15 \<and> abs (int b - 22) = 28) \<or> (abs (int a - 22) = 28 \<and> abs (int b - 22) = 15)
+⋀(n::nat). inj f ⟹ f 0 = 0 ⟹ (\<Sum> k \<in>{1..<n+1}. 1 / k) \<le> (\<Sum> k \<in>{1..<n+1}. (f k) / k^2)
+⋀(p::nat) (q::nat). 0 < q ⟹ (\<Sum> k \<in> {1..<1320}. ((-1) ^ (k + 1) * (1 / k))) = p / q ⟹ 1979 dvd p
+⋀(a::nat) (b::nat). 0 < a \<and> 0 < b ⟹ \<not> (7 dvd a) ⟹ \<not> (7 dvd b) ⟹ \<not> (7 dvd (a+b)) ⟹ (7^7) dvd ((a+b)^7 - a^7 - b^7) ⟹ 19 \<le> a + b
+\<exists>(n::nat). f (f n) \<noteq> n + 1987
+⋀(p::nat) x (k::nat) i. f x = x^2 + x + p ⟹ (k\<le>floor(sqrt (p/3))) ⟹ prime (f k) ⟹ (i \<le> p - 2) ⟹ prime (f i)
+⋀(a::nat) (b::nat). 0<a \<and> 0<b ⟹ (a*b+1) dvd (a^2 + b^2) ⟹ \<exists>(x::nat). ((x^2) = (a^2+b^2)/(a*b+1))
+⋀(n::nat). 2 \<le> n ⟹ n^2 dvd 2^n + 1 ⟹ n = 3
+\<exists> f :: nat \<Rightarrow> nat. (\<forall> a b. (a < b) \<longleftrightarrow> f a < f b) \<and> f 1 = 2 \<and> (\<forall> n. f (f n) = f n + n)
+⋀(a::real) (b::real) (c::real). (a * b * (a^2 - b^2)) + (b * c * (b^2 - c^2)) + (c * a * (c^2 - a^2)) \<le> (9 * sqrt 2) / 32 * (a^2 + b^2 + c^2)^2
+⋀(n::nat). (3::nat) dvd (2^(2 * n + 1) + 1)
+⋀(n::nat). 3 dvd n^3 + 2 * n
+⋀(n::nat). (9::nat) dvd 10^n - 1
+⋀(n::nat). 4 \<le> n ⟹ n^2 \<le> fact n
+⋀(n::nat). u 0 = 0 ⟹ u (n+1) = 2 * u n + (n+1) ⟹ u n = 2 ^ (n+1) - (n+2)
+⋀(n::nat). (\<Sum> k<n. 2 * k + 3) = (n + 1)^2 - 1
+⋀(n::nat). n=0 \<or> (\<Sum>(k::nat) = 0..(n-1). (1::real)/((k+1)*(k+2))) = n / (n+1)
+⋀(n::nat). n > 0 ⟹ (\<Sum>(k::nat) = 0..(n-1). 2 * k + 1) = n^2
+abs ((120::real) / 100 * 30 - 130 / 100 * 20) = 10
+⋀(x::real). x^2 - 5 * x - 4 \<le> 10 ⟹ x\<ge> -2 \<and> x \<le> 7
+⋀(x::real). 125/8 = x /12 ⟹ x = 375/2
+⋀(a::real) (b::real). 3*a+2*b=12 ⟹ a=4 ⟹ b=0
+⋀(a::real) (b::real). a \<noteq> b ⟹ a \<noteq> 2 * b ⟹ (4*a+3*b) / (a-2*b) = 5 ⟹ (a+11*b) / (a-b) = 2
+⋀(q::complex) (e::complex). q = Complex 2 (-2) ⟹ e = Complex 5 5 ⟹ q * e = 20
+⋀(k::real) (x::real). x = (13 - sqrt 131) / 4 ⟹ 2 * x^2 - 13 * x + k = 0 ⟹ k = 19/4
+⋀(d::real) (e::real). 2 * d = 17 * e - 8 ⟹ 2 * e = d - 9 ⟹ e = 2
+⋀(a::nat) (b::nat). a + b = 20 ⟹ a = 3 * b ⟹ a - b = 10
+⋀(x::real) (y::real). 2 * 3 = x - 9 ⟹ 2 * (-5) = y + 1 ⟹ x=15 \<and> y = -11
+⋀(a::real) (b::real). \<forall>(x::real). (x-3 \<noteq> 0 \<and> x - 5 \<noteq> 0) ⟹ 4 * x / (x^2 - 8 * x + 15) = a / (x-3) + b / (x-5) ⟹ a = -6 \<and> b = 10
+⋀(a::real) (b::real) x. f x = 2 * x^2 - 7 * x + 2 ⟹ f a = 0 ⟹ f b = 0 ⟹ a \<noteq> b ⟹ 1 / (a-1) + 1 / (b-1) = -1
+⋀(x::real) x. f x = x + 2 ⟹ g x = x^2 ⟹ f (g x) = g (f x) ⟹ x = -1/2
+⋀(a::real) (b::real) (c::real). 0 < a \<and> 0 < b \<and> 0 < c ⟹ \<forall>x. 24 * x^2 - 19 * x - 35 = ((a*x-5) * (2 * (b*x) + c)) ⟹ a * b - 3 * c = -9
+⋀(a::nat) (b::nat) (c::nat) (d::nat). c - b = d ⟹ b - a = d ⟹ a+b+c = 60 ⟹ a + b > c ⟹ d < 10
+\<forall> x < -5. f x = x^2 + 5 ⟹ \<forall> x \<ge> -5. f x = 3 * x -8 ⟹ (\<Sum> k \<in> (f -` {10}). k) = 6
+⋀a b. s a b = a ^ b + b ^ a ⟹ s 2 6 = 100
+ceiling (sqrt 27) - floor (sqrt 26) = 1
+⋀(b::real) x. f x = 3 * x^4 - 7 * x^3 + 2*x^2 - b*x +1 ⟹ f 1 = 1 ⟹ b = -2
+⋀(n::real). n \<noteq> 3 ⟹ (n+5) / (n-3) = 2 ⟹ n=11
+⋀(y::complex). 7*(3*y+2) = 21 * y + 14
+⋀x. (f x = abs (x+4)) ⟹ card {(x::int). (f x < 9)} = 17
+((3::real) / 8 + 7 / 8) / (4 / 5) = 25 / 16
+⋀(q::complex) (e::complex) (d::complex). q = Complex 11 (-5) ⟹ e = Complex 11 5 ⟹ d = Complex 0 2 ⟹ q * e * d = Complex 0 292
+⋀(a::real) (b::real) x. f x = x^2 + a*x + b ⟹ 2 * a \<noteq> b ⟹ f (2 * a) = 0 ⟹ f b = 0 ⟹ a + b = -1
+⋀(a::real) x. f x = a * (x-2)^2 + 3 ⟹ f 4 = 4 ⟹ f 6 = 7
+(log 2 (5^4)) / (log 2 (5^2)) = 2
+card { n :: nat. sqrt n < 7 / 2 \<and> 2 < sqrt n} = 8
+⋀(d::real). 27/125 * d = 9/25 ⟹ 3/5 * d^3 = 25/9
+⋀(x::real). x \<noteq> 0 ⟹ 1/(4/x) * ((3*x^3)/x)^2 * (1/(1 / (2 * x)))^3 = 18 * x^8
+⋀(t::real) (s::real) (n::nat). t = 2 * s - s^2 ⟹ s = n^2 - 2^n + 1 ⟹ n=3 ⟹ t=0
+⋀(x::real). x \<noteq> 0 ⟹ 3 + 1/x = 7/x ⟹ x = 2
+⋀(x::real). x \<noteq> 1 ⟹ x \<noteq> -2 ⟹ (x + 1) / (x - 1) = (x - 2) / (x + 2) ⟹ x=0
+⋀(c::real). \<forall>x. f x = 2 * x^2 + 5 * x + c ⟹ \<exists>x. f x \<le> 0 ⟹ c \<le> 25/8
+\<forall> x. (x \<in> \<rat> ) \<longrightarrow> f x = abs (floor x) ⟹ \<forall> x. (x \<notin> \<rat>) \<longrightarrow> f x = (ceiling x)^2 ⟹ f (8 powr (1/3)) + f (-pi) + f (sqrt 50) + f (9/2) = 79
+⋀(x::real). \<forall> n. u (n + 1) = sqrt (x + u n) ⟹ filterlim u at_top (nhds 9) ⟹ 9 = sqrt (x + 9)
+bij \<sigma> ⟹ \<forall> x. \<sigma> x = x^3 - 8 ⟹ Hilbert_Choice.inv \<sigma> (\<sigma> (Hilbert_Choice.inv \<sigma> 19)) = 3
+⋀(a::real). 1 / 5 * abs(9 + 2 * a) < 1 ⟹ -7 < a \<and> a < -2
+⋀x. p x = 2 - x^2 ⟹ (x\<noteq>0) ⟹ q x = 6 / x ⟹ p (q 2) = -7
+⋀(x::real) (y::real). x+y=7 ⟹ 3 * x + y = 45 ⟹ x^2 - y^2 = 217
+bij \<sigma> ⟹ \<forall> x. \<sigma> x = 4 * x^3 + 1 ⟹ Hilbert_Choice.inv \<sigma> 33 = 2
+⋀(x::nat). 0 < x ⟹ x ^ 2 + 4 * x + 4 < 20 ⟹ x = 1 \<or> x = 2
+⋀(x::real) (y::real). y = x^2 - 6 * x + 13 ⟹ 4 \<le> y
+⋀(a::real) (b::real) (c::real) (d::real). b = a^2 + 4 * a + 6 ⟹ b = 1 / 2 * a^2 + a + 6 ⟹ d = c^2 + 4 * c + 6 ⟹ d = 1 / 2 * c^2 + c + 6 ⟹ a < c ⟹ c-a=6
+⋀(x::real). bij \<sigma> ⟹ \<forall> x. \<sigma> x = 5 * x - 12 ⟹ \<sigma> (x + 1) = (Hilbert_Choice.inv \<sigma>) x ⟹ x = 47 / 24
+⋀(a::real) (b::real) x. f x = a * x + b ⟹ f 7 = 4 ⟹ f 6 = 3 ⟹ f 3 = 0
+⋀x. f x = 3 * sqrt (2 * x -7) - 8 ⟹ f 8 = 1
+⋀(x::real) (y::real) (n::int). x^3 = -45 ⟹ y^3 = -101 ⟹ x < n ⟹ n < y ⟹ n = -4
+bij \<sigma> ⟹ Hilbert_Choice.inv \<sigma> (-15) = 0 ⟹ Hilbert_Choice.inv \<sigma> 0 = 3 ⟹ Hilbert_Choice.inv \<sigma> 3 = 9 ⟹ Hilbert_Choice.inv \<sigma> 9 = 20 ⟹ \<sigma> (\<sigma> 9) = 0
+⋀(x::real). 2 * (2 * (2 * (2 * x))) = 48 ⟹ x=3
+((1::real)/2 + 1/3) * (1/2 - 1/3) = 5/36
+⋀(q::complex) (e::complex). q = Complex 9 (-4) ⟹ e = Complex (-3) (-4) ⟹ q - e = 12
+⋀x. x<0 ⟹ f x = -(x^2)-1 ⟹ (0 \<le> x \<and> x < 4) ⟹ f x = 2 ⟹ x\<ge>4 ⟹ f x = sqrt x ⟹ f pi = 2
+⋀(m::nat) (n::nat) (k::real) x. prime m ⟹ prime n ⟹ m \<noteq> n ⟹ f x = x^2 - 12*x + k ⟹ f m = 0 ⟹ f n = 0 ⟹ k = 35
+⋀x. f x = x^2 - 4 * (sqrt x) + 1 ⟹ f (f 4) = 70
+sqrt ((5 / sqrt 80 + sqrt 845 / 9 + sqrt 45) / sqrt 5) = 13 / 6
+⋀(a::real) (b::real). 0 < a \<and> 0 < b ⟹ a + b = 35 ⟹ a = (2/5) * b ⟹ b - a = 15
+⋀(x::real) (y::real). x+y=13 ⟹ x*y=24 ⟹ sqrt (x^2 + y^2) = 11
+fact 3 * (2^3 + sqrt 9) / 2 = 33
+⋀(x::real) (y::real). x=5 ⟹ y=2 ⟹ sqrt (x^3 - y^2) = 11
+⋀(q::real) (p::real). q = 2 - 4 + 6 - 8 + 10 -12 + 14 ⟹ p = 3 - 6 + 9 - 12 + 15 - 18 + 21 ⟹ q/p = 2/3
+⋀(a::real). (a-1) * (a+1) * (a+2) - (a-2) * (a+1) = a^3 + a^2
+⋀(b::real). 4 powr b + 2^3 = 12 ⟹ b=1
+⋀x. f x = x^3 + 2 * x + 1 ⟹ g x = x - 1 ⟹ f (g 1) = 1
+⋀x. f x = 5 * x + 3 ⟹ g x = x^2 - 2 ⟹ g (f (-1)) = 2
+⋀(r::nat) (s::nat). r * s = 450 ⟹ (r + 5) * (s - 3) = 450 ⟹ r = 25
+⋀(p::complex) (q::complex) (r::complex) (x::complex). (x-p) * (x-q) = (r-p) * (r-q) ⟹ x \<noteq> r ⟹ x = p + q -r
+⋀(a::real) (b::real) x. a \<noteq> 0 \<and> b \<noteq> 0 \<and> a \<noteq> b ⟹ f x = x^2 + a*x + b ⟹ f a = 0 ⟹ f b = 0 ⟹ a=1 \<and> b = -2
+⋀(b::real). b\<noteq>0 ⟹ (7 * b^3)^2 * 1/((4 * b^2)^3) = 49 / 64
+⋀(x::real) (y::real) (z::real) (a::real). x>0 ⟹ y>0 ⟹ z>0 ⟹ ln x - ln y = a ⟹ ln y - ln z = 15 ⟹ ln z - ln x=-7 ⟹ a = -8
+(17 * 18) mod 4 = (2::nat)
+(2^8) mod 5 = (1::nat)
+\<forall> n. v n = 2 * n - 1 ⟹ (\<Sum> k \<in>{1..<101}. v k) mod 7 = 4
+⋀(a::nat) (b::nat). 0 < a \<and> 0 < b \<and> b \<le> a ⟹ (a+b) mod 10 = 2 ⟹ (2*a + b) mod 10 = 1 ⟹ (a-b) mod 10 = 6
+⋀(x::nat). x>0 ⟹ (LEAST a. gcd a 40 = x + 3 \<and> lcm a 40 = x * (x + 3)) = 8
+⋀(u::nat) (v::nat). u>0 \<and> v>0 ⟹ (14 * u) mod 100 = 46 ⟹ (14 * v) mod 100 = 46 ⟹ u < 50 ⟹ v < 100 ⟹ 50 < v ⟹ (u + v) / 2 = 64
+2004 mod 12 = (0::nat)
+⋀(n::nat). 123 * n + 17 = 39500 ⟹ n = 321
+(\<Sum> k\<in> {x::nat. x<50 \<and> x mod 8 =5 \<and> x mod 6=3}. k) = 66
+card ({x::nat. x mod 19 = 7 \<and> 100\<le>x \<and> x < 1000}) = 48
+⋀(n::nat). n > 0 ⟹ gcd (n+7) (2*n+1) \<le> 13
+gcd (fact 20) 200000 = (40000::nat)
+gcd 180 168 = (12::nat)
+(5^2005) mod 100 = (25::nat)
+139 mod 11 = (7::nat)
+(19^19 + 99^99) mod 10 = (8::nat)
+card {n::nat. n<60 \<and> 6 dvd (4 * n - 2)} = 20
+⋀(b::nat). b < 10 ⟹ \<exists>a. (10*b+6) = a^2 ⟹ b=3 \<or> b =1
+card {x ::nat. 0 < x \<and> x < 1000 \<and> card ({n. n dvd x}) = 3} = 11
+⋀(x::nat) (y::nat) (z::nat). x<31 ⟹ y<31 ⟹ z<31 ⟹ [x *3 = 1] (mod 31) ⟹ [y * 5 = 1] (mod 31) ⟹ [z * (x + y) =1] (mod 31) ⟹ z = 29
+(1999^2000) mod 5 = (1::nat)
+(\<Sum> k \<in>{1..<10}. 11^k) mod 100 = (59::nat)
+(fact 7) mod 23 = (3::nat)
+⋀(x::nat). 1 \<le> x \<and> x \<le> 100 ⟹ 77 dvd ((\<Sum>k::nat=0..100. k)-x) ⟹ x=45
+(2005^2 + 2005^0 + 2005^0 + 2005^5) mod 100 = (52::nat)
+⋀(a::nat) (b::nat). 1\<le>a \<and> a \<le>9 \<and> b \<le>9 ⟹ 10 * a + b = 2 * (a+b) ⟹ 10 * a + b = 18
+(33818^2 + 33819^2 + 33820^2 + 33821^2 + 33822^2) mod 17 = (0::nat)
+⋀(j::nat). j>0 ⟹ (3 * (7 * j + 3)) mod 7 = 2
+(\<Sum> k \<in> {n ::nat. 2 \<le> n \<and> [171 = 80] (mod n) \<and> [468 = 13] (mod n)}. k) = 111
+(\<Sum> k \<in> { n ::nat. n dvd 36}. k) = 91
+⋀(n::nat). (n - 1) * n * (n + 1) = 720 ⟹ (n + 1) = 10
+⋀(n::nat). n < 398 ⟹ (n * 7) mod 398 = 1 ⟹ n=57
+⋀(n::nat). n mod 7 = 5 ⟹ (5 * n) mod 7 = 4
+⋀(k::nat). k^2 = 196 ⟹ (\<Sum> k \<in> { n ::nat. n dvd k}. k) = (24::nat)
+lcm 9999 100001 = (90900909::nat)
+⋀(n::nat). n mod 7 = (3::nat) ⟹ (2*n+1) mod 7 = (0::nat)
+(\<Sum> k \<in> ({n. n dvd 198 \<and> n\<noteq> 198}). k) = (270::nat)
+⋀(a::nat) (b::nat) (c::nat) n. t 0 = 0 ⟹ t 1 = 1 ⟹ (n > 1) ⟹ t n = t (n-2) + t (n-1) ⟹ a mod 16 = 5 ⟹ b mod 16 = 10 ⟹ c mod 16 = 15 ⟹ (t a + t b + t c) mod 7 = 5
+⋀(x::nat) (y::nat). x mod 19 = (4:: nat) ⟹ y mod 19 = (7:: nat) ⟹ (x+1)^2 * (y+5)^3 mod 19 = (13:: nat)
+⋀(u::nat) (v::nat). 27 * u mod 40 = 17 ⟹ 27 * v mod 40 = 17 ⟹ u < 40 ⟹ v < 80 ⟹ 40 < v ⟹ (u + v) = 62
+⋀(n::nat) (m::nat). 15^n dvd (fact 942) ⟹ ((15::nat)^m dvd (fact 942)) ⟹ m \<le> n ⟹ n=233
+(gcd 6432 132) + 11 = (23::nat)
+⋀(n::nat). n mod 8 = (7::nat) ⟹ n mod 4 = 3
+⋀(n::nat). n = card {k::nat. gcd k 8 = 1 \<and> 1\<le>k \<and> k < 8} ⟹ (3^n) mod 8 = (1::nat)
+(\<Sum> k< 11. k) mod 9 = (1::nat)
+⋀(b::nat). 0<b ⟹ 3 * b^2 + 2 * b + 1 = 57 ⟹ b=4
+⋀(n::nat) (k::nat). n / k < 6 ⟹ 5 < n / k ⟹ 22 \<le> (lcm n k) / (gcd n k)
+(\<Sum> k \<in> ({n::nat. n dvd (30^4)}). 1) - 2 = (123::nat)
+(LEAST t::nat. (lcm 12 t)^3 = (12 * t)^2) = 18
+(LEAST x ::nat. [30 * x = 42] (mod 47)) = 39
+(91145+91146+91147+91148) mod 4 = (2::nat)
+⋀(l::int) (r::int) (a::int) (b::int). 0\<le>l ⟹ l<7 ⟹ 0\<le>r ⟹ r<7 ⟹ [l * (2 + 3) = 1] (mod 7) ⟹ 0\<le>a \<and> a<7 \<and> [a*2=1] (mod 7) ⟹ 0\<le>b \<and> b<7 \<and> [b*3=1] (mod 7) ⟹ r = (a+b) mod 7 ⟹ l - r = 1
+(LEAST a ::nat. [a = 2] (mod 3) \<and> [a = 4] (mod 5) \<and> [a = 6] (mod 7) \<and> [a = 8] (mod 9)) = 314
+⋀(n::nat). n>0 ⟹ card ({k. k dvd (2*n)}) = 28 ⟹ card ({k. k dvd (3*n)}) = 30 ⟹ card ({k. k dvd (6*n)}) = 35
+(fact 9) mod 10 = (0::nat)
+⋀(m::nat) (x::nat). 10 \<le> m ⟹ m \<le> 99 ⟹ (6 * x) mod m = 1 ⟹ (x - 6^2) mod m = 0 ⟹ m = 43
+71 mod 3 = (2::nat)
+floor ((9::real) / 160 * 100) = (5::int)
+⋀(n::nat). (5 * n) mod 17 = 8 ⟹ n mod 17 = 5
+2003 mod 11 = (1::nat)
+⋀(n::nat). n \<noteq> 0 ⟹ (2::nat) dvd 4^n
+⋀n. a 0 = 1 ⟹ a (n+1) = (\<Prod>(k::nat) =1..n. (a k))+4 ⟹ (n\<ge>1) ⟹ a n - sqrt (a (n+1)) = 2
+⋀(n::nat) (k::nat). 0 < n \<and> 0 < k ⟹ k \<le> n ⟹ ((n choose k)) = (((n - 1) choose k)) + (((n - 1) choose (k - 1)))
+⋀(n::int) (p::nat). prime p ⟹ p dvd n \<longleftrightarrow> (n^2) mod p = 0
+⋀(a::int). a^2 mod 3 = 0 \<or> a^2 mod 3 = 1
+⋀(a::int). (a^2 mod 4 = 0) \<or> (a^2 mod 4 = 1)
+⋀(n::nat) (k::nat). 0<n \<and> 0<k ⟹ k\<le>n ⟹ ((n choose k)) = ((((n-1) choose k))) + ((((n-1) choose (k-1))))
+⋀(x::rat) (y::rat). snd (quotient_of (x^2 + y^2)) = 1 ⟹ snd (quotient_of x) = snd (quotient_of y)
