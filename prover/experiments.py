@@ -9,14 +9,14 @@ Examples
 --------
 Bench:
   python -m prover.experiments bench --suite lists --beam 3 --budget-s 6 --reranker both
-  python -m prover.experiments bench --file benchmarks/lists.txt --model 'qwen3-coder:30b'
+  python -m prover.experiments bench --file datasets/lists.txt --model 'qwen3-coder:30b'
 
 Regress:
   python -m prover.experiments regress --suite lists --baseline baselines/lists.json
-  python -m prover.experiments regress --file benchmarks/lists.txt --save-baseline baselines/lists.json
+  python -m prover.experiments regress --file datasets/lists.txt --save-baseline baselines/lists.json
 
 Aggregate:
-  python -m prover.experiments aggregate --dir benchmarks/results --best-only --top-k 3
+  python -m prover.experiments aggregate --dir datasets/results --best-only --top-k 3
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .prover import prove_goal
 
 # ---------- Common paths ----------
-BENCH_DIR = Path("benchmarks")
+BENCH_DIR = Path("datasets")
 RESULTS_DIR = BENCH_DIR / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 

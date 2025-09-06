@@ -162,26 +162,26 @@ python -m prover.cli --goal 'rev (rev xs) = xs' \
 
 ### 3.3 Multiple goals from a file
 ```bash
-python -m prover.cli --goals-file benchmarks/lists.txt \
+python -m prover.cli --goals-file datasets/lists.txt \
   --model "gemini:gemini-2.5-pro"
 ```
 
 ### 3.4 Benchmarking
 ```bash
 python -m prover.experiments bench --suite lists
-# Results → benchmarks/results/
+# Results → datasets/results/
 ```
 
 ### 3.5 Regression testing
 Create baseline:
 ```bash
 python -m prover.experiments regress --suite lists \
-  --save-baseline benchmarks/baselines/lists.json
+  --save-baseline datasets/baselines/lists.json
 ```
 Compare to baseline:
 ```bash
 python -m prover.experiments regress --suite lists \
-  --baseline benchmarks/baselines/lists.json \
+  --baseline datasets/baselines/lists.json \
   --model "hf:meta-llama/Llama-3.1-8B-Instruct"
 ```
 
@@ -287,7 +287,7 @@ Maybe train rerankers using on the logs from the validation set, and then run th
 
 ## 4. Project Structure
 ```
-benchmarks/        # Goal suites and CSV results
+datasets/          # Datasets and results
 isabelle_ui/       # Isabelle/jEdit integration (HTTP server + macros)
 planner/           # Proof outline planner (supports Ollama, Gemini CLI, HF)
 prover/            # Step prover (supports Ollama, Gemini CLI, HF) + reranker
