@@ -22,6 +22,7 @@ This repository implements an Isabelle/HOL theorem prover guided by Large Langua
   - [3.6 Aggregating results](#36-aggregating-results)
   - [3.7 Training a reranker](#37-training-a-reranker)
   - [3.8 Isabelle/jEdit GUI integration](#38-isabellejedit-gui-integration)
+  - [3.9 Evaluation using mini-F2F](#39-evaluation-using-mini-f2f)
 - [4. Project Structure](#5-project-structure)
 - [5. Notes & Tips](#6-notes--tips)
 - [6. License](#7-license)
