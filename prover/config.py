@@ -1,93 +1,120 @@
-# prover/config.py
+# prover/config.py 
 """
 Central config for the LLM-guided Isabelle/HOL prover.
 
-This file intentionally exposes BOTH the modern names (OLLAMA_TEMP, etc.)
-and the legacy names used across existing modules (TEMP, TOP_P, TIMEOUT_S,
-NUM_CANDIDATES) to avoid ImportErrors.
-"""
+This version keeps full backward compatibility with existing imports and
+naming (MODEL, TEMP/TOP_P/TIMEOUT_S aliases, etc.), while simplifying env
+parsing and adding tiny safety checks.
 
+Key small improvements:
+- Central _get() helper to remove repetitive getenv/parse/strip code
+- Light validation/clamping for OLLAMA_TEMP and OLLAMA_TOP_P
+- Snapshot dataclass uses slots/frozen for smaller/faster instances
+- refresh_from_env() to re-read the environment into module globals
+"""
 from __future__ import annotations
+
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
-# ---------- helpers ----------
-def _env_str(name: str, default: str) -> str:
-    v = os.getenv(name)
-    return v if (v is not None and v.strip() != "") else default
-
-def _env_int(name: str, default: int) -> int:
+# ----------------- helpers -----------------
+def _get(name: str, default: Any, conv: Optional[Callable[[str], Any]] = None) -> Any:
+    """Read env var and convert; empty/whitespace means 'unset' -> default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "":
+        return default
+    if conv is None:
+        return raw
     try:
-        return int(os.getenv(name, "").strip() or default)
+        return conv(raw)
     except Exception:
         return default
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, "").strip() or default)
-    except Exception:
-        return default
+def _to_int(s: str) -> int:
+    return int(s)
 
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    v = v.strip().lower()
-    return v in {"1", "true", "yes", "y", "on"}
+def _to_float(s: str) -> float:
+    return float(s)
 
-# ---------- Ollama / LLM ----------
-OLLAMA_HOST: str = _env_str("OLLAMA_HOST", "http://127.0.0.1:11434")
-MODEL: str = _env_str("OLLAMA_MODEL", "gemma3:27b")
+def _to_bool(s: str) -> bool:
+    return s.strip().lower() in {"1", "true", "yes", "y", "on"}
 
-# Modern names
-OLLAMA_TEMP: float = _env_float("OLLAMA_TEMP", 0.2)
-OLLAMA_TOP_P: float = _env_float("OLLAMA_TOP_P", 0.95)
-OLLAMA_TIMEOUT_S: int = _env_int("OLLAMA_TIMEOUT_S", 120)
-OLLAMA_NUM_PREDICT: int = _env_int("OLLAMA_NUM_PREDICT", 256)
+def _split_ws(s: str) -> list[str]:
+    return [t for t in s.split() if t]
 
-# Legacy aliases (kept for compatibility with llm.py/logging_utils.py)
-TEMP: float = OLLAMA_TEMP
-TOP_P: float = OLLAMA_TOP_P
-TIMEOUT_S: int = OLLAMA_TIMEOUT_S
 
-# How many raw candidates we ask the LLM to produce per model call
-NUM_CANDIDATES: int = _env_int("NUM_CANDIDATES", 6)
+# ----------------- load (with minimal validation) -----------------
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return hi if x > hi else lo if x < lo else x
 
-# ---------- Search / beam ----------
-BEAM_WIDTH: int = _env_int("BEAM_WIDTH", 3)
-MAX_DEPTH: int = _env_int("MAX_DEPTH", 8)
-HINT_LEMMAS: int = _env_int("HINT_LEMMAS", 6)
-FACTS_LIMIT: int = _env_int("FACTS_LIMIT", 6)
+def _load_from_env() -> Dict[str, Any]:
+    d: Dict[str, Any] = {}
 
-# ---------- Minimization / Variants ----------
-MINIMIZE_DEFAULT: bool = _env_bool("MINIMIZE_DEFAULT", True)
-MINIMIZE_TIMEOUT: int = _env_int("MINIMIZE_TIMEOUT", 8)
-MINIMIZE_MAX_FACT_TRIES: int = _env_int("MINIMIZE_MAX_FACT_TRIES", 6)
+    # ---------- Ollama / LLM ----------
+    d["OLLAMA_HOST"] = _get("OLLAMA_HOST", "http://127.0.0.1:11434")
+    d["MODEL"] = _get("OLLAMA_MODEL", "gemma3:27b")
 
-VARIANTS_DEFAULT: bool = _env_bool("VARIANTS_DEFAULT", False)
-VARIANT_TIMEOUT: int = _env_int("VARIANT_TIMEOUT", 6)
-VARIANT_TRIES: int = _env_int("VARIANT_TRIES", 24)
+    # Modern names
+    d["OLLAMA_TEMP"] = _clamp(_get("OLLAMA_TEMP", 0.2, _to_float), 0.0, 2.0)
+    # Most engines assume (0,1]; allow 0 for deterministic; clamp >1 to 1.0
+    d["OLLAMA_TOP_P"] = _clamp(_get("OLLAMA_TOP_P", 0.95, _to_float), 0.0, 1.0)
+    d["OLLAMA_TIMEOUT_S"] = _get("OLLAMA_TIMEOUT_S", 120, _to_int)
+    d["OLLAMA_NUM_PREDICT"] = _get("OLLAMA_NUM_PREDICT", 256, _to_int)
 
-# ---------- Reranker ----------
-RERANKER_DIR: Path = Path(_env_str("RERANKER_DIR", "models")).resolve()
-RERANKER_OFF: bool = _env_bool("RERANKER_OFF", False)
+    # Legacy aliases (kept for compatibility with llm.py/logging_utils.py)
+    d["TEMP"] = d["OLLAMA_TEMP"]
+    d["TOP_P"] = d["OLLAMA_TOP_P"]
+    d["TIMEOUT_S"] = d["OLLAMA_TIMEOUT_S"]
 
-# ---------- Logging ----------
-LOG_DIR: Path = Path(_env_str("LOG_DIR", "logs")).resolve()
+    # How many raw candidates we ask the LLM to produce per model call
+    d["NUM_CANDIDATES"] = _get("NUM_CANDIDATES", 6, _to_int)
+
+    # ---------- Search / beam ----------
+    d["BEAM_WIDTH"] = _get("BEAM_WIDTH", 3, _to_int)
+    d["MAX_DEPTH"] = _get("MAX_DEPTH", 8, _to_int)
+    d["HINT_LEMMAS"] = _get("HINT_LEMMAS", 6, _to_int)
+    d["FACTS_LIMIT"] = _get("FACTS_LIMIT", 6, _to_int)
+
+    # ---------- Minimization / Variants ----------
+    d["MINIMIZE_DEFAULT"] = _get("MINIMIZE_DEFAULT", True, _to_bool)
+    d["MINIMIZE_TIMEOUT"] = _get("MINIMIZE_TIMEOUT", 8, _to_int)
+    d["MINIMIZE_MAX_FACT_TRIES"] = _get("MINIMIZE_MAX_FACT_TRIES", 6, _to_int)
+
+    d["VARIANTS_DEFAULT"] = _get("VARIANTS_DEFAULT", False, _to_bool)
+    d["VARIANT_TIMEOUT"] = _get("VARIANT_TIMEOUT", 6, _to_int)
+    d["VARIANT_TRIES"] = _get("VARIANT_TRIES", 24, _to_int)
+
+    # ---------- Reranker ----------
+    d["RERANKER_DIR"] = Path(_get("RERANKER_DIR", "models")).resolve()
+    d["RERANKER_OFF"] = _get("RERANKER_OFF", False, _to_bool)
+
+    # ---------- Logging ----------
+    d["LOG_DIR"] = Path(_get("LOG_DIR", "logs")).resolve()
+    d["ATTEMPTS_LOG"] = str(d["LOG_DIR"] / _get("ATTEMPTS_LOG", "attempts.log.jsonl"))
+    d["RUNS_LOG"] = str(d["LOG_DIR"] / _get("RUNS_LOG", "runs.log.jsonl"))
+
+    # ---------- Isabelle ----------
+    d["ISABELLE_SESSION"] = _get("ISABELLE_SESSION", "HOL")
+
+    # extra imports for the Scratch theory (space-separated)
+    d["EXTRA_IMPORTS"] = _split_ws(os.environ.get("EXTRA_IMPORTS", ""))
+
+    return d
+
+
+# ----------------- module globals -----------------
+# Create LOG_DIR eagerly as before (import-time side effect preserved)
+_env = _load_from_env()
+globals().update(_env)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-ATTEMPTS_LOG: str = str(LOG_DIR / _env_str("ATTEMPTS_LOG", "attempts.log.jsonl"))
-RUNS_LOG: str = str(LOG_DIR / _env_str("RUNS_LOG", "runs.log.jsonl"))
-
-# ---------- Isabelle ----------
-ISABELLE_SESSION: str = _env_str("ISABELLE_SESSION", "HOL")
-
-# extra imports for the Scratch theory (space-separated), default empty
-EXTRA_IMPORTS = os.getenv("EXTRA_IMPORTS", "").split()
 
 # ---------- Snapshot ----------
-@dataclass
+@dataclass(slots=True, frozen=True)
 class Snapshot:
     model: str
     beam_width: int
@@ -111,28 +138,41 @@ class Snapshot:
     isabelle_session: str
 
 def snapshot_dict() -> Dict[str, Any]:
-    return asdict(Snapshot(
-        model=MODEL,
-        beam_width=BEAM_WIDTH,
-        max_depth=MAX_DEPTH,
-        hint_lemmas=HINT_LEMMAS,
-        facts_limit=FACTS_LIMIT,
-        minimize_default=MINIMIZE_DEFAULT,
-        minimize_timeout=MINIMIZE_TIMEOUT,
-        minimize_max_fact_tries=MINIMIZE_MAX_FACT_TRIES,
-        variants_default=VARIANTS_DEFAULT,
-        variant_timeout=VARIANT_TIMEOUT,
-        variant_tries=VARIANT_TRIES,
-        reranker_dir=str(RERANKER_DIR),
-        reranker_off=RERANKER_OFF,
-        ollama_host=OLLAMA_HOST,
-        ollama_temp=OLLAMA_TEMP,
-        ollama_top_p=OLLAMA_TOP_P,
-        ollama_timeout_s=OLLAMA_TIMEOUT_S,
-        ollama_num_predict=OLLAMA_NUM_PREDICT,
-        num_candidates=NUM_CANDIDATES,
-        isabelle_session=ISABELLE_SESSION,
-    ))
+    return asdict(
+        Snapshot(
+            model=MODEL,
+            beam_width=BEAM_WIDTH,
+            max_depth=MAX_DEPTH,
+            hint_lemmas=HINT_LEMMAS,
+            facts_limit=FACTS_LIMIT,
+            minimize_default=MINIMIZE_DEFAULT,
+            minimize_timeout=MINIMIZE_TIMEOUT,
+            minimize_max_fact_tries=MINIMIZE_MAX_FACT_TRIES,
+            variants_default=VARIANTS_DEFAULT,
+            variant_timeout=VARIANT_TIMEOUT,
+            variant_tries=VARIANT_TRIES,
+            reranker_dir=str(RERANKER_DIR),
+            reranker_off=RERANKER_OFF,
+            ollama_host=OLLAMA_HOST,
+            ollama_temp=OLLAMA_TEMP,
+            ollama_top_p=OLLAMA_TOP_P,
+            ollama_timeout_s=OLLAMA_TIMEOUT_S,
+            ollama_num_predict=OLLAMA_NUM_PREDICT,
+            num_candidates=NUM_CANDIDATES,
+            isabelle_session=ISABELLE_SESSION,
+        )
+    )
+
+def refresh_from_env() -> None:
+    """Reload module-level config from the current environment.
+
+    Useful in tests or when scripts set os.environ at runtime and want
+    to reflect updates without re-importing this module.
+    """
+    new = _load_from_env()
+    globals().update(new)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)  # preserve side-effect
+
 
 __all__ = [
     # LLM / Ollama
@@ -150,7 +190,7 @@ __all__ = [
     # Logging
     "LOG_DIR", "ATTEMPTS_LOG", "RUNS_LOG",
     # Isabelle
-    "ISABELLE_SESSION",
-    # Snapshot
-    "snapshot_dict",
+    "ISABELLE_SESSION", "EXTRA_IMPORTS",
+    # Snapshot / utils
+    "snapshot_dict", "refresh_from_env",
 ]

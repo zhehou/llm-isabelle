@@ -42,7 +42,7 @@ def _shutdown():
 class ProveReq(BaseModel):
     goal: str
     model: Optional[str] = None
-    budget_s: int = 8
+    timeout: int = 8
     beam: int = 2
     max_depth: int = 8
     facts_limit: int = 6
@@ -75,7 +75,7 @@ def prove(req: ProveReq):
     res = prove_goal(
         isabelle, SESSION, req.goal,
         model_name_or_ensemble=model,
-        beam_w=req.beam, max_depth=req.max_depth, hint_lemmas=6, budget_s=req.budget_s,
+        beam_w=req.beam, max_depth=req.max_depth, hint_lemmas=6, timeout=req.timeout,
         models=None, save_dir=None,
         use_sledge=req.sledge, sledge_timeout=req.sledge_timeout, sledge_every=req.sledge_every,
         trace=False, use_color=False,
@@ -102,7 +102,7 @@ def prove(req: ProveReq):
 class PlanFillReq(BaseModel):
     goal: str
     model: Optional[str] = None
-    budget_s: int = 10
+    timeout: int = 100
     mode: str = "auto"    # "auto" or "outline"
 
 class PlanFillResp(BaseModel):
@@ -119,7 +119,7 @@ def plan_fill(req: PlanFillReq):
     backend = detect_backend_for_model(model)
     print(f"[plan_fill] model={model} backend={backend} mode={req.mode} goal={req.goal[:80]}")
 
-    r = plan_and_fill(goal=req.goal, model=model, budget_s=req.budget_s, mode=req.mode)
+    r = plan_and_fill(goal=req.goal, model=model, timeout=req.timeout, mode=req.mode)
     return PlanFillResp(
         success=bool(r.success),
         outline=str(r.outline),

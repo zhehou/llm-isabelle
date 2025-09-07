@@ -12,13 +12,63 @@ This collapses: prechecks.py, sledge.py, mining.py, variants.py, macros.py
 
 from __future__ import annotations
 
+import os
 import json
 import re
 import time
 import textwrap
-from typing import List, Optional, Dict, Tuple
+from collections import Counter, defaultdict
+from typing import List, Optional, Dict, Tuple, Iterable
 
 from .isabelle_api import build_theory, run_theory, finished_ok  # reuse shared API
+
+# --- Small internal helpers to robustly read Isabelle responses (no API changes) ---
+def _normalize_response_type(rt: object) -> str:
+    """Return 'NOTE', 'FINISHED', etc., tolerating Enums/strings/objects."""
+    try:
+        if hasattr(rt, "name"):
+            return str(getattr(rt, "name")).strip().upper()
+        if isinstance(rt, str):
+            return rt.strip().upper()
+        s = str(rt).strip().upper()
+        if "NOTE" in s:
+            return "NOTE"
+        if "FINISHED" in s:
+            return "FINISHED"
+        return s
+    except Exception:
+        return ""
+
+def _decode_body(obj: object) -> Optional[dict]:
+    """Decode response_body which may be dict / JSON string / bytes."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            obj = obj.decode("utf-8", "replace")
+        except Exception:
+            obj = str(obj)
+    if isinstance(obj, str):
+        try:
+            return json.loads(obj)
+        except Exception:
+            return None
+    return None
+
+def _iter_note_messages(responses) -> Iterable[str]:
+    """Yield NOTE messages as plain strings across client variants."""
+    for r in (responses or []):
+        if _normalize_response_type(getattr(r, "response_type", None)) != "NOTE":
+            continue
+        body = _decode_body(getattr(r, "response_body", None))
+        if not isinstance(body, dict):
+            continue
+        msg = body.get("message")
+        if msg is None:
+            continue
+        yield str(msg)
 
 # --- Variant step templates (tiny helper) ---
 VAR_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9_']*)\b")
@@ -26,10 +76,9 @@ VAR_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9_']*)\b")
 def _likely_vars_from_state_hint(state_hint: str, k: int = 3) -> List[str]:
     if not state_hint:
         return []
-    toks = [t for t in VAR_TOKEN.findall(state_hint)]
+    toks = VAR_TOKEN.findall(state_hint)
     if not toks:
         return []
-    # Prefer common names; then short identifiers
     prefer = ["n", "m", "k", "xs", "ys", "zs", "x", "y", "z"]
     seen, ordered = set(), []
     for p in prefer:
@@ -44,7 +93,6 @@ def variant_step_templates(state_hint: str, limit: int = 4) -> List[str]:
     vars_ = _likely_vars_from_state_hint(state_hint, k=3)
     out, seen = [], set()
     for v in vars_:
-        # Lists/sequences → try induction & cases; naturals → induction; otherwise cases.
         if v in ("xs", "ys", "zs") or v.endswith("s"):
             for c in (f"apply (induction {v})", f"apply (cases {v})"):
                 if c not in seen:
@@ -70,28 +118,16 @@ _NP_HIT = re.compile(r"(?i)(Nitpick\s+found\s+a\s+counterexample|genuine\s+count
 def precheck_quickcheck_refutes(isabelle, session_id: str, steps_with_candidate: List[str], timeout_s: int) -> bool:
     cmd = f"quickcheck[timeout = {int(timeout_s)}]"
     thy = build_theory(steps_with_candidate + [cmd], add_print_state=False, end_with="sorry")
-    for r in run_theory(isabelle, session_id, thy):
-        if getattr(r, "response_type", "") != "NOTE":
-            continue
-        try:
-            msg = json.loads(r.response_body).get("message", "")
-        except Exception:
-            continue
-        if _QC_HIT.search(str(msg)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
+        if _QC_HIT.search(msg):
             return True
     return False
 
 def precheck_nitpick_refutes(isabelle, session_id: str, steps_with_candidate: List[str], timeout_s: int) -> bool:
     cmd = f"nitpick[timeout = {int(timeout_s)}]"
     thy = build_theory(steps_with_candidate + [cmd], add_print_state=False, end_with="sorry")
-    for r in run_theory(isabelle, session_id, thy):
-        if getattr(r, "response_type", "") != "NOTE":
-            continue
-        try:
-            msg = json.loads(r.response_body).get("message", "")
-        except Exception:
-            continue
-        if _NP_HIT.search(str(msg)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
+        if _NP_HIT.search(msg):
             return True
     return False
 
@@ -115,27 +151,20 @@ def _extract_sledge_by_lines(text: str) -> List[str]:
         if m2:
             facts = m2.group(1).strip()
             out.append(f"by (metis {facts})" if facts else "by (metis)")
-    # de-dup
+    # de-dup in-order
     seen, dedup = set(), []
     for c in out:
         if c not in seen:
-            seen.add(c)
-            dedup.append(c)
+            seen.add(c); dedup.append(c)
     return dedup
 
 def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_s: int = 5, limit: int = 5) -> List[str]:
     sh_cmd = f"sledgehammer [timeout = {int(timeout_s)}]"
     thy = build_theory(steps + [sh_cmd], add_print_state=False, end_with="sorry")
     texts: List[str] = []
-    for r in run_theory(isabelle, session_id, thy):
-        if getattr(r, "response_type", "") != "NOTE":
-            continue
-        try:
-            msg = json.loads(r.response_body).get("message", "")
-        except Exception:
-            continue
-        if any(k in str(msg) for k in ("Try this:", "by ", "metis", "Metis")):
-            texts.append(str(msg))
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
+        if any(k in msg for k in ("Try this:", "by ", "metis", "Metis")):
+            texts.append(msg)
     cands: List[str] = []
     for t in texts:
         cands.extend(_extract_sledge_by_lines(t))
@@ -143,8 +172,7 @@ def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_
     for c in cands:
         if c.startswith("by ") or c == "done":
             if c not in seen:
-                seen.add(c)
-                out.append(c)
+                seen.add(c); out.append(c)
                 if len(out) >= limit:
                     break
     return out
@@ -174,20 +202,13 @@ def mine_lemmas_from_state(isabelle, session_id: str, state_hint: str, max_lemma
         return []
     theory_text = _build_find_theorems_theory(toks)
     lemmas, seen = [], set()
-    for r in run_theory(isabelle, session_id, theory_text):
-        if getattr(r, "response_type", "") != "NOTE":
-            continue
-        try:
-            msg = json.loads(r.response_body).get("message", "")
-        except Exception:
-            continue
-        for line in str(msg).splitlines():
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text)):
+        for line in msg.splitlines():
             m = _LEMMA_LINE.match(line.strip())
             if m:
                 name = m.group(1).split(".")[-1]
                 if name not in seen:
-                    seen.add(name)
-                    lemmas.append(name)
+                    seen.add(name); lemmas.append(name)
                     if len(lemmas) >= max_lemmas:
                         return lemmas
     return lemmas
@@ -196,21 +217,14 @@ def mine_facts_prioritized(isabelle, session_id: str, state_hint: str, limit: in
     toks = list(dict.fromkeys(FIND_NAME_TOKENS.findall(state_hint)))
     if not toks:
         return []
-    # Pull general rules plus defs; defs are often decisive for user-defined symbols.
     theory_text = _build_find_theorems_filtered(toks, ["simp", "intro", "rule", "elim", "dest"])
-    # Then add a pass that prefers *_def by name (keep short and cheap)
+    # Prefer *_def by name (cheap extra pass)
     def_name_patterns = [f'name: "{stem}_def"' for stem in toks[:6]]
     if def_name_patterns:
         theory_text += "\n" + "\n".join(f"find_theorems {p} - 10" for p in def_name_patterns)
     freq: Dict[str, int] = {}
-    for r in run_theory(isabelle, session_id, theory_text):
-        if getattr(r, "response_type", "") != "NOTE":
-            continue
-        try:
-            msg = json.loads(r.response_body).get("message", "")
-        except Exception:
-            continue
-        for line in str(msg).splitlines():
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text)):
+        for line in msg.splitlines():
             m = _LEMMA_LINE.match(line.strip())
             if not m:
                 continue
@@ -237,8 +251,7 @@ def _case_finishers(facts: List[str]) -> List[str]:
     seen, out = set(), []
     for x in extras + base:
         if x not in seen:
-            seen.add(x)
-            out.append(x)
+            seen.add(x); out.append(x)
     return out[:10]
 
 def _build_structured_induction_steps(goal: str, var_raw: str, nil_fin: str, cons_fin: str) -> List[str]:
@@ -311,11 +324,6 @@ def try_structured_variants(isabelle, session_id: str, goal: str,
 # =============================================================================
 # Macros (continuation suggestions) — moved from macros.py
 # =============================================================================
-import os
-import json
-from collections import Counter, defaultdict
-from typing import Iterable
-
 # Environment-driven defaults
 MACRO_MIN_COUNT = int(os.environ.get("MACRO_MIN_COUNT", "2"))
 MACRO_MAX_PER_HEAD = int(os.environ.get("MACRO_MAX_PER_HEAD", "5"))
@@ -422,8 +430,7 @@ def suggest_continuations(step: str,
     for cont, w in sorted(choices, key=lambda x: (-int(x[1] if isinstance(x[1], int) else 1), len(_norm(x[0])), _norm(x[0]))):
         c = _norm(cont)
         if c and c not in seen:
-            seen.add(c)
-            ordered.append(c)
+            seen.add(c); ordered.append(c)
             if len(ordered) >= max(1, int(k)):
                 break
     return ordered

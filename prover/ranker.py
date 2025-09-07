@@ -14,16 +14,21 @@ MODEL_BASENAME = "reranker.joblib"
 LATEST_POINTER = "latest.joblib"
 TORCH_LATEST = "latest.pt"
 
+_TRUE = {"1", "true", "yes", "on"}  # normalized truthy set
+
+
 class Reranker:
     """
     Joblib-saved model wrapper (classifier or regressor-wrapper).
 
     - Honors RERANKER_OFF (env or config)
+    - Prefers TorchScript (.pt/.pth) if available, else joblib
     - Supports predict_proba or decision_function
     - Returns 0.5 on any error/unavailable
     """
     def __init__(self):
-        self._disabled = CFG_RERANKER_OFF or (os.environ.get("RERANKER_OFF", "0") in ("1","true","True"))
+        env_off = os.environ.get("RERANKER_OFF", "0").strip().lower() in _TRUE
+        self._disabled = bool(CFG_RERANKER_OFF or env_off)
         self.model: Optional[Any] = None
         self.torch_model: Optional[Any] = None    # TorchScript .pt/.pth
         if not self._disabled:
@@ -31,24 +36,27 @@ class Reranker:
 
     def _try_load(self):
         dirp = Path(CFG_RERANKER_DIR)
-        # Prefer TorchScript (.pt/.pth) if present
+
+        # ---- Prefer TorchScript (.pt/.pth) ----
         pt_candidates = []
         p_latest_pt = dirp / TORCH_LATEST
         if p_latest_pt.exists():
             pt_candidates.append(p_latest_pt)
         try:
+            # newest *.pt/*.pth first
             pts = sorted(
-                [Path(p) for pat in ("*.pt","*.pth") for p in glob.glob(str(dirp / pat))],
+                (Path(p) for pat in ("*.pt", "*.pth") for p in glob.glob(str(dirp / pat))),
                 key=lambda p: p.stat().st_mtime, reverse=True
             )
             pt_candidates.extend(pts)
         except Exception:
             pass
+        # stable names (keep end of the list to preserve preference)
         pt_candidates += [dirp / "reranker.pt", dirp / "reranker.pth"]
 
         for p in pt_candidates:
             try:
-                import torch  # lazy import
+                import torch  # lazy import; optional dep
                 if p.exists():
                     m = torch.jit.load(str(p), map_location="cpu")
                     m.eval()
@@ -57,7 +65,7 @@ class Reranker:
             except Exception:
                 continue
 
-        # Fallback to joblib models
+        # ---- Fallback to joblib models ----
         candidates = []
         # 1) explicit "latest" pointer (file/symlink/copy)
         p_latest = dirp / LATEST_POINTER
@@ -74,7 +82,6 @@ class Reranker:
         candidates.append(dirp / MODEL_BASENAME)          # "reranker.joblib"
         candidates.append(dirp / "sk_reranker.joblib")    # legacy name
 
-        self.model = None
         for p in candidates:
             try:
                 if p.exists():
@@ -98,12 +105,13 @@ class Reranker:
                     p = p.view(-1)[0].item()
                     if not (p == p):  # NaN guard
                         return 0.5
-                    return max(0.0, min(1.0, float(p)))            
+                    # Clamp to [0,1] (model expected to emit probabilities already)
+                    return max(0.0, min(1.0, float(p)))
             m = self.model
             if hasattr(m, "predict_proba"):
                 proba = m.predict_proba([feat_row])
                 return float(proba[0][1])
-            if hasattr(m, "decision_function"):                
+            if hasattr(m, "decision_function"):
                 d = float(m.decision_function([feat_row])[0])
                 return 1.0 / (1.0 + math.exp(-d))
         except Exception:

@@ -1,36 +1,63 @@
 # prover/heuristics.py
+from __future__ import annotations
 
-# add at top of prover/heuristics.py
-from .features import STEP_TYPES
 import os
+import re
+from typing import List, Optional
+
+from .features import STEP_TYPES
+
+# Reranker controls (kept identical)
 _RR_W = float(os.environ.get("RERANKER_WEIGHT", "0.5"))
 _SAFE_TOPM = int(os.environ.get("RERANKER_SAFE_TOPM", "0"))  # 0 = no gating
 
-def live_features_for(cmd: str, goal: str, state_hint: str,
-                      depth: int) -> list[float]:
-    g = (goal + " " + (state_hint or "")).lower()
+# Token sets used by live features / heuristics (same strings as before)
+_LISTY = ("@", "append", "rev", "map", "take", "drop")
+_NATTY = ("suc", "nat", "≤", "<", "0", "add", "mult", "+", "-", "*")
+_SETY  = ("∈", "subset", "⋂", "⋃")
+_QTOK  = ("∀", "∃")
+_BOOLY = ("true", "false", "¬", "not", "∧", "∨")
 
-    def flag_any(keys): return int(any(k in g for k in keys))
+# Precompiled once for tiny speed bump
+_DEF_RE = re.compile(r"([A-Za-z0-9_']+)_def\b")
+
+def _any_in(s: str, toks: tuple[str, ...]) -> bool:
+    for t in toks:
+        if t in s:
+            return True
+    return False
+
+def _step_index(cmd: str) -> Optional[int]:
+    s = (cmd or "").strip()
+    for i, t in enumerate(STEP_TYPES):
+        if s.startswith(t):
+            return i
+    return None
+
+def live_features_for(cmd: str, goal: str, state_hint: str, depth: int) -> list[float]:
+    g = (goal + " " + (state_hint or "")).lower()
     base = [
         depth,
-        9999,          # n_sub unknown at proposal time
-        0.0,           # elapsed_ms unknown
-        0,             # cache_hit unknown
-        flag_any(["@", "append", "rev", "map", "take", "drop"]),
-        flag_any(["suc", "nat", "≤", "<", "0", "add", "mult", "+", "-", "*"]),
-        flag_any(["∈", "subset", "⋂", "⋃"]),
-        flag_any(["∀", "∃"]),
-        flag_any(["true", "false", "¬", "not", "∧", "∨"]),
+        9999,   # n_sub unknown at proposal time
+        0.0,    # elapsed_ms unknown
+        0,      # cache_hit unknown
+        int(_any_in(g, _LISTY)),
+        int(_any_in(g, _NATTY)),
+        int(_any_in(g, _SETY)),
+        int(_any_in(g, _QTOK)),
+        int(_any_in(g, _BOOLY)),
     ]
-    step_t = next((t for t in STEP_TYPES if cmd.startswith(t)), None)
-    one_hot = [1 if step_t == t else 0 for t in STEP_TYPES]
-    return base + one_hot + [len(cmd)]
+    idx = _step_index(cmd)
+    one_hot = [0] * len(STEP_TYPES)
+    if idx is not None:
+        one_hot[idx] = 1
+    return base + one_hot + [len(cmd or "")]
 
-from typing import List, Optional, Tuple
+from typing import Optional  # re-affirm for older type checkers
 
 def suggest_common_lemmas(state_hint: str) -> List[str]:
-    txt = state_hint.lower()
-    lemmas = []
+    txt = (state_hint or "").lower()
+    lemmas: List[str] = []
     if "rev" in txt: lemmas.append("rev_rev_ident")
     if "append" in txt or " @ " in txt: lemmas.append("append_assoc")
     if "length" in txt and ("append" in txt or " @ " in txt): lemmas.append("length_append")
@@ -47,24 +74,22 @@ def mk_finisher_variants(lemmas: List[str]) -> List[str]:
 def _heuristic_score(cmd: str, goal: str, state: str, facts: Optional[List[str]] = None) -> float:
     g = (goal + " " + state).lower()
     score = 0.0
-    # Prefer unfolding defs matching symbols in the goal/state (small nudge)
-    import re
-    m = re.search(r"([A-Za-z0-9_']+)_def\b", cmd)
+    m = _DEF_RE.search(cmd)
     if m:
         stem = m.group(1).lower()
         if stem and stem in g:
             score -= 0.25
-    if any(tok in g for tok in ["rev", "@", "append", "map", "take", "drop"]):
+    if _any_in(g, _LISTY):
         if "induction" in cmd: score -= 1.2
         if "cases" in cmd: score -= 0.6
         if cmd.startswith("apply simp"): score -= 0.4
         if "metis" in cmd: score -= 0.2
-    if any(tok in g for tok in ["suc", "nat", "≤", "<", "+", "-", "*", "dvd"]):
+    if _any_in(g, ("suc", "nat", "≤", "<", "+", "-", "*", "dvd")):
         if "induction" in cmd: score -= 0.8
         if "linarith" in cmd: score -= 0.7
         if "arith" in cmd: score -= 0.5
         if "auto" in cmd: score -= 0.3
-    if any(tok in g for tok in ["∈", "subset", "⋂", "⋃", "∀", "∃"]):
+    if _any_in(g, _SETY + _QTOK):
         if "blast" in cmd: score -= 0.7
         if "auto" in cmd: score -= 0.4
     if cmd.startswith("apply simp"): score -= 0.2
@@ -77,25 +102,29 @@ def _heuristic_score(cmd: str, goal: str, state: str, facts: Optional[List[str]]
                 break
     return score
 
-def rank_candidates(cands: List[str], goal: str, state_hint: str,
-                    facts: Optional[List[str]] = None,
-                    reranker=None, depth: int = 0) -> List[str]:
-    # 1) Heuristic-only pass (including your gentle length penalty)
+def rank_candidates(
+    cands: List[str],
+    goal: str,
+    state_hint: str,
+    facts: Optional[List[str]] = None,
+    reranker=None,
+    depth: int = 0
+) -> List[str]:
+    # 1) Heuristic-only base (keep gentle length penalty)
     base = []
     for i, c in enumerate(cands):
         s = _heuristic_score(c, goal, state_hint, facts)
         s += 0.003 * max(0, len(c) - 24)
         base.append((s, len(c), i, c))
 
-    # 2) If no reranker, return pure heuristic order
+    # 2) No ML → return heuristic order
     if not (reranker and getattr(reranker, "available", lambda: False)()):
         base.sort(key=lambda t: (t[0], t[1], t[2]))
         return [c for *_, c in base]
 
-    # 3) Safe top-M gating: apply ML only to the top M by heuristic score
+    # 3) Safe top-M gating: ML rescoring only for top M by heuristic score
     base.sort(key=lambda t: (t[0], t[1], t[2]))
     M = _SAFE_TOPM if _SAFE_TOPM > 0 else len(base)
-
     rescored = []
     for rank, (s, L, i, c) in enumerate(base):
         s_adj = s
@@ -111,12 +140,10 @@ def rank_candidates(cands: List[str], goal: str, state_hint: str,
     rescored.sort(key=lambda t: (t[0], t[1], t[2]))
     return [c for *_, c in rescored]
 
-
 def augment_with_facts_for_steps(cands: List[str], facts: List[str]) -> List[str]:
     if not facts: return cands
-    # Prefer *_def early
     defs = [f for f in facts if f.endswith("_def")]
-    aug = []
+    aug: List[str] = []
     for c in cands:
         aug.append(c)
         if c.startswith("apply simp"):
@@ -144,7 +171,7 @@ def augment_with_facts_for_finishers(base_finishers: List[str], facts: List[str]
     if not facts: return base_finishers
     defs = [f for f in facts if f.endswith("_def")]
     pri = (defs[:6] or facts[:6])  # prefer defs when present
-    extras = []
+    extras: List[str] = []
     for f in pri:
         extras.append(f"by (simp add: {f})")
         extras.append(f"by (simp only: {f})")

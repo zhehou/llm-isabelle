@@ -1,4 +1,3 @@
-# prover/utils.py
 from __future__ import annotations
 
 import hashlib
@@ -23,29 +22,32 @@ ANSI = {
 }
 
 def color(use_color: bool, key: str, s: str) -> str:
-    return (ANSI.get(key, "") + s + ANSI["reset"]) if use_color else s  # :contentReference[oaicite:12]{index=12}
+    # Preserve original behavior: even if key is unknown, append reset.
+    return (ANSI.get(key, "") + s + ANSI["reset"]) if use_color else s
 
 # subgoal parsing
-SUBGOALS_PATTERNS = [
+SUBGOALS_PATTERNS = (
     re.compile(r"\b(\d+)\s+subgoals?\b", re.IGNORECASE),
     re.compile(r"(?i)\bgoal\s*\(\s*(\d+)\s+subgoals?\s*\)"),
-]
+)
 
 def parse_subgoals(block: str) -> Optional[int]:
     for pat in SUBGOALS_PATTERNS:
         m = pat.search(block)
         if m:
             return int(m.group(1))
-    return None  # :contentReference[oaicite:13]{index=13}
+    return None
 
 def state_fingerprint(s: str) -> str:
     """Hash a normalized print_state block to detect revisits."""
     s = " ".join(s.strip().split())
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()  # :contentReference[oaicite:14]{index=14}
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+# Precompiled for slugify_goal
+_SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 def slugify_goal(goal: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9_]+", "_", goal).strip("_")
-    import hashlib
+    base = _SLUG_RE.sub("_", goal).strip("_")
     h = hashlib.sha1(goal.encode("utf-8")).hexdigest()[:8]
     return f"{base[:50]}_{h}" if base else h
 
@@ -67,13 +69,18 @@ def write_jsonl(path: str, obj: dict) -> None:
     """Append a JSON object to a JSONL file, creating parent dirs if needed."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")  # :contentReference[oaicite:15]{index=15}
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 class RunLogger:
     """
     Per-run logger that writes both attempt-level rows (expand/finish/etc.)
     and a final run summary row. Intentionally minimal to avoid coupling.
     """
+    __slots__ = (
+        "run_id", "goal", "model", "start_ts", "elapsed_s", "success",
+        "final_steps", "depth_reached", "use_calls", "_last_known_subgoals",
+    )
+
     def __init__(self, goal: str, model_name: str):
         self.run_id = str(uuid.uuid4())
         self.goal = goal
@@ -84,7 +91,7 @@ class RunLogger:
         self.final_steps: List[str] = []
         self.depth_reached: int = 0
         self.use_calls: int = 0
-        self._last_known_subgoals: Optional[int] = None  # best-effort cache  # :contentReference[oaicite:16]{index=16}
+        self._last_known_subgoals: Optional[int] = None  # best-effort cache
 
     def log_attempt(
         self,
@@ -114,6 +121,7 @@ class RunLogger:
         """
         if subgoals_before is None:
             subgoals_before = self._last_known_subgoals
+        ps = list(prefix_steps or [])
         row = {
             "run_id": self.run_id,
             "ts": time.time(),
@@ -121,8 +129,8 @@ class RunLogger:
             "goal": self.goal,
             "type": kind,
             "depth": int(depth),
-            "prefix_len": len(prefix_steps or []),
-            "prefix": list(prefix_steps or []),
+            "prefix_len": len(ps),
+            "prefix": ps,
             "candidate": candidate,
             "ok": bool(ok),
             "n_subgoals": n_subgoals if (n_subgoals is None or isinstance(n_subgoals, int)) else None,
@@ -137,7 +145,7 @@ class RunLogger:
                     row[k] = v
         write_jsonl(ATTEMPTS_LOG, row)
         if isinstance(n_subgoals, int):
-            self._last_known_subgoals = n_subgoals  # :contentReference[oaicite:17]{index=17}
+            self._last_known_subgoals = n_subgoals
 
     def finish(self, success: bool, final_steps: List[str], depth_reached: int, use_calls: int) -> None:
         """
@@ -170,4 +178,4 @@ class RunLogger:
             "num_candidates": NUM_CANDIDATES,
             "temp": TEMP,
             "top_p": TOP_P,
-        })  # :contentReference[oaicite:18]{index=18}
+        })

@@ -1,13 +1,12 @@
-# planner/skeleton.py
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any, Dict
 import os
 import re
-import json
 import shutil
 import subprocess
 import time
+from functools import lru_cache
 
 import requests
 
@@ -20,6 +19,9 @@ from prover.config import (
     TEMP as OLLAMA_TEMP,              # alias
     TOP_P as OLLAMA_TOP_P,            # alias
 )
+
+# Reuse one HTTP session (keep-alive)
+_SESSION = requests.Session()
 
 # --- Prompt that prefers an OUTLINE, but we won't force it unless requested ---
 SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
@@ -88,7 +90,7 @@ proof -
 qed
 """
 
-@dataclass
+@dataclass(slots=True)
 class Skeleton:
     text: str
     holes: List[Tuple[int, int]]  # (start_idx, end_idx) spans where 'sorry' occurs
@@ -96,6 +98,7 @@ class Skeleton:
 SORRY_RE = re.compile(r"\bsorry\b")
 PROOF_RE = re.compile(r"(?m)^\s*proof(?:\b|\s|\()", re.UNICODE)
 QED_RE   = re.compile(r"(?m)^\s*qed\b", re.UNICODE)
+BY_INLINE_RE = re.compile(r"\s+by\s+.*$")  # replace inline finishers with 'sorry' when forcing outline
 
 # ----------------------------
 # Provider shims (Ollama / HF / Gemini)
@@ -124,7 +127,7 @@ def _ollama_generate_simple(
         },
         "stream": False,
     }
-    resp = requests.post(url, json=payload, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+    resp = _SESSION.post(url, json=payload, timeout=timeout_s or OLLAMA_TIMEOUT_S)
     resp.raise_for_status()
     data = resp.json()
     return (data.get("response") or "").strip()
@@ -157,7 +160,7 @@ def _hf_generate_simple(
         },
         "options": {"wait_for_model": True},
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+    resp = _SESSION.post(url, headers=headers, json=payload, timeout=timeout_s or OLLAMA_TIMEOUT_S)
     resp.raise_for_status()
     data = resp.json()
     if isinstance(data, list) and data:
@@ -179,29 +182,39 @@ _GEMINI_MODEL_ALIASES: Dict[str, str] = {
     "gemini-2.0-pro-exp": "gemini-2.0-pro-exp-02-05",
 }
 
-def _gemini_list_models(timeout_s: Optional[int]) -> List[str]:
+@lru_cache(maxsize=1)
+def _gemini_list_models_cached(key: str) -> List[str]:
     """
-    Return a list of simple model codes (like 'gemini-2.5-pro') if GEMINI_API_KEY is set.
-    Otherwise return [].
+    Cached wrapper (keyed by API key string) to avoid repeated ListModels calls.
+    Returns [] if the key is empty or the call fails.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    if not key:
         return []
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
     try:
-        resp = requests.get(url, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+        resp = _SESSION.get(url, timeout=OLLAMA_TIMEOUT_S)
         resp.raise_for_status()
         data = resp.json()
         out = []
         for m in data.get("models", []):
             name = m.get("name", "")
-            # API returns names like 'models/gemini-2.5-pro' → we want the short code
             short = name.split("/")[-1] if name else ""
             if short:
                 out.append(short)
         return out
     except Exception:
         return []
+
+def _gemini_list_models(timeout_s: Optional[int]) -> List[str]:
+    """
+    Return a list of simple model codes (like 'gemini-2.5-pro') if GEMINI_API_KEY is set.
+    Otherwise return [].
+    """
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        return []
+    # Ignore timeout_s in cache key; it's only for the first call here.
+    return _gemini_list_models_cached(api_key)
 
 def _pick_best_model_id(requested: str, available: List[str]) -> Optional[str]:
     """
@@ -215,7 +228,6 @@ def _pick_best_model_id(requested: str, available: List[str]) -> Optional[str]:
         return None
     if requested in available:
         return requested
-    # prefer stable over preview/exp
     candidates = [m for m in available if m.startswith(requested)]
     if candidates:
         stable = [m for m in candidates if ("preview" not in m and "exp" not in m)]
@@ -295,7 +307,7 @@ def _gemini_rest_generate_simple(
     attempt = 0
     while True:
         attempt += 1
-        resp = requests.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+        resp = _SESSION.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
         if resp.status_code == 429 and attempt <= retries:
             time.sleep(backoff_s * attempt)
             continue
@@ -431,12 +443,11 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
         text = text.rstrip() + "\nqed\n"
 
     if force_outline:
-        # Replace inline ' by ...' with ' sorry'
+        # Replace inline finishers ('... by simp') with '... sorry'
         lines = text.splitlines()
         for i, L in enumerate(lines):
-            j = L.find(" by ")
-            if j != -1:
-                lines[i] = L[:j].rstrip() + " sorry"
+            if " by " in L:
+                lines[i] = BY_INLINE_RE.sub(" sorry", L)
         text = "\n".join(lines)
 
         # Ensure at least one sorry before qed

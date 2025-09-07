@@ -1,5 +1,6 @@
-# prover/prompts.py
+# prover/prompts.py (optimized, compatible)
 import re
+from typing import List, Sequence
 
 SYSTEM_STEPS = """You are an Isabelle/HOL proof expert.
 Given:
@@ -93,21 +94,43 @@ Constraints:
 - 3 to 8 candidates.
 """
 
-_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?([a-zA-Z].*?)\s*$")
+# Precompiled once (same patterns as before)
+_LINE_RE   = re.compile(r"^\s*(?:[-*]\s*)?([a-zA-Z].*?)\s*$")
+_FENCE_RE  = re.compile(r"```.*?```", re.DOTALL | re.MULTILINE)
+_OLENUM_RE = re.compile(r"^\d+\.\s*")
+_WS_RE     = re.compile(r"\s+")
 
-def parse_ollama_lines(text: str, allowed_prefixes, max_items: int):
-    if text.startswith("__ERROR__"): return []
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL | re.MULTILINE)
-    lines = text.splitlines()
-    out, seen = [], set()
-    for ln in lines:
+def parse_ollama_lines(text: str, allowed_prefixes: Sequence[str], max_items: int) -> List[str]:
+    """
+    Extract LLM output lines that start with one of `allowed_prefixes`.
+    - Dedents code blocks fenced by ```...```.
+    - Strips list numbering like '1. ...' and bullets.
+    - Collapses internal whitespace to single spaces.
+    Behavior and return shape unchanged.
+    """
+    if text.startswith("__ERROR__"):
+        return []
+    if not text:
+        return []
+
+    text = _FENCE_RE.sub("", text)
+    out: List[str] = []
+    seen = set()
+    prefixes = tuple(allowed_prefixes) if not isinstance(allowed_prefixes, tuple) else allowed_prefixes
+
+    for ln in text.splitlines():
         m = _LINE_RE.match(ln)
-        if not m: continue
-        cand = re.sub(r"^\d+\.\s*", "", m.group(1).strip())
-        if not cand or len(cand) > 120 or "#" in cand: continue
-        if not any(cand.startswith(p) for p in allowed_prefixes): continue
-        cand = re.sub(r"\s+", " ", cand)
+        if not m:
+            continue
+        cand = _OLENUM_RE.sub("", m.group(1).strip())
+        if not cand or len(cand) > 120 or "#" in cand:
+            continue
+        if not cand.startswith(prefixes):
+            continue
+        cand = _WS_RE.sub(" ", cand)
         if cand not in seen:
-            seen.add(cand); out.append(cand)
-        if len(out) >= max_items: break
+            seen.add(cand)
+            out.append(cand)
+        if len(out) >= max_items:
+            break
     return out

@@ -1,4 +1,3 @@
-# prover/prover.py
 from collections import defaultdict, OrderedDict
 import time, json, re, os, hashlib
 from typing import List, Tuple, Optional, Dict, Any
@@ -12,7 +11,6 @@ from .config import (
 from .llm import propose_steps, propose_finishers
 from .isabelle_api import build_theory, run_theory, finished_ok, last_print_state_block, use_calls_count
 
-# Replaced 4 imports with a single tactics module
 from .tactics import (
     mine_lemmas_from_state, mine_facts_prioritized,
     sledgehammer_finishers,
@@ -64,22 +62,18 @@ def try_step_raw(isabelle, session_id: str, steps: List[str], cand: str) -> Tupl
     return ok, n, hint, (time.monotonic() - t0) * 1000
 
 def try_step_cached(isabelle, session_id: str, steps: List[str], cand: str) -> Tuple[bool, Optional[int], str, bool, float]:
-    # 1) Global LRU across runs
     gkey = _global_cache_key(steps, cand)
     gval = _global_cache_get(gkey)
     if gval is not None:
         ok, n_sub, hint = gval
         return ok, n_sub, hint, True, 0.0
 
-    # 2) Per-run memo
     key = (tuple(steps), cand)
     if key in _result_cache:
         ok, n_sub, hint = _result_cache[key]
-        # also refresh global LRU
         _global_cache_put(gkey, (ok, n_sub, hint))
         return ok, n_sub, hint, True, 0.0
 
-    # 3) Fresh eval
     ok, n_sub, hint, elapsed_ms = try_step_raw(isabelle, session_id, steps, cand)
     _result_cache[key] = (ok, n_sub, hint)
     _global_cache_put(gkey, (ok, n_sub, hint))
@@ -93,7 +87,8 @@ def try_finish(isabelle, session_id: str, steps: List[str], fin: str) -> Tuple[b
     return ok, (time.monotonic() - t0) * 1000
 
 def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str,
-               beam_w: int, max_depth: int, hint_lemmas: int, budget_s: int,
+               beam_w: int, max_depth: int, hint_lemmas: int,
+               timeout: Optional[int] = None,  # timeout is the single source of truth
                models: Optional[List[str]] = None, save_dir: Optional[str] = None,
                use_sledge: bool = False, sledge_timeout: int = 5, sledge_every: int = 2,
                trace: bool = False, use_color: bool = True,
@@ -102,8 +97,10 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                facts_limit: int = 6,
                do_minimize: bool = True, minimize_timeout: int = 8,
                do_variants: bool = True, variant_timeout: int = 6, variant_tries: int = 24,
-               macro_map: Optional[Dict[str, List[Tuple[str, int]]]] = None, 
+               macro_map: Optional[Dict[str, List[Tuple[str, int]]]] = None,
                enable_reranker: bool = True) -> Dict[str, Any]:
+
+    budget = timeout if timeout is not None else 10
 
     reranker = None
     if enable_reranker and os.environ.get("RERANKER_OFF", "0") not in ("1", "true", "True"):
@@ -112,23 +109,30 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
     global _result_cache
     _result_cache = {}
 
-    model_list = models if models else [model_name_or_ensemble]
+    # Resolve models robustly (planner may pass model=None)
+    if models:
+        model_list = [str(m) for m in models if m]
+    else:
+        default_model = model_name_or_ensemble or os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")
+        model_list = [str(default_model)]
+    if not model_list:
+        model_list = [os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")]
     display_model = ",".join(model_list)
     logger = RunLogger(goal, display_model)
 
     start_t = time.monotonic()
-    def time_left_s() -> float: return budget_s - (time.monotonic() - start_t)
+    def time_left_s() -> float: return budget - (time.monotonic() - start_t)
 
     seed_steps = [f'lemma "{goal}"']
     beam: List[Tuple[int, List[str], str, Optional[int]]] = [(9999, seed_steps, "", None)]
-    visited_by_depth = defaultdict(set)  # depth -> set(state_fingerprint)
+    visited_by_depth = defaultdict(set)
 
     last_best_n: Optional[int] = None
     stagnant_depths = 0
 
     if trace:
         print(color(use_color, "bold", f"\n▶ Goal: {goal}"))
-        print(color(use_color, "gray", f"Models: {display_model} | Beam={beam_w} | MaxDepth={max_depth} | Budget={budget_s}s"))
+        print(color(use_color, "gray", f"Models: {display_model} | Beam={beam_w} | MaxDepth={max_depth} | Timeout={budget}s"))
 
     for depth in range(max_depth):
         if time_left_s() <= 0:
@@ -153,11 +157,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 stagnant_depths += 1
             last_best_n = best_n_now
         variant_burst = do_variants and (stagnant_depths >= 2)
-        # temperature schedule based on stagnation
         steps_temp  = min(0.9, 0.5 + 0.10 * stagnant_depths)
-        finish_temp = min(0.6, 0.2 + 0.05 * stagnant_depths)        
+        finish_temp = min(0.6, 0.2 + 0.05 * stagnant_depths)
 
-        # Facts from top-of-beam
         facts_for_depth: List[str] = []
         if beam and beam[0][2]:
             try:
@@ -167,7 +169,6 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             except Exception as e:
                 if trace: print(color(use_color, "yellow", f"Facts mining error ignored: {e}"))
 
-        # Sledgehammer (top-of-beam only)
         sledge_sugs: List[str] = []
         if use_sledge and depth % max(1, sledge_every) == 0 and beam:
             try:
@@ -231,8 +232,6 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             cands = dedup_c
             if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
             if not cands: continue
-            # Stable group id for this proposal batch (per run/depth/prefix/state)
-            import hashlib
             state_fp_before = state_fingerprint(state_hint or "")
             pid_seed = f"{logger.run_id}|d={depth_reached}|{state_fp_before}|{len(steps)}|{steps[-2:] if steps else ''}"
             proposal_id = hashlib.sha1(pid_seed.encode('utf-8')).hexdigest()[:12]
@@ -242,18 +241,16 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             for k, c in enumerate(cands):
                 if time_left_s() <= 0: break
                 pruned = False
-                # Gate QC on boolean-ish shape (quantifiers/booleans in goal or state)
-                if use_qc and _should_boolean_precheck and depth % max(1, 1) == 0:
+                if use_qc and _should_boolean_precheck and depth % max(1, qc_every) == 0:
                     try:
-                        if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=2):
+                        if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=qc_timeout):
                             pruned = True
                             if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by quickcheck]"))
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {e}"))
-                # Gate Nitpick similarly (heavier than QC)
-                if not pruned and use_np and _should_boolean_precheck and depth % max(1, 2) == 0:
+                if not pruned and use_np and _should_boolean_precheck and depth % max(1, np_every) == 0:
                     try:
-                        if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=5):
+                        if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=np_timeout):
                             pruned = True
                             if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by nitpick]"))
                     except Exception as e:
@@ -290,9 +287,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 if fp in visited_by_depth[depth_reached]:
                     continue
                 visited_by_depth[depth_reached].add(fp)
-                # immediate macro continuation
                 if macro_map:
-                    from .tactics import suggest_continuations
                     for cont in suggest_continuations(c, macro_map, k=1):
                         ok2, n_sub2, hint2, cache_hit2, elapsed_ms2 = try_step_cached(isabelle, session_id, steps + [c], cont)
                         logger.log_attempt(

@@ -45,6 +45,34 @@ from .features import STEP_TYPES, feature_names  # schema only
 
 
 # -----------------------
+# Small path/pointer helpers
+# -----------------------
+def _reranker_dir() -> Path:
+    return Path(os.environ.get("RERANKER_DIR", str(config.RERANKER_DIR)))
+
+
+def _write_pointer(out_path: Path, pointer_name: str, meta: Optional[Dict[str, Any]] = None) -> None:
+    """Create/refresh {pointer_name} alongside the model; fall back to copy if symlink fails."""
+    out_dir = out_path.parent
+    ptr = out_dir / pointer_name
+    try:
+        if ptr.exists() or ptr.is_symlink():
+            ptr.unlink()
+        try:
+            ptr.symlink_to(out_path.name)
+        except Exception:
+            import shutil
+            shutil.copyfile(out_path, ptr)
+    except Exception:
+        pass
+    if meta:
+        try:
+            (out_dir / "latest.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+
+# -----------------------
 # Shared IO & features
 # -----------------------
 def _iter_jsonl(paths: Iterable[Path]) -> Iterator[dict]:
@@ -53,11 +81,11 @@ def _iter_jsonl(paths: Iterable[Path]) -> Iterator[dict]:
             continue
         with p.open("r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                s = line.strip()
+                if not s:
                     continue
                 try:
-                    rec = json.loads(line)
+                    rec = json.loads(s)
                     if isinstance(rec, dict):
                         yield rec
                 except Exception:
@@ -106,9 +134,8 @@ def _runs_success(paths: Iterable[Path]) -> Dict[str, int]:
     succ = {}
     for rec in _iter_jsonl(paths):
         rid = rec.get("run_id")
-        if not rid:
-            continue
-        succ[rid] = 1 if rec.get("success") else 0
+        if rid:
+            succ[rid] = 1 if rec.get("success") else 0
     return succ
 
 
@@ -274,7 +301,7 @@ def _maybe_make_safe_teacher(teacher_arg: str | None):
 
     # Resolve 'auto' to the newest joblib in RERANKER_DIR
     if t == "auto":
-        d = Path(os.environ.get("RERANKER_DIR", str(config.RERANKER_DIR)))
+        d = _reranker_dir()
         cands = sorted(d.glob("*.joblib"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not cands:
             return None
@@ -282,7 +309,6 @@ def _maybe_make_safe_teacher(teacher_arg: str | None):
     else:
         teacher_path = teacher_arg
 
-    # Never attempt an in-process load; delegate to the spawned worker.
     try:
         return _TeacherProc(teacher_path)
     except Exception:
@@ -503,12 +529,8 @@ def main(argv=None) -> int:
             print(f"Not enough rows ({n}) to train. Run more proofs first. (pos~{pos})", file=sys.stderr)
             return 1
 
-        out_dir = Path(os.environ.get("RERANKER_DIR", str(config.RERANKER_DIR))); out_dir.mkdir(parents=True, exist_ok=True)
-        if args.out:
-            out_path = Path(args.out)
-        else:
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            out_path = out_dir / f"reranker-{stamp}-{args.algo}-{args.target}.joblib"
+        out_dir = _reranker_dir(); out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = Path(args.out) if args.out else out_dir / f"reranker-{time.strftime('%Y%m%d-%H%M%S')}-{args.algo}-{args.target}.joblib"
 
         if args.algo == "xgb-classifier":
             try:
@@ -543,25 +565,7 @@ def main(argv=None) -> int:
             )
             reg.fit(X, y); dump(_RLQXGBWrapper(reg), out_path); print(f"[ok] RL-XGB regressor on {n} rows → {out_path}")
 
-        # pointer: latest.joblib
-        latest = out_dir / "latest.joblib"
-        try:
-            if latest.exists() or latest.is_symlink():
-                latest.unlink()
-            try:
-                latest.symlink_to(out_path.name)
-            except Exception:
-                import shutil
-                shutil.copyfile(out_path, latest)
-        except Exception:
-            pass
-        try:
-            (out_dir / "latest.json").write_text(
-                json.dumps({"path": out_path.name, "algo": args.algo, "target": args.target, "rows": n}, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        _write_pointer(out_path, "latest.joblib", meta={"path": out_path.name, "algo": args.algo, "target": args.target, "rows": n})
         return 0
 
     # branch: DeepRL (TorchScript)
@@ -573,12 +577,8 @@ def main(argv=None) -> int:
         print("PyTorch not installed. pip install torch", file=sys.stderr)
         return 2
 
-    out_dir = Path(os.environ.get("RERANKER_DIR", str(config.RERANKER_DIR))); out_dir.mkdir(parents=True, exist_ok=True)
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        out_path = out_dir / f"reranker-{stamp}-{args.algo}.pt"
+    out_dir = _reranker_dir(); out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.out) if args.out else out_dir / f"reranker-{time.strftime('%Y%m%d-%H%M%S')}-{args.algo}.pt"
 
     if args.algo == "awr":
         # teacher is opt-in; sandbox XGBoost joblibs in a spawned subprocess
@@ -591,7 +591,6 @@ def main(argv=None) -> int:
         if n < args.min_rows:
             pos = sum(1 for r in rows if r.y >= 0.5)
             print(f"Not enough rows ({n}) to train. Run more proofs first. (soft-pos~{pos})", file=sys.stderr)
-            # cleanup sidecar if any
             try:
                 if isinstance(teacher, _TeacherProc):
                     teacher.close()
@@ -641,7 +640,6 @@ def main(argv=None) -> int:
         scripted.save(str(out_path))
         print(f"[ok] TorchScript saved → {out_path}")
 
-        # cleanup sidecar if any
         try:
             if isinstance(teacher, _TeacherProc):
                 teacher.close()
@@ -710,24 +708,7 @@ def main(argv=None) -> int:
 
     # pointer: latest.pt (for DeepRL branches)
     if args.algo in ("awr","dqn"):
-        latest = out_dir / "latest.pt"
-        try:
-            if latest.exists() or latest.is_symlink():
-                latest.unlink()
-            try:
-                latest.symlink_to(out_path.name)
-            except Exception:
-                import shutil
-                shutil.copyfile(out_path, latest)
-        except Exception:
-            pass
-        try:
-            (out_dir / "latest.json").write_text(
-                json.dumps({"path": out_path.name, "algo": args.algo, "rows": n}, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        _write_pointer(out_path, "latest.pt", meta={"path": out_path.name, "algo": args.algo, "rows": n})
 
     return 0
 

@@ -9,8 +9,8 @@ import java.nio.charset.Charset;
 import java.util.regex.*;
 
 String SERVER = "http://127.0.0.1:5005/plan_fill";
-int    BUDGET = 12;
-String MODEL  = "";  // optional
+int    BUDGET = 120;
+String MODEL  = "gemini:gemini-2.5-pro";  // optional
 
 // --- SAFE SLICE GUARD: prevent ArrayIndexOutOfBounds in getText ---
 int clampInt(int x, int lo, int hi) {
@@ -157,7 +157,7 @@ int insertPos = caretInsideLemma ? (ta.getLineEndOffset(caretLine) - 1) : afterL
 // Payload: force outline
 String payload = "{"
   + "\"goal\":\"" + jsonEsc(goal) + "\","
-  + "\"budget_s\":" + BUDGET + ","
+  + "\"timeout\":" + BUDGET + ","
   + "\"mode\":\"outline\""
   + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
   + "}";

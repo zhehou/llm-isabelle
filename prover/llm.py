@@ -1,10 +1,10 @@
-# prover/llm.py
 from __future__ import annotations
 
 import os
 import json
 import shutil
 import subprocess
+import re
 from typing import List, Optional
 
 import requests
@@ -20,6 +20,12 @@ _VERBOSE = os.getenv("LLM_DEBUG", "").strip().lower() not in ("", "0", "false", 
 def _log(msg: str) -> None:
     if _VERBOSE:
         print(f"[llm] {msg}", flush=True)
+
+# Shared HTTP session for connection reuse (Ollama, HF API)
+_SESSION = requests.Session()
+
+# Precompiled once (used when synthesizing *_def from goal/state)
+_STEM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_']{2,}")
 
 def detect_backend_for_model(model: str) -> str:
     """
@@ -66,7 +72,7 @@ def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *,
     }
     try:
         _log(f"call: ollama url={url} model={model}")
-        resp = requests.post(url, json=payload, timeout=int(TIMEOUT_S))
+        resp = _SESSION.post(url, json=payload, timeout=int(TIMEOUT_S))
         resp.raise_for_status()
         return resp.json().get("response", "")
     except Exception as e:
@@ -143,7 +149,7 @@ def _hf_inference_api_generate(system_prompt: str, user_prompt: str, repo_id: st
     }
     try:
         _log(f"call: hf-inference-api repo={repo_id} url={url} token={'set' if token else 'missing'}")
-        resp = requests.post(url, headers=headers, json=payload, timeout=int(TIMEOUT_S))
+        resp = _SESSION.post(url, headers=headers, json=payload, timeout=int(TIMEOUT_S))
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
@@ -289,10 +295,9 @@ def propose_steps(
 
     # If no facts provided, synthesize a couple likely *_def guesses from goal words.
     if not facts:
-        import re
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_']{2,}", (goal + " " + state_hint))
+        words = _STEM_RE.findall((goal + " " + state_hint))
         stems = [w for w in words if not w[0].isupper()]
-        stems = list(dict.fromkeys(stems))[:3]
+        stems = list(dict.fromkeys(stems))[:3]  # dedup, keep order, cap 3
         for s in stems:
             merged.insert(0, f"apply (auto simp add: {s}_def)")
             merged.insert(0, f"apply (simp only: {s}_def)")
@@ -355,15 +360,17 @@ def propose_finishers(
         "by fastforce", "by blast", "by arith", "by presburger",
         "by (simp", "by (auto", "by (metis", "by (meson",
     ]
-    ranked = sorted(combined, key=lambda cmd: next((i for i, k in enumerate(order) if cmd.startswith(k)), len(order)))
+    order_index = {k: i for i, k in enumerate(order)}
+    ranked = sorted(combined, key=lambda cmd: next((order_index[k] for k in order if cmd.startswith(k)), len(order)))
 
     # Optional learned reranking
     if reranker and getattr(reranker, "available", lambda: False)():
+        base_pos = {c: i for i, c in enumerate(ranked)}
         def rscore(cmd: str) -> float:
             try:
                 return float(reranker.score(live_features_for(cmd, goal, state_hint, depth=0)))
             except Exception:
                 return 0.5
-        ranked = sorted(ranked, key=lambda c: (-rscore(c), ranked.index(c)))
+        ranked = sorted(ranked, key=lambda c: (-rscore(c), base_pos[c]))
 
     return ranked

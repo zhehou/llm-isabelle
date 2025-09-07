@@ -156,7 +156,7 @@ python -m prover.cli --goal 'rev (rev xs) = xs' \
 More knobs:
 ```bash
 python -m prover.cli --goal 'rev (rev xs) = xs' \
-  --model 'qwen3-coder:30b' --beam 3 --max-depth 8 --budget-s 20 \
+  --model 'qwen3-coder:30b' --beam 3 --max-depth 8 --timeout 20 \
   --sledge --quickcheck --nitpick --facts-limit 6 --variants
 ```
 
@@ -218,19 +218,19 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 Combining the above in curriculum training
 ```bash
 # Create data for easy stage
-python -m prover.experiments bench --file datasets/hol_main_easy_goals.txt --beam 3 --max-depth 6 --budget-s 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge off --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_easy_goals.txt --beam 3 --max-depth 6 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 # Train a bandit classifier
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 
 # Create data for mid stage
-python -m prover.experiments bench --file datasets/hol_main_mid_goals.txt --beam 4 --max-depth 8 --budget-s 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_mid_goals.txt --beam 4 --max-depth 8 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 # Re-train bandit classifier
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 # And also train a Q-style regressor
 python -m prover.train_reranker --algo xgb-regressor --target q
 
 # Create data for hard stage
-python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 # Retrain Q-style regressor
 python -m prover.train_reranker --algo xgb-regressor --target q
 # Train AWR++ with teacher knowledge distillation
@@ -275,10 +275,10 @@ export ISABELLE_LOGIC=MiniF2F_Base
 Run the prover on the validation datasets
 ```bash
 # Validation 
-ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_validation.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_validation.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 
 # Testing
-ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --budget-s 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 ```
 
 Maybe train rerankers using on the logs from the validation set, and then run the test set to see results.

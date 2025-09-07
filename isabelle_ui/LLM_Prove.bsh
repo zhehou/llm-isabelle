@@ -9,8 +9,8 @@ import java.nio.charset.Charset;
 import java.util.regex.*;
 
 String SERVER = "http://127.0.0.1:5005/prove";
-int    BUDGET = 30;
-String MODEL  = "";  // optional model override
+int    BUDGET = 60;
+String MODEL  = "gemini:gemini-2.5-flash";  // optional model override
 
 // --- SAFE SLICE GUARD: prevent ArrayIndexOutOfBounds in getText ---
 int clampInt(int x, int lo, int hi) {
@@ -121,7 +121,7 @@ if (caretInsideLemma) {
 
 // 3) Call server
 String payload = "{\"goal\":\"" + jsonEsc(goal) + "\","
-               + "\"budget_s\":" + BUDGET
+               + "\"timeout\":" + BUDGET
                + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
                + "}";
 

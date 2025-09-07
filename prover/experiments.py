@@ -8,7 +8,7 @@ Unified experiments tool:
 Examples
 --------
 Bench:
-  python -m prover.experiments bench --suite lists --beam 3 --budget-s 6 --reranker both
+  python -m prover.experiments bench --suite lists --beam 3 --timeout 6 --reranker both
   python -m prover.experiments bench --file datasets/lists.txt --model 'qwen3-coder:30b'
 
 Regress:
@@ -46,6 +46,10 @@ SUITE_MAP = {
     "logic": BENCH_DIR / "logic.txt",
 }
 
+# Precompile once for small speedup on large files
+import re
+_LEMMA_RE = re.compile(r'lemma\\s+"(.+)"', re.IGNORECASE)
+
 # ---------- Shared goal IO ----------
 def _read_goals_file(path: Path) -> List[str]:
     goals: List[str] = []
@@ -57,23 +61,25 @@ def _read_goals_file(path: Path) -> List[str]:
             if not s or s.startswith("#"):
                 continue
             if s.lower().startswith("lemma "):
-                import re
-                m = re.search(r'lemma\s+"(.+)"', s, re.IGNORECASE)
-                goals.append(m.group(1) if m else s[len("lemma "):].strip().strip('"'))
+                m = _LEMMA_RE.search(s)
+                if m:
+                    goals.append(m.group(1))
+                else:
+                    payload = s[len("lemma "):].strip().strip('"')
+                    goals.append(payload)
             else:
                 goals.append(s.strip('"'))
     return goals
 
 # =============================================================================
 # BENCH
-# (merged from bench.py with minor polish)
 # =============================================================================
-@dataclass
+@dataclass(slots=True)
 class BenchConfig:
     name: str
     beam: int
     max_depth: int
-    budget_s: int
+    timeout: int
     reranker: bool
     sledge: bool
     sledge_timeout: int
@@ -96,10 +102,11 @@ def _bench_run_one(
     single_model: Optional[str],
     models_list: Optional[List[str]],
 ) -> Dict[str, Any]:
+    model_default = os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")
     res = prove_goal(
         isabelle, session_id, goal,
-        model_name_or_ensemble=(single_model or os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")),
-        beam_w=cfg.beam, max_depth=cfg.max_depth, hint_lemmas=6, budget_s=cfg.budget_s,
+        model_name_or_ensemble=(single_model or model_default),
+        beam_w=cfg.beam, max_depth=cfg.max_depth, hint_lemmas=6, timeout=cfg.timeout,
         models=models_list, save_dir=None,
         use_sledge=cfg.sledge, sledge_timeout=cfg.sledge_timeout, sledge_every=cfg.sledge_every,
         trace=False, use_color=False,
@@ -112,17 +119,19 @@ def _bench_run_one(
     )
     return {
         "goal": goal,
-        "success": bool(res.get("success")),
+        "success": bool(res.get("success", False)),
         "depth": int(res.get("depth", -1)),
         "elapsed_s": float(res.get("elapsed_s", 0.0)),
         "model": str(res.get("model", "")),
         "timeout": bool(res.get("timeout", False)),
         "use_calls": int(res.get("use_calls", 0)),
-        "steps_len": len(res.get("steps", [])),
+        "steps_len": len(res.get("steps", []) or []),
     }
 
 def _bench_summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     n = len(rows)
+    if n == 0:
+        return {"n_goals": 0, "n_success": 0, "success_rate": 0.0, "median_time_all": 0.0, "median_time_success": 0.0, "avg_depth": 0.0}
     succ = [r for r in rows if r["success"]]
     times = [r["elapsed_s"] for r in rows]
     succ_times = [r["elapsed_s"] for r in succ]
@@ -130,21 +139,25 @@ def _bench_summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "n_goals": n,
         "n_success": len(succ),
-        "success_rate": (len(succ)/n) if n else 0.0,
+        "success_rate": (len(succ)/n),
         "median_time_all": stats.median(times) if times else 0.0,
         "median_time_success": stats.median(succ_times) if succ_times else 0.0,
-        "avg_depth": (sum(depths)/n) if n else 0.0,
+        "avg_depth": (sum(depths)/n),
     }
 
 def _bench_write_csv(suite_name: str, cfg_name: str, rows: List[Dict[str, Any]]) -> Path:
     ts = time.strftime("%Y%m%d-%H%M%S")
     safe_tag = cfg_name.replace(" ", "_")
     out = RESULTS_DIR / f"{ts}-{suite_name}-{safe_tag}.csv"
+    if not rows:
+        # Create header-only file for traceability
+        with out.open("w", newline="", encoding="utf-8") as f:
+            f.write("goal,success,depth,elapsed_s,model,timeout,use_calls,steps_len\\n")
+        return out
     with out.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
-        for r in rows:
-            w.writerow(r)
+        w.writerows(rows)
     return out
 
 def cmd_bench(args: argparse.Namespace) -> None:
@@ -171,7 +184,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
         def build_cfg(rerank_on: bool, sledge_on: bool) -> BenchConfig:
             return BenchConfig(
                 name=f"rerank_{'on' if rerank_on else 'off'}__sledge_{'on' if sledge_on else 'off'}",
-                beam=args.beam, max_depth=args.max_depth, budget_s=args.budget_s,
+                beam=args.beam, max_depth=args.max_depth, timeout=args.timeout,
                 reranker=rerank_on, sledge=sledge_on, sledge_timeout=5, sledge_every=2,
                 quickcheck=args.quickcheck, quickcheck_timeout=2, quickcheck_every=1,
                 nitpick=args.nitpick, nitpick_timeout=5, nitpick_every=2,
@@ -179,15 +192,19 @@ def cmd_bench(args: argparse.Namespace) -> None:
                 variants=args.variants,
             )
 
+        import random
+        base_seed = args.seed or int(time.time())
+
         for suite_name, goals_path in suites:
             goals = _read_goals_file(goals_path)
             if not goals:
                 print(f"[SKIP] No goals in {goals_path}")
                 continue
 
-            print(f"\n=== Running suite: {suite_name} ({len(goals)} goals) ===")
+            print(f"\\n=== Running suite: {suite_name} ({len(goals)} goals) ===")
             rr_opts = {"on": [True], "off": [False], "both": [False, True]}[args.reranker]
-            sh_opts = {"on": [True], "off": [False], "both": [False, True]}[args.sledge]
+            # NEW: --sledge is a simple boolean flag
+            sh_opts = [bool(args.sledge)]
 
             for rr in rr_opts:
                 for sh in sh_opts:
@@ -201,9 +218,6 @@ def cmd_bench(args: argparse.Namespace) -> None:
                         model_tag = os.environ.get("OLLAMA_MODEL", "env_default")
                     cfg_name = f"{cfg.name}__model_{model_tag}"
 
-                    import random
-                    base_seed = args.seed or int(time.time())
-
                     rows: List[Dict[str, Any]] = []
                     for r in range(args.repeats):
                         goals_run = list(goals)
@@ -216,7 +230,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
 
                     s = _bench_summarize(rows)
                     def pct(x: float) -> str: return f"{x*100:.1f}%"
-                    print("\n=== Benchmark Report ===")
+                    print("\\n=== Benchmark Report ===")
                     print(f"Suite:  {suite_name}")
                     print(f"Config: {cfg_name}")
                     print(f"  Success: {s['n_success']} / {s['n_goals']}  ({pct(s['success_rate'])})")
@@ -224,38 +238,46 @@ def cmd_bench(args: argparse.Namespace) -> None:
                     out = _bench_write_csv(suite_name, cfg_name, rows)
                     print(f"CSV → {out}")
     finally:
-        try: isabelle.shutdown()
-        except Exception: pass
-        try: proc.terminate(); proc.wait(timeout=3)
+        try:
+            isabelle.shutdown()
         except Exception:
-            try: proc.kill(); proc.wait(timeout=3)
-            except Exception: pass
+            pass
+        try:
+            proc.terminate(); proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill(); proc.wait(timeout=3)
+            except Exception:
+                pass
 
 # =============================================================================
 # REGRESS
-# (merged from regress.py, trimmed to essentials)
 # =============================================================================
-@dataclass
+@dataclass(slots=True)
 class OneGoal:
     goal: str; success: bool; elapsed_s: float; depth: int; timeout: bool; model: str; use_calls: int; steps_len: int
 
-@dataclass
+@dataclass(slots=True)
 class Summary:
     suite: str; config: str; n_goals: int; n_success: int; success_rate: float
     median_time_all: float; median_time_success: float; avg_depth: float; stamp: str
 
-@dataclass
+@dataclass(slots=True)
 class Report:
     suite: str; config: str; params: Dict[str, Any]; goals: List[OneGoal]; summary: Summary
 
 def _reg_summarize(suite: str, config: str, rows: List[OneGoal]) -> Summary:
+    if not rows:
+        return Summary(suite=suite, config=config, n_goals=0, n_success=0, success_rate=0.0,
+                       median_time_all=0.0, median_time_success=0.0, avg_depth=0.0,
+                       stamp=time.strftime("%Y-%m-%d %H:%M:%S"))
     succ = [r for r in rows if r.success]
     times_all = [r.elapsed_s for r in rows]
     times_succ = [r.elapsed_s for r in succ]
     depths = [r.depth for r in rows]
     return Summary(
         suite=suite, config=config, n_goals=len(rows), n_success=len(succ),
-        success_rate=(len(succ)/len(rows)) if rows else 0.0,
+        success_rate=(len(succ)/len(rows)),
         median_time_all=stats.median(times_all) if times_all else 0.0,
         median_time_success=stats.median(times_succ) if times_succ else 0.0,
         avg_depth=(sum(depths)/len(rows)) if rows else 0.0,
@@ -287,7 +309,7 @@ def _reg_compare(current: Report, baseline_data: Dict[str, Any], *, tol_rate: fl
     b_succ = int(base.get("n_success", 0))
     b_n = int(base.get("n_goals", 0))
 
-    print("\n=== Regression comparison ===")
+    print("\\n=== Regression comparison ===")
     print(f"Suite:   {current.suite}")
     print(f"Config:  {current.config}")
     print(f"Goals:   baseline {b_n}, current {cur.n_goals}")
@@ -327,18 +349,15 @@ def cmd_regress(args: argparse.Namespace) -> None:
             raise SystemExit(f"No goals found in {goals_path}")
 
         cfg = {
-            "beam": args.beam, "max_depth": args.max_depth, "budget_s": args.budget_s,
+            "beam": args.beam, "max_depth": args.max_depth, "timeout": args.timeout,
             "reranker": True, "sledge": args.sledge,
             "quickcheck": args.quickcheck, "nitpick": args.nitpick,
             "facts_limit": args.facts_limit, "minimize": (not args.no_minimize),
             "variants": args.variants, "model": args.model, "models": models_list,
-            # keep the seed we actually used in the stored config row
-            "shuffle_seed": (args.shuffle_seed
-                             if args.shuffle_seed is not None
-                             else (args.seed if args.shuffle else -1)),
+            "shuffle_seed": (args.shuffle_seed if args.shuffle_seed is not None else (args.seed if args.shuffle else -1)),
         }
         model_tag = ("ensemble_" + "_".join(models_list)) if models_list else (args.model or os.environ.get("OLLAMA_MODEL", "env_default"))
-        config_name = f"beam{args.beam}_d{args.max_depth}_t{args.budget_s}_rron_sdg{'on' if args.sledge else 'off'}__model_{model_tag}"
+        config_name = f"beam{args.beam}_d{args.max_depth}_t{args.timeout}_rron_sdg{'on' if args.sledge else 'off'}__model_{model_tag}"
 
         rows: List[OneGoal] = []
         import random
@@ -359,7 +378,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
             res = prove_goal(
                 isabelle, session_id, g,
                 model_name_or_ensemble=(args.model or os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")),
-                beam_w=args.beam, max_depth=args.max_depth, hint_lemmas=6, budget_s=args.budget_s,
+                beam_w=args.beam, max_depth=args.max_depth, hint_lemmas=6, timeout=args.timeout,
                 models=models_list, save_dir=None,
                 use_sledge=args.sledge, sledge_timeout=5, sledge_every=2,
                 trace=False, use_color=False,
@@ -374,7 +393,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 goal=g, success=bool(res.get("success", False)), elapsed_s=float(res.get("elapsed_s", 0.0)),
                 depth=int(res.get("depth", -1)), timeout=bool(res.get("timeout", False)),
                 model=str(res.get("model","")), use_calls=int(res.get("use_calls",0)),
-                steps_len=len(res.get("steps", [])),
+                steps_len=len(res.get("steps", []) or []),
             ))
 
         summ = _reg_summarize(suite_name, config_name, rows)
@@ -413,7 +432,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
             sys.exit(1 if regressed else 0)
 
         # No baseline compare: print summary
-        print("\n=== Regression run summary (no baseline) ===")
+        print("\\n=== Regression run summary (no baseline) ===")
         print(f"Suite:        {summ.suite}")
         print(f"Config:       {summ.config}")
         print(f"Goals:        {summ.n_goals}")
@@ -421,18 +440,22 @@ def cmd_regress(args: argparse.Namespace) -> None:
         print(f"Median time:  all={summ.median_time_all:.2f}s, succ={summ.median_time_success:.2f}s")
         print(f"Avg depth:    {summ.avg_depth:.2f}")
     finally:
-        try: isabelle.shutdown()
-        except Exception: pass
-        try: proc.terminate(); proc.wait(timeout=3)
+        try:
+            isabelle.shutdown()
         except Exception:
-            try: proc.kill(); proc.wait(timeout=3)
-            except Exception: pass
+            pass
+        try:
+            proc.terminate(); proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill(); proc.wait(timeout=3)
+            except Exception:
+                pass
 
 # =============================================================================
 # AGGREGATE
-# (merged from aggregate.py)
 # =============================================================================
-@dataclass
+@dataclass(slots=True)
 class AggRow:
     suite: str; config: str; goal: str; success: bool; elapsed_s: float; depth: int; model: str; timeout: bool; use_calls: int; steps_len: int
 
@@ -465,7 +488,7 @@ def _agg_load(results_dir: Path) -> List[AggRow]:
             continue
     return rows
 
-@dataclass
+@dataclass(slots=True)
 class AggSummary:
     suite: str; config: str; n: int; succ: int; rate: float; med_all: float; med_succ: float; avg_depth: float
 
@@ -500,7 +523,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
     except Exception:
         use_tab = False
 
-    print("\n=== Benchmark summary (by suite, success ↓ then time ↑) ===")
+    print("\\n=== Benchmark summary (by suite, success ↓ then time ↑) ===")
     suites = sorted(set(s for (s, _) in by.keys()))
     for suite in suites:
         summaries = []
@@ -512,7 +535,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
         if not summaries: continue
         summaries.sort(key=lambda x: (-x.rate, x.med_all, x.config))
         display = summaries[:args.top_k] if (args.best_only and args.top_k > 0) else summaries
-        print(f"\n[{suite}]")
+        print(f"\\n[{suite}]")
         table = [
             [sm.config, f"{sm.rate*100:.1f}%", f"{sm.succ}/{sm.n}", f"{sm.med_all:.2f}", f"{sm.med_succ:.2f}" if sm.succ else "-", f"{sm.avg_depth:.2f}"]
             for sm in display
@@ -520,7 +543,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
         headers = ["config", "succ_rate", "succ/total", "median_time_all(s)", "median_time_succ(s)", "avg_depth"]
         if use_tab: print(tabulate(table, headers=headers, tablefmt="github"))
         else:
-            colw = [max(len(str(x)) for x in col) for col in zip(*([headers] + table))]
+            colw = [max(len(str(x)) for x in col) for x in zip(*([headers] + table))]
             def fmt_row(row: List[str]) -> str: return "  ".join(str(cell).ljust(w) for cell, w in zip(row, colw))
             print(fmt_row(headers)); print("  ".join("-"*w for w in colw))
             for r in table: print(fmt_row(r))
@@ -537,9 +560,9 @@ def main():
     pb.add_argument("--file", type=str)
     pb.add_argument("--beam", type=int, default=3)
     pb.add_argument("--max-depth", type=int, default=8)
-    pb.add_argument("--budget-s", type=int, default=6)
+    pb.add_argument("--timeout", type=int, default=6)
     pb.add_argument("--reranker", choices=["on", "off", "both"], default="on")
-    pb.add_argument("--sledge", choices=["on", "off", "both"], default="off")
+    pb.add_argument("--sledge", action="store_true", help="Enable Sledgehammer during bench runs")
     pb.add_argument("--quickcheck", action="store_true")
     pb.add_argument("--nitpick", action="store_true")
     pb.add_argument("--repeats", type=int, default=1)
@@ -554,16 +577,17 @@ def main():
 
     pr = sub.add_parser("regress", help="Run and compare to baseline")
     pr.add_argument("--suite", type=str, choices=sorted(list(SUITE_MAP.keys())))
-    pr.add_argument("--file", type=str)
+    pr.add_argument("--file", type=str, default=None)
     pr.add_argument("--beam", type=int, default=2)
     pr.add_argument("--max-depth", type=int, default=6)
-    pr.add_argument("--budget-s", type=int, default=8)
+    pr.add_argument("--timeout", type=int, default=8)
     pr.add_argument("--facts-limit", type=int, default=6)
+    pr.add_argument("--reranker", choices=["on", "off", "both"], default="on")
     pr.add_argument("--no-minimize", action="store_true")
     pr.add_argument("--variants", action="store_true")
     pr.add_argument("--quickcheck", action="store_true")
     pr.add_argument("--nitpick", action="store_true")
-    pr.add_argument("--sledge", action="store_true")
+    pr.add_argument("--sledge", action="store_true", help="Enable Sledgehammer during regress runs")
     pr.add_argument("--model", type=str, default=None)
     pr.add_argument("--models", type=str, default=None)
     pr.add_argument("--shuffle", action="store_true")
