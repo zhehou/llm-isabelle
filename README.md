@@ -289,6 +289,7 @@ Maybe train rerankers using on the logs from the validation set, and then run th
 ```
 datasets/          # Datasets and results
 isabelle_ui/       # Isabelle/jEdit integration (HTTP server + macros)
+logs/              # Logs data for training rerankers
 planner/           # Proof outline planner (supports Ollama, Gemini CLI, HF)
 prover/            # Step prover (supports Ollama, Gemini CLI, HF) + reranker
 ```
