@@ -1,20 +1,38 @@
+# planner/driver.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
 
-from planner.skeleton import Skeleton, propose_isar_skeleton, find_sorry_spans
-from prover.isabelle_api import start_isabelle_server, get_isabelle_client
-from prover.prover import prove_goal
+import time
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Iterable
+
+from planner.skeleton import (
+    Skeleton,
+    find_sorry_spans,
+    propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check
+    propose_isar_skeleton,               # legacy single-outline path
+)
 from prover.config import ISABELLE_SESSION
+from prover.isabelle_api import (
+    start_isabelle_server,
+    get_isabelle_client,
+    build_theory,
+    run_theory,
+    last_print_state_block,
+)
+from prover.prover import prove_goal
 
 
 @dataclass(slots=True)
 class PlanAndFillResult:
     success: bool
-    outline: str          # final isar text
-    fills: List[str]      # per-hole proof scripts inserted
-    failed_holes: List[int]
+    outline: str           # final Isar text (with holes filled if successful)
+    fills: List[str]       # text of per-hole proof scripts inserted
+    failed_holes: List[int]  # indices of holes that failed to fill (if any)
 
+
+# ----------------------------
+# Small helpers
+# ----------------------------
 
 def _extract_goal_from_lemma_line(lemma_line: str) -> str:
     q1 = lemma_line.find('"')
@@ -24,34 +42,52 @@ def _extract_goal_from_lemma_line(lemma_line: str) -> str:
     return lemma_line[q1 + 1 : q2]
 
 
-def _fill_one_hole(
-    isabelle,
-    session,
-    full_text: str,
-    hole_span: Tuple[int, int],
-    model: Optional[str],
-    timeout: int,
-) -> tuple[str, bool, str]:
-    # Extract top-level goal from the first 'lemma "…"' line.
-    lemma_line = ""
+def _first_lemma_line(full_text: str) -> str:
     for L in full_text.splitlines():
         if L.strip().startswith("lemma "):
-            lemma_line = L
-            break
-    if not lemma_line:
-        return full_text, False, "no-lemma-head"
-    goal = _extract_goal_from_lemma_line(lemma_line)
+            return L
+    return ""
 
-    # Call micro prover (top-level goal; simple prototype).
+
+def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int]) -> str:
+    """
+    Build a theory ending at the hole, run once, and return the latest print_state block.
+    We temporarily leave a 'sorry' at the hole so the theory is well-formed.
+    """
+    s, e = hole_span
+    prefix_with_placeholder = full_text[:s] + "sorry\n" + full_text[e:]
+    thy = build_theory(prefix_with_placeholder.splitlines(), add_print_state=True, end_with="sorry")
+    resps = run_theory(isabelle, session, thy)
+    return last_print_state_block(resps) or ""
+
+
+def _fill_one_hole(
+    isabelle,
+    session: str,
+    full_text: str,
+    hole_span: Tuple[int, int],
+    goal_text: str,
+    model: Optional[str],
+    per_hole_timeout: int,
+) -> Tuple[str, bool, str]:
+    """
+    Best-effort fill for a single 'sorry' hole:
+      1) Get local subgoal print_state right before the hole
+      2) Call micro-prover seeded with that state (initial_state_hint)
+      3) Splice produced steps into the hole
+    Returns: (new_full_text, ok, script_or_reason)
+    """
+    state_block = _print_state_before_hole(isabelle, session, full_text, hole_span)
+
     res = prove_goal(
         isabelle,
         session,
-        goal,
+        goal_text,
         model_name_or_ensemble=model,
         beam_w=2,
         max_depth=8,
         hint_lemmas=6,
-        timeout=timeout,
+        timeout=per_hole_timeout,
         models=None,
         save_dir=None,
         use_sledge=True,
@@ -72,6 +108,7 @@ def _fill_one_hole(
         variant_timeout=6,
         variant_tries=24,
         enable_reranker=True,
+        initial_state_hint=state_block,  # seed first beam with local print_state
     )
 
     steps: List[str] = [str(s) for s in res.get("steps", [])]
@@ -87,12 +124,15 @@ def _fill_one_hole(
     if not script_lines:
         return full_text, False, "no-tactics"
 
-    # Preserve previous indentation behavior: indent two spaces inside the hole.
     insert = "\n  " + "\n  ".join(script_lines) + "\n"
     s, e = hole_span
     new_text = full_text[:s] + insert + full_text[e:]
     return new_text, True, "\n".join(script_lines)
 
+
+# ----------------------------
+# Public entry
+# ----------------------------
 
 def plan_and_fill(
     goal: str,
@@ -100,47 +140,90 @@ def plan_and_fill(
     timeout: int = 100,
     *,
     mode: str = "auto",  # "auto" (allow complete) or "outline" (force placeholders)
+    # New: diverse-outline controls (CLI pass-through)
+    outline_k: Optional[int] = None,
+    outline_temps: Optional[Iterable[float]] = None,
+    legacy_single_outline: bool = False,
 ) -> PlanAndFillResult:
     """
-    mode="auto": if the LLM produces a complete proof (no `sorry`), return it directly.
-    mode="outline": force an outline with `sorry` and try to fill the first hole.
+    Plan (diverse outlines + quick sketch check) → Sketch → Fill all holes.
+    - mode="auto": if the planner emits a complete proof (no `sorry`), we return it.
+    - mode="outline": force placeholders and try to fill them.
+    - If legacy_single_outline=True, bypass diversity and use a single low-temp outline.
+    - If outline_k/outline_temps are provided, override defaults used in the diverse step.
     """
-    force_outline = mode == "outline"
+    force_outline = (mode == "outline")
 
-    # Start Isabelle once for this call.
     server_info, proc = start_isabelle_server(name="planner", log_file="planner_ui.log")
     isa = get_isabelle_client(server_info)
     session = isa.session_start(session=ISABELLE_SESSION)
+
+    t0 = time.monotonic()
+    def left_s() -> float:
+        return max(0.0, timeout - (time.monotonic() - t0))
+
     try:
-        skel: Skeleton = propose_isar_skeleton(
-            goal, model=model, temp=0.4, force_outline=force_outline
-        )
-        full = skel.text
+        # 1) Outline selection
+        if legacy_single_outline:
+            skel = propose_isar_skeleton(goal, model=model, temp=0.35, force_outline=force_outline)
+            full = skel.text
+        else:
+            temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
+            k = int(outline_k) if outline_k is not None else 3
+            best, _diag = propose_isar_skeleton_diverse_best(
+                goal,
+                isabelle=isa,
+                session_id=session,
+                model=model,
+                temps=temps,
+                k=k,
+                force_outline=force_outline,
+            )
+            full = best.text
+
+        # If auto-mode and no holes ⇒ return the (checked) whole-proof as-is
         spans = find_sorry_spans(full)
-
         if mode == "auto" and not spans:
-            # LLM produced a complete proof; return as-is.
-            return PlanAndFillResult(success=True, outline=full, fills=[], failed_holes=[])
+            return PlanAndFillResult(True, full, [], [])
 
-        # Otherwise, try to fill the first hole.
+        # 2) Fill holes left→right under a shared wall-clock
+        lemma_line = _first_lemma_line(full)
+        if not lemma_line:
+            return PlanAndFillResult(False, full, [], [0])
+
+        goal_text = _extract_goal_from_lemma_line(lemma_line)
         fills: List[str] = []
         failed: List[int] = []
-        if spans:
-            span = spans[0]
+
+        hole_idx = 0
+        while True:
+            if "sorry" not in full:
+                break
+            if left_s() <= 0:
+                break
+            spans = find_sorry_spans(full)
+            if not spans:
+                break
+
+            span = spans[0]  # earliest hole
+            remaining = max(1, len(spans))
+            per_hole_budget = int(max(5, left_s() / remaining))
+
             full, ok, script = _fill_one_hole(
-                isa, session, full, span, model, timeout=timeout
+                isa, session, full, span, goal_text, model, per_hole_budget
             )
             if ok:
                 fills.append(script)
             else:
-                failed.append(0)
+                failed.append(hole_idx)
+
+            hole_idx += 1
 
         success = ("sorry" not in full)
-        return PlanAndFillResult(
-            success=success, outline=full, fills=fills, failed_holes=failed
-        )
+        return PlanAndFillResult(success, full, fills, failed)
+
     finally:
-        # Robust shutdown (works across platforms / Python versions).
+        # Robust shutdown
         try:
             isa.shutdown()
         except Exception:
@@ -150,7 +233,6 @@ def plan_and_fill(
             try:
                 proc.wait(timeout=2)
             except TypeError:
-                # Some Process/older Python variants don't accept timeout kw.
                 proc.wait()
         except Exception:
             try:

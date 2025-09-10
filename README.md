@@ -1,6 +1,6 @@
 # Isabellm: A playground for Free and Lightweight LLM-Guided Isabelle/HOL Provers
 
-This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face (hosted or local Transformers)**) and an optional machine-learned reranker.
+This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face**) and an optional machine-learned reranker.
 
 ---
 
@@ -21,8 +21,9 @@ This repository implements an Isabelle/HOL theorem prover guided by Large Langua
   - [3.5 Regression testing](#35-regression-testing)
   - [3.6 Aggregating results](#36-aggregating-results)
   - [3.7 Training a reranker](#37-training-a-reranker)
-  - [3.8 Isabelle/jEdit GUI integration](#38-isabellejedit-gui-integration)
-  - [3.9 Evaluation using mini-F2F](#39-evaluation-using-mini-f2f)
+  - [3.8 Isar-style proof outline sketching](#38-isar-style-proof-outline-sketching)
+  - [3.9 Isabelle/jEdit GUI integration](#39-isabellejedit-gui-integration)
+  - [3.10 Evaluation using mini-F2F](#310-evaluation-using-mini-f2f)
 - [4. Project Structure](#5-project-structure)
 - [5. Notes & Tips](#6-notes--tips)
 - [6. License](#7-license)
@@ -240,7 +241,23 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 # See which reranker works better.
 ```
 
-### 3.8 Isabelle/jEdit GUI integration
+### 3.8 Isar-style proof outline sketching
+Run the planner to sketch a proof (fill the proof if possible). Internally, it proposes multiple outlines and picks the most suitable one to output.
+```bash
+python -m planner.cli --timeout 60 --mode auto "rev (rev xs) = xs"
+```
+
+Sketch an outline only
+```bash
+python -m planner.cli --timeout 60 --mode outline "map f (xs @ ys) = map f xs @ map f ys"
+```
+
+Controlling the divserity of multiple outlines
+```bash
+python -m planner.cli --timeout 60 --diverse-outlines --k 3 --temps "0.35,0.55,0.85" --mode auto "map f (xs @ ys) = map f xs @ map f ys"
+```
+
+### 3.9 Isabelle/jEdit GUI integration
 Run the HTTP server:
 ```bash
 python3 -m isabelle_ui.server
@@ -251,7 +268,7 @@ Copy the `.bsh` macros from `isabelle_ui/` to your jEdit macros folder, e.g.
 
 Then in jEdit, use **Macros → LLM Prover** at a proof state.
 
-### 3.9 Evaluation using mini-F2F
+### 3.10 Evaluation using mini-F2F
 Download the dataset
 ```bash
 git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/miniF2F  

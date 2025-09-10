@@ -86,6 +86,7 @@ def try_finish(isabelle, session_id: str, steps: List[str], fin: str) -> Tuple[b
     ok, _ = finished_ok(run_theory(isabelle, session_id, thy))
     return ok, (time.monotonic() - t0) * 1000
 
+
 def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str,
                beam_w: int, max_depth: int, hint_lemmas: int,
                timeout: Optional[int] = None,  # timeout is the single source of truth
@@ -98,7 +99,10 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                do_minimize: bool = True, minimize_timeout: int = 8,
                do_variants: bool = True, variant_timeout: int = 6, variant_tries: int = 24,
                macro_map: Optional[Dict[str, List[Tuple[str, int]]]] = None,
-               enable_reranker: bool = True) -> Dict[str, Any]:
+               enable_reranker: bool = True,
+               *,
+               initial_state_hint: Optional[str] = None  # <-- NEW (optional, backward-compatible)
+               ) -> Dict[str, Any]:
 
     budget = timeout if timeout is not None else 10
 
@@ -124,7 +128,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
     def time_left_s() -> float: return budget - (time.monotonic() - start_t)
 
     seed_steps = [f'lemma "{goal}"']
-    beam: List[Tuple[int, List[str], str, Optional[int]]] = [(9999, seed_steps, "", None)]
+    # Seed the first beam with an optional initial state hint (used by planner after print_state)
+    seed_hint = (initial_state_hint or "").strip()
+    beam: List[Tuple[int, List[str], str, Optional[int]]] = [(9999, seed_steps, seed_hint, None)]
     visited_by_depth = defaultdict(set)
 
     last_best_n: Optional[int] = None
@@ -283,56 +289,42 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     print(f"  step  {tag} {c}{extra} ({round(elapsed_ms)}ms){cache}")
                 if not ok: continue
                 score = n_sub if n_sub is not None else 9999
-                fp = state_fingerprint(hint or "")
-                if fp in visited_by_depth[depth_reached]:
-                    continue
-                visited_by_depth[depth_reached].add(fp)
-                if macro_map:
-                    for cont in suggest_continuations(c, macro_map, k=1):
-                        ok2, n_sub2, hint2, cache_hit2, elapsed_ms2 = try_step_cached(isabelle, session_id, steps + [c], cont)
-                        logger.log_attempt(
-                            "expand_macro", steps + [c], cont, ok2, n_sub2, cache_hit2, elapsed_ms2, depth_reached,
-                            subgoals_before=n_sub,
-                            extra={
-                                "proposal_id": proposal_id,
-                                "proposal_k": int(k),
-                                "state_fp_before": state_fingerprint(hint or ""),
-                                "state_fp_after": state_fingerprint(hint2 or "") if ok2 else None
-                            }
-                        )
-                        if ok2:
-                            fp2 = state_fingerprint(hint2 or "")
-                            if fp2 not in visited_by_depth[depth_reached]:
-                                visited_by_depth[depth_reached].add(fp2)
-                                score2 = n_sub2 if n_sub2 is not None else 9999
-                                best_local.append((score2, steps + [c, cont], hint2, n_sub2))
-                        break
                 best_local.append((score, steps + [c], hint, n_sub))
-            best_local.sort(key=lambda t: (t[0], len("\n".join(t[1]))))
-            new_beam.extend(best_local[:2])
+
+            # Merge best_local into new_beam (keep top-beam_w by score, tie-break by shorter script)
+            if best_local:
+                best_local.sort(key=lambda t: (t[0], len("\n".join(t[1]))))
+                for tpl in best_local[:max(1, beam_w)]:
+                    new_beam.append(tpl)
 
         if not new_beam:
+            # Stuck — return current best partial
             best = min(beam, key=lambda t: (t[0], len("\n".join(t[1]))))
             logger.finish(False, best[1], depth_reached, use_calls_count())
             if save_dir:
                 name = slugify_goal(goal) + ".thy.partial"
                 from .isabelle_api import build_theory as _bt
                 write_theory_file(os.path.join(save_dir, name), _bt(best[1] + ["sorry"], False, None))
-            if trace: print(color(use_color, "red", "✖ Search exhausted at this depth"))
             return {"goal": goal, "success": False, "steps": best[1], "depth": depth_reached,
                     "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
 
-        new_beam.sort(key=lambda t: (t[0], len("\n".join(t[1]))))
-        seen_fp, dedup_beam = set(), []
-        for it in new_beam:
-            fp = state_fingerprint(it[2] or "")
+        # Keep only distinct prefixes per depth (avoid revisiting same state)
+        next_beam: List[Tuple[int, List[str], str, Optional[int]]] = []
+        seen_fp = set()
+        for n_sub, steps, hint, _ in sorted(new_beam, key=lambda t: (t[0], len("\n".join(t[1]))))[:max(1, beam_w)]:
+            fp = state_fingerprint(hint or "")
             if fp in seen_fp:
                 continue
             seen_fp.add(fp)
-            dedup_beam.append(it)
-        beam = dedup_beam[:beam_w]
+            next_beam.append((n_sub if n_sub is not None else 9999, steps, hint or "", n_sub))
+        beam = next_beam
 
+    # Ran out of depth; return best partial
     best = min(beam, key=lambda t: (t[0], len("\n".join(t[1]))))
-    logger.finish(False, best[1], max_depth, use_calls_count())
-    return {"goal": goal, "success": False, "steps": best[1], "depth": max_depth,
+    logger.finish(False, best[1], MAX_DEPTH, use_calls_count())
+    if save_dir:
+        name = slugify_goal(goal) + ".thy.partial"
+        from .isabelle_api import build_theory as _bt
+        write_theory_file(os.path.join(save_dir, name), _bt(best[1] + ["sorry"], False, None))
+    return {"goal": goal, "success": False, "steps": best[1], "depth": MAX_DEPTH,
             "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}

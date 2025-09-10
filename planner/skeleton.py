@@ -1,35 +1,39 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Any, Dict
+from typing import List, Tuple, Optional, Any, Dict, Iterable
 import os
 import re
-import shutil
-import subprocess
 import time
 from functools import lru_cache
 
 import requests
 
-# Pull defaults from your existing config
+# Pull defaults from your existing prover/config.py
 from prover.config import (
     MODEL as DEFAULT_MODEL,
     OLLAMA_HOST,
-    TIMEOUT_S as OLLAMA_TIMEOUT_S,   # alias in your config
+    TIMEOUT_S as OLLAMA_TIMEOUT_S,
     OLLAMA_NUM_PREDICT,
-    TEMP as OLLAMA_TEMP,              # alias
-    TOP_P as OLLAMA_TOP_P,            # alias
+    TEMP as OLLAMA_TEMP,
+    TOP_P as OLLAMA_TOP_P,
 )
 
-# Reuse one HTTP session (keep-alive)
+# Isabelle helpers (for quick sketch check)
+from prover.isabelle_api import build_theory, run_theory, last_print_state_block
+from prover.utils import parse_subgoals
+
+# One HTTP session (keep-alive)
 _SESSION = requests.Session()
 
-# --- Prompt that prefers an OUTLINE, but we won't force it unless requested ---
+# -----------------------------------------------------------------------------
+# Prompt for OUTLINES (not full proofs unless mode=auto and LLM decides so)
+# -----------------------------------------------------------------------------
 SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
 
 TASK
 Given a lemma statement, produce a CLEAN Isar proof OUTLINE that exposes the decomposition strategy
 (e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof` with intermediate `have`/`show` steps).
-That is, your aim is to analyse the problem (proof goal) and break it into smaller problems (sub-goals) that are easier to solve. Think about how you can prove it in English, and then translate the proof outline into Isar syntax. Leave nontrivial reasoning steps as `sorry` so that a lower-level prover can fill them later.
+Think in English first, then translate the outline into Isar. Leave nontrivial reasoning steps as `sorry`.
 
 OUTPUT REQUIREMENTS
 - Output ONLY Isabelle text (no explanations, no code fences).
@@ -37,22 +41,20 @@ OUTPUT REQUIREMENTS
   lemma "{goal}"
 - Ensure there is a well-formed block:
   proof
-    … (case/induction structure, `have` / `show` stubs, etc., with `sorry` where reasoning is omitted) …
+    … (case/induction structure, small `have`/`show` stubs, `sorry` where reasoning is omitted) …
   qed
-- Prefer *structured* outlines:
-  • For lists or natural numbers: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`.
-  • For booleans or sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)`.
-  • For set/algebraic goals: include helpful rewrites as hints (e.g., `using` lines or `simp add: <facts>` before a `sorry`).
-- Keep each subcase minimal: introduce the case with `case …`, then `then show ?thesis` followed by `sorry`.
+- Prefer structured outlines:
+  • For lists/nats: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`.
+  • For booleans/sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)`.
+  • For set/algebraic goals: include helpful rewrites as hints (e.g., `using`/`simp add:`) before a `sorry`.
 
-EXAMPLES OF STYLE
+STYLE EXAMPLES
 lemma "{goal}"
 proof (induction xs)
   case Nil
   then show ?thesis by simp
 next
   case (Cons x xs)
-  (* outline only; details left to the micro prover *)
   have H1: "…"
     sorry
   then show ?thesis
@@ -98,11 +100,11 @@ class Skeleton:
 SORRY_RE = re.compile(r"\bsorry\b")
 PROOF_RE = re.compile(r"(?m)^\s*proof(?:\b|\s|\()", re.UNICODE)
 QED_RE   = re.compile(r"(?m)^\s*qed\b", re.UNICODE)
-BY_INLINE_RE = re.compile(r"\s+by\s+.*$")  # replace inline finishers with 'sorry' when forcing outline
+BY_INLINE_RE = re.compile(r"\s+by\s+.*$")  # replace inline 'by ...' with 'sorry' when forcing outline
 
-# ----------------------------
-# Provider shims (Ollama / HF / Gemini)
-# ----------------------------
+# =============================================================================
+# Provider shims: Ollama (default), Hugging Face ("hf:"), Gemini ("gemini:")
+# =============================================================================
 
 def _ollama_generate_simple(
     prompt: str,
@@ -112,10 +114,6 @@ def _ollama_generate_simple(
     num_predict: Optional[int] = None,
     timeout_s: Optional[int] = None,
 ) -> str:
-    """
-    Minimal synchronous call to Ollama's /api/generate endpoint.
-    Returns the full 'response' string (not streaming).
-    """
     url = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
     payload = {
         "model": model or DEFAULT_MODEL,
@@ -141,10 +139,6 @@ def _hf_generate_simple(
     max_new_tokens: Optional[int] = None,
     timeout_s: Optional[int] = None,
 ) -> str:
-    """
-    Minimal call to Hugging Face Inference API (text-generation).
-    Requires env HUGGINGFACE_API_TOKEN.
-    """
     token = os.getenv("HUGGINGFACE_API_TOKEN")
     if not token:
         raise RuntimeError("HUGGINGFACE_API_TOKEN is not set")
@@ -174,23 +168,12 @@ def _hf_generate_simple(
             return str(t).strip()
     return str(data).strip()
 
-# ---------- Gemini helpers (model resolution + CLI/REST) ----------
-
-# Alias map for common-but-wrong or shortened IDs → valid IDs seen in docs.
-_GEMINI_MODEL_ALIASES: Dict[str, str] = {
-    # Experimental 2.0 Pro is versioned; unversioned often 404:
-    "gemini-2.0-pro-exp": "gemini-2.0-pro-exp-02-05",
-}
-
+# ---------- Gemini helpers ----------
 @lru_cache(maxsize=1)
-def _gemini_list_models_cached(key: str) -> List[str]:
-    """
-    Cached wrapper (keyed by API key string) to avoid repeated ListModels calls.
-    Returns [] if the key is empty or the call fails.
-    """
-    if not key:
+def _gemini_list_models_cached(api_key: str) -> List[str]:
+    if not api_key:
         return []
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         resp = _SESSION.get(url, timeout=OLLAMA_TIMEOUT_S)
         resp.raise_for_status()
@@ -205,171 +188,78 @@ def _gemini_list_models_cached(key: str) -> List[str]:
     except Exception:
         return []
 
-def _gemini_list_models(timeout_s: Optional[int]) -> List[str]:
-    """
-    Return a list of simple model codes (like 'gemini-2.5-pro') if GEMINI_API_KEY is set.
-    Otherwise return [].
-    """
+def _gemini_resolve_model_id(model_id: str, *, timeout_s: Optional[int] = None) -> str:
+    # Try to resolve against ListModels when API key is present; else return as-is
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
-        return []
-    # Ignore timeout_s in cache key; it's only for the first call here.
-    return _gemini_list_models_cached(api_key)
-
-def _pick_best_model_id(requested: str, available: List[str]) -> Optional[str]:
-    """
-    Choose the best available model ID given a requested token and a list of available IDs.
-    Strategy:
-      1) Exact match
-      2) Startswith match preferring non-preview/non-exp if multiple
-      3) Fallback: None
-    """
-    if not available:
-        return None
-    if requested in available:
-        return requested
-    candidates = [m for m in available if m.startswith(requested)]
-    if candidates:
-        stable = [m for m in candidates if ("preview" not in m and "exp" not in m)]
-        return (stable or candidates)[0]
-    return None
-
-def _gemini_resolve_model_id(model_id: str, *, timeout_s: Optional[int] = None, force_list: bool = False) -> str:
-    """
-    Resolve a user-supplied model ID to a valid Gemini ID:
-      - Apply aliases
-      - Optionally consult ListModels to find an exact/best match
-      - Otherwise return as-is
-    """
-    model_id = _GEMINI_MODEL_ALIASES.get(model_id, model_id)
-    models = _gemini_list_models(timeout_s) if (force_list or os.getenv("GEMINI_API_KEY")) else []
-    if models:
-        chosen = _pick_best_model_id(model_id, models)
-        if chosen:
-            return chosen
+        return model_id
+    models = _gemini_list_models_cached(api_key)
+    if model_id in models:
+        return model_id
+    # heuristic startswith fallback
+    cands = [m for m in models if m.startswith(model_id)]
+    if cands:
+        stable = [m for m in cands if ("preview" not in m and "exp" not in m)]
+        return (stable or cands)[0]
     return model_id
 
 def _gemini_cli_available() -> bool:
-    """Return True if the 'gemini' CLI is on PATH."""
-    return shutil.which("gemini") is not None
+    from shutil import which
+    return which("gemini") is not None
 
-def _gemini_cli_generate_simple(
-    prompt: str,
-    model_id: str,
-    *,
-    timeout_s: Optional[int] = None,
-) -> str:
-    """
-    Use the 'gemini' CLI in non-interactive mode.
-    We pass prompt via stdin (no --json, no subcommands).
-    """
+def _gemini_cli_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
+    import subprocess
     cmd = ["gemini", "-m", model_id]
-    env = os.environ.copy()
     proc = subprocess.run(
-        cmd,
-        input=prompt,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout_s or OLLAMA_TIMEOUT_S,
-        env=env,
+        cmd, input=prompt, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=timeout_s or OLLAMA_TIMEOUT_S, env=os.environ.copy()
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"gemini CLI failed (code {proc.returncode}): "
-            f"{(proc.stderr or proc.stdout).strip()}"
-        )
+        raise RuntimeError(f"gemini CLI failed ({proc.returncode}): {(proc.stderr or proc.stdout).strip()}")
     return proc.stdout.strip()
 
-def _gemini_rest_generate_simple(
-    prompt: str,
-    model_id: str,
-    *,
-    max_output_tokens: Optional[int] = None,
-    timeout_s: Optional[int] = None,
-    retries: int = 2,
-    backoff_s: float = 1.5,
-) -> str:
-    """
-    REST fallback using the Generative Language API.
-    Requires GEMINI_API_KEY.
-    """
+def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set (needed for REST fallback)")
+        raise RuntimeError("GEMINI_API_KEY is not set (needed for Gemini REST)")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": OLLAMA_NUM_PREDICT if max_output_tokens is None else max_output_tokens,
-        },
+        "generationConfig": {"maxOutputTokens": OLLAMA_NUM_PREDICT},
     }
-    attempt = 0
-    while True:
-        attempt += 1
-        resp = _SESSION.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
-        if resp.status_code == 429 and attempt <= retries:
-            time.sleep(backoff_s * attempt)
-            continue
-        resp.raise_for_status()
-        data = resp.json()
-        try:
-            cands = data.get("candidates") or []
-            if cands:
-                parts = ((cands[0].get("content") or {}).get("parts")) or []
-                if parts:
-                    return (parts[0].get("text") or "").strip()
-        except Exception:
-            pass
-        return str(data).strip()
+    resp = _SESSION.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        cands = data.get("candidates") or []
+        if cands:
+            parts = ((cands[0].get("content") or {}).get("parts")) or []
+            if parts:
+                return (parts[0].get("text") or "").strip()
+    except Exception:
+        pass
+    return str(data).strip()
 
-def _gemini_generate_simple(
-    prompt: str,
-    model_id: str,
-    *,
-    timeout_s: Optional[int] = None,
-) -> str:
-    """
-    Gemini entry: resolve → CLI (if present) → REST fallback.
-    Also retries resolution on NOT_FOUND errors and finally falls back to gemini-2.5-pro.
-    """
-    # Step 1: best-effort resolution
+def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
     resolved = _gemini_resolve_model_id(model_id, timeout_s=timeout_s)
-
-    # Step 2: CLI first (if installed)
     if _gemini_cli_available():
         try:
             return _gemini_cli_generate_simple(prompt, resolved, timeout_s=timeout_s)
-        except RuntimeError as e:
-            msg = str(e)
-            # If the CLI says NOT_FOUND, try resolving via ListModels again (force) then fallback
-            if "NOT_FOUND" in msg or "notFound" in msg or "Requested entity was not found" in msg:
-                reresolved = _gemini_resolve_model_id(model_id, timeout_s=timeout_s, force_list=True)
-                if reresolved != resolved:
-                    try:
-                        return _gemini_cli_generate_simple(prompt, reresolved, timeout_s=timeout_s)
-                    except RuntimeError:
-                        pass
-            # Fall through to REST
         except Exception:
             pass
-
-    # Step 3: REST fallback (if key available)
     try:
         return _gemini_rest_generate_simple(prompt, resolved, timeout_s=timeout_s)
     except Exception:
-        # Last resort: try a safe, stable model
-        safe = "gemini-2.5-pro"
-        try:
-            return _gemini_rest_generate_simple(prompt, safe, timeout_s=timeout_s)
-        except Exception:
-            # If REST isn't configured, try CLI with the safe model
-            if _gemini_cli_available():
-                return _gemini_cli_generate_simple(prompt, safe, timeout_s=timeout_s)
-            raise
+        # final fallback to a stable public model id if possible
+        fallback = "gemini-2.5-pro"
+        if _gemini_cli_available():
+            try:
+                return _gemini_cli_generate_simple(prompt, fallback, timeout_s=timeout_s)
+            except Exception:
+                pass
+        return _gemini_rest_generate_simple(prompt, fallback, timeout_s=timeout_s)
 
-# ---------- Unified dispatch ----------
-
+# Unified dispatch
 def _generate_simple(
     prompt: str,
     model: Optional[str] = None,
@@ -378,12 +268,6 @@ def _generate_simple(
     num_predict: Optional[int] = None,
     timeout_s: Optional[int] = None,
 ) -> str:
-    """
-    Dispatch to Ollama (default), Hugging Face, or Gemini based on model prefix:
-      - "hf:<repo_id>"        → Hugging Face Inference API
-      - "gemini:<model_id>"   → Gemini CLI (preferred), REST fallback
-      - "ollama:<model>" or no prefix → Ollama /api/generate
-    """
     if model:
         if model.startswith("hf:"):
             return _hf_generate_simple(
@@ -398,16 +282,15 @@ def _generate_simple(
             )
         if model.startswith("ollama:"):
             model = model[len("ollama:"):]
-    # Default: Ollama
+    # default: Ollama
     return _ollama_generate_simple(
-        prompt, model=model,
-        temperature=temperature, top_p=top_p,
+        prompt, model=model, temperature=temperature, top_p=top_p,
         num_predict=num_predict, timeout_s=timeout_s
     )
 
-# ----------------------------
-# Utilities and main entry
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Utilities and main entry (single outline, diverse outlines, quick sketch check)
+# -----------------------------------------------------------------------------
 
 def find_sorry_spans(isar: str) -> List[Tuple[int, int]]:
     return [(m.start(), m.end()) for m in SORRY_RE.finditer(isar)]
@@ -422,7 +305,7 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     """
     Ensure: starts from lemma, has proof...qed block.
     If force_outline=True: must contain ≥1 `sorry`, and inline `by ...` lines are replaced with `sorry`.
-    If force_outline=False (auto): leave content intact (allow complete proofs), just normalize header/proof/qed.
+    If force_outline=False: leave content intact (allow complete proofs), just normalize header/proof/qed.
     """
     text = _ensure_lemma_header(text, goal)
 
@@ -443,13 +326,12 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
         text = text.rstrip() + "\nqed\n"
 
     if force_outline:
-        # Replace inline finishers ('... by simp') with '... sorry'
+        # Replace inline '... by ...' finishers with '... sorry'
         lines = text.splitlines()
         for i, L in enumerate(lines):
             if " by " in L:
                 lines[i] = BY_INLINE_RE.sub(" sorry", L)
         text = "\n".join(lines)
-
         # Ensure at least one sorry before qed
         if "sorry" not in text:
             m_qed = QED_RE.search(text)
@@ -457,7 +339,6 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
                 insert_at = m_qed.start()
                 text = text[:insert_at] + "  sorry\n" + text[insert_at:]
 
-    # Final newline
     if not text.endswith("\n"):
         text += "\n"
     return text
@@ -465,15 +346,84 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
 def propose_isar_skeleton(
     goal: str,
     model: Optional[str] = None,
-    temp: float = 0.35,  # kept for ollama/hf; ignored by gemini CLI path
+    temp: float = 0.35,
     *,
     force_outline: bool = False,
 ) -> Skeleton:
-    prompt = SKELETON_PROMPT.format(goal=goal)
+    """
+    Backward-compatible single-outline generator (what older code calls).
+    """
     raw = _generate_simple(
-        prompt=prompt,
+        prompt=SKELETON_PROMPT.format(goal=goal),
         model=model or DEFAULT_MODEL,
         temperature=temp,
+        timeout_s=OLLAMA_TIMEOUT_S,
     )
     cleaned = _sanitize_outline(raw, goal=goal, force_outline=force_outline)
     return Skeleton(text=cleaned, holes=find_sorry_spans(cleaned))
+
+# ---- NEW: produce several outlines by varying temperature ----
+def propose_isar_skeletons(
+    goal: str,
+    *,
+    model: Optional[str] = None,
+    temps: Iterable[float] = (0.3, 0.5, 0.8),
+    k: Optional[int] = None,
+    force_outline: bool = False,
+) -> List[Skeleton]:
+    seen, out = set(), []
+    for t in temps:
+        raw = _generate_simple(
+            prompt=SKELETON_PROMPT.format(goal=goal),
+            model=model or DEFAULT_MODEL,
+            temperature=float(t),
+            timeout_s=OLLAMA_TIMEOUT_S,
+        )
+        sk = Skeleton(text=_sanitize_outline(raw, goal=goal, force_outline=force_outline),
+                      holes=[])
+        sk.holes = find_sorry_spans(sk.text)
+        key = sk.text.strip()
+        if key not in seen:
+            seen.add(key)
+            out.append(sk)
+        if k is not None and len(out) >= int(k):
+            break
+    if not out:
+        # Fallback: one low-temp outline
+        return [propose_isar_skeleton(goal, model=model, temp=0.3, force_outline=force_outline)]
+    return out
+
+# ---- NEW: quick sketch scoring (fewer subgoals is better) ----
+def _quick_sketch_score(isabelle, session_id: str, outline_text: str) -> int:
+    try:
+        thy = build_theory(outline_text.splitlines(), add_print_state=True, end_with="sorry")
+        resps = run_theory(isabelle, session_id, thy)
+        block = last_print_state_block(resps) or ""
+        n = parse_subgoals(block)
+        return int(n) if isinstance(n, int) else 9999
+    except Exception:
+        return 9999
+
+# ---- NEW: select the best outline after quick check ----
+def propose_isar_skeleton_diverse_best(
+    goal: str,
+    *,
+    isabelle,             # required for sketch check
+    session_id: str,
+    model: Optional[str] = None,
+    temps: Iterable[float] = (0.35, 0.55, 0.85),
+    k: int = 3,
+    force_outline: bool = False,
+) -> Tuple[Skeleton, Dict[str, Any]]:
+    """
+    Generate K outlines at diverse temps, run a one-shot sketch check, and return the best (fewest subgoals).
+    """
+    cands = propose_isar_skeletons(goal, model=model, temps=temps, k=k, force_outline=force_outline)
+    scored: List[Tuple[int, int]] = []  # (n_subgoals, idx)
+    for i, sk in enumerate(cands):
+        n = _quick_sketch_score(isabelle, session_id, sk.text)
+        scored.append((n, i))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    best = cands[scored[0][1]]
+    diag = {"scores": scored, "num_candidates": len(cands)}
+    return best, diag

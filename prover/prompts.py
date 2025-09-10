@@ -44,6 +44,8 @@ apply (intro impI)
 apply fastforce
 apply blast
 apply (subst append_Nil2)
+apply (unfolding foo_def bar_def)
+apply (simp only: foo_def bar_def)
 """
 
 SYSTEM_FINISH = """You are an Isabelle/HOL proof expert.
