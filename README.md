@@ -1,7 +1,17 @@
 # Isabellm: A playground for Free and Lightweight LLM-Guided Isabelle/HOL Provers
 
-This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face**) and an optional machine-learned reranker.
+This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face**).
 
+Key features:
+- Stepwise prover (in the prover folder)
+  - LLM guesses tactics
+  - Combined with nitpick, quickcheck, and sledgehammer
+  - Beam search for suitable tactics
+  - ML reranker for tactics trained by proof logs
+- Isar-style proof outline generator (in the planner folder)
+  - LLM guesses outline
+  - Calls the stepwise prover to fill the details
+  - Micro RAG extracted from AFP
 ---
 
 ## Table of Contents
@@ -15,15 +25,12 @@ This repository implements an Isabelle/HOL theorem prover guided by Large Langua
   - [2.2 Environment variables](#22-environment-variables)
 - [3. Usage](#3-usage)
   - [3.1 Quick demo](#31-quick-demo)
-  - [3.2 Prove a single goal](#32-prove-a-single-goal)
-  - [3.3 Multiple goals from a file](#33-multiple-goals-from-a-file)
-  - [3.4 Benchmarking](#34-benchmarking)
-  - [3.5 Regression testing](#35-regression-testing)
-  - [3.6 Aggregating results](#36-aggregating-results)
-  - [3.7 Training a reranker](#37-training-a-reranker)
-  - [3.8 Isar-style proof outline sketching](#38-isar-style-proof-outline-sketching)
-  - [3.9 Isabelle/jEdit GUI integration](#39-isabellejedit-gui-integration)
-  - [3.10 Evaluation using mini-F2F](#310-evaluation-using-mini-f2f)
+  - [3.2 Stepwise prover](#32-stepwise-prover)
+  - [3.3 Training a reranker for the prover](#33-training-a-reranker-for-the-prover)
+  - [3.4 Isar-style proof outline sketching](#34-isar-style-proof-outline-sketching)
+  - [3.5 Planner data corpus and micro RAG](#35-planner-data-corpus-and-micro-rag)
+  - [3.6 Isabelle/jEdit GUI integration](#36-isabellejedit-gui-integration)
+  - [3.6 Evaluation using mini-F2F](#37-evaluation-using-mini-f2f)
 - [4. Project Structure](#5-project-structure)
 - [5. Notes & Tips](#6-notes--tips)
 - [6. License](#7-license)
@@ -126,7 +133,7 @@ python -m prover.cli
 # Default goal: rev (rev xs) = xs
 ```
 
-### 3.2 Prove a single goal
+### 3.2 Stepwise prover
 **Ollama (local):**
 ```bash
 python -m prover.cli --goal "map f (xs @ ys) = map f xs @ map f ys" \
@@ -161,19 +168,20 @@ python -m prover.cli --goal 'rev (rev xs) = xs' \
   --sledge --quickcheck --nitpick --facts-limit 6 --variants
 ```
 
-### 3.3 Multiple goals from a file
+**Advanced features for the prover**
+Prove multiple goals from a file
 ```bash
 python -m prover.cli --goals-file datasets/lists.txt \
   --model "gemini:gemini-2.5-pro"
 ```
 
-### 3.4 Benchmarking
+Benchmarking
 ```bash
 python -m prover.experiments bench --suite lists
 # Results → datasets/results/
 ```
 
-### 3.5 Regression testing
+Regression testing
 Create baseline:
 ```bash
 python -m prover.experiments regress --suite lists \
@@ -186,12 +194,12 @@ python -m prover.experiments regress --suite lists \
   --model "hf:meta-llama/Llama-3.1-8B-Instruct"
 ```
 
-### 3.6 Aggregating results
+Aggregating results
 ```bash
 python -m prover.experiments aggregate --best-only --top-k 2
 ```
 
-### 3.7 Training a reranker
+### 3.3 Training a reranker for the prover
 Supervised (sklearn / XGBoost):
 ```bash
 python -m prover.train_reranker --algo sklearn-logreg --target bandit
@@ -241,7 +249,7 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 # See which reranker works better.
 ```
 
-### 3.8 Isar-style proof outline sketching
+### 3.4 Isar-style proof outline sketching
 Run the planner to sketch a proof (fill the proof if possible). Internally, it proposes multiple outlines and picks the most suitable one to output.
 ```bash
 python -m planner.cli --timeout 60 --mode auto "rev (rev xs) = xs"
@@ -264,7 +272,36 @@ python -m planner.cli --model "gemini:gemini-2.5-flash" \
   "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
-### 3.9 Isabelle/jEdit GUI integration
+### 3.5 Planner data corpus and micro RAG
+
+Extract a data corpus for the planner from AFP (replace the path to afp thys with a valid path)
+```bash
+python - <<'PY'
+from planner.extract import mine_afp_corpus_rich
+mine_afp_corpus_rich(src_dir="/path/to/afp/thys", out_jsonl="datasets/isar_pairs_rich.jsonl")
+PY
+```
+
+Aggregate priors, generate a micro RAG (hint lexicon) from AFP.
+```bash
+python -m planner.priors \
+  --input datasets/isar_pairs_rich.jsonl \
+  --priors data/isar_priors.json \
+  --hintlex data/isar_hintlex.json \
+  --min-count 3 --topk 8
+```
+
+Run the planner with the new knowledge (alpha (default 1.0): weight on subgoals (keep dominant), beta (default 0.5): weight on pattern penalty, gamma (default 0.2): reward for using recommended hints)
+```bash
+python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
+  --context-hints \
+  --priors data/isar_priors.json \
+  --hintlex data/isar_hintlex.json \
+  --alpha 1.0 --beta 0.6 --gamma 0.25 \
+  --lib-templates
+```
+
+### 3.6 Isabelle/jEdit GUI integration
 Run the HTTP server:
 ```bash
 python3 -m isabelle_ui.server
@@ -275,7 +312,7 @@ Copy the `.bsh` macros from `isabelle_ui/` to your jEdit macros folder, e.g.
 
 Then in jEdit, use **Macros → LLM Prover** at a proof state.
 
-### 3.10 Evaluation using mini-F2F
+### 3.7 Evaluation using mini-F2F
 Download the dataset
 ```bash
 git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/miniF2F  

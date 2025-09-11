@@ -8,7 +8,7 @@ from planner.skeleton import (
     Skeleton,
     find_sorry_spans,
     propose_isar_skeleton,               # legacy single-outline path
-    propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check
+    propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check (+ new scoring)
 )
 from planner.repair import try_local_repairs  # LLM-guided local repair
 
@@ -138,9 +138,19 @@ def plan_and_fill(
     repairs: bool = True,
     max_repairs_per_hole: int = 2,
     repair_trace: bool = False,
+    # planner scoring/context flags
+    priors_path: Optional[str] = None,
+    context_hints: bool = False,
+    lib_templates: bool = False,
+    alpha: float = 1.0,
+    beta: float = 0.5,
+    gamma: float = 0.2,
+    # NEW: micro-RAG hint lexicon
+    hintlex_path: Optional[str] = None,
+    hintlex_top: int = 8,
 ) -> PlanAndFillResult:
     """
-    Plan (diverse outlines + quick sketch check) → Sketch → Fill all holes with local repair.
+    Plan (diverse outlines + quick sketch check + optional priors/context) → Sketch → Fill all holes.
     """
     force_outline = mode == "outline"
 
@@ -161,7 +171,23 @@ def plan_and_fill(
             temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
             k = int(outline_k) if outline_k is not None else 3
             best, _diag = propose_isar_skeleton_diverse_best(
-                goal, isabelle=isa, session_id=session, model=model, temps=temps, k=k, force_outline=force_outline,
+                goal,
+                isabelle=isa,
+                session_id=session,
+                model=model,
+                temps=temps,
+                k=k,
+                force_outline=force_outline,
+                # scoring/context
+                priors_path=priors_path,
+                context_hints=context_hints,
+                lib_templates=lib_templates,
+                alpha=alpha,
+                beta=beta,
+                gamma=gamma,
+                # NEW: hintlex
+                hintlex_path=hintlex_path,
+                hintlex_top=hintlex_top,
             )
             full = best.text
 
