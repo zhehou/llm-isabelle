@@ -1,23 +1,24 @@
-# planner/driver.py
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Iterable
+from typing import Iterable, List, Optional, Tuple
 
 from planner.skeleton import (
     Skeleton,
     find_sorry_spans,
-    propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check
     propose_isar_skeleton,               # legacy single-outline path
+    propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check
 )
+from planner.repair import try_local_repairs  # LLM-guided local repair
+
 from prover.config import ISABELLE_SESSION
 from prover.isabelle_api import (
-    start_isabelle_server,
-    get_isabelle_client,
     build_theory,
-    run_theory,
+    get_isabelle_client,
     last_print_state_block,
+    run_theory,
+    start_isabelle_server,
 )
 from prover.prover import prove_goal
 
@@ -25,8 +26,8 @@ from prover.prover import prove_goal
 @dataclass(slots=True)
 class PlanAndFillResult:
     success: bool
-    outline: str           # final Isar text (with holes filled if successful)
-    fills: List[str]       # text of per-hole proof scripts inserted
+    outline: str  # final Isar text (with holes filled if successful)
+    fills: List[str]  # text of per-hole proof scripts inserted
     failed_holes: List[int]  # indices of holes that failed to fill (if any)
 
 
@@ -50,10 +51,6 @@ def _first_lemma_line(full_text: str) -> str:
 
 
 def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int]) -> str:
-    """
-    Build a theory ending at the hole, run once, and return the latest print_state block.
-    We temporarily leave a 'sorry' at the hole so the theory is well-formed.
-    """
     s, e = hole_span
     prefix_with_placeholder = full_text[:s] + "sorry\n" + full_text[e:]
     thy = build_theory(prefix_with_placeholder.splitlines(), add_print_state=True, end_with="sorry")
@@ -70,13 +67,6 @@ def _fill_one_hole(
     model: Optional[str],
     per_hole_timeout: int,
 ) -> Tuple[str, bool, str]:
-    """
-    Best-effort fill for a single 'sorry' hole:
-      1) Get local subgoal print_state right before the hole
-      2) Call micro-prover seeded with that state (initial_state_hint)
-      3) Splice produced steps into the hole
-    Returns: (new_full_text, ok, script_or_reason)
-    """
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span)
 
     res = prove_goal(
@@ -108,7 +98,7 @@ def _fill_one_hole(
         variant_timeout=6,
         variant_tries=24,
         enable_reranker=True,
-        initial_state_hint=state_block,  # seed first beam with local print_state
+        initial_state_hint=state_block,
     )
 
     steps: List[str] = [str(s) for s in res.get("steps", [])]
@@ -140,19 +130,19 @@ def plan_and_fill(
     timeout: int = 100,
     *,
     mode: str = "auto",  # "auto" (allow complete) or "outline" (force placeholders)
-    # New: diverse-outline controls (CLI pass-through)
+    # Diverse-outline controls
     outline_k: Optional[int] = None,
     outline_temps: Optional[Iterable[float]] = None,
     legacy_single_outline: bool = False,
+    # Local repair controls
+    repairs: bool = True,
+    max_repairs_per_hole: int = 2,
+    repair_trace: bool = False,
 ) -> PlanAndFillResult:
     """
-    Plan (diverse outlines + quick sketch check) → Sketch → Fill all holes.
-    - mode="auto": if the planner emits a complete proof (no `sorry`), we return it.
-    - mode="outline": force placeholders and try to fill them.
-    - If legacy_single_outline=True, bypass diversity and use a single low-temp outline.
-    - If outline_k/outline_temps are provided, override defaults used in the diverse step.
+    Plan (diverse outlines + quick sketch check) → Sketch → Fill all holes with local repair.
     """
-    force_outline = (mode == "outline")
+    force_outline = mode == "outline"
 
     server_info, proc = start_isabelle_server(name="planner", log_file="planner_ui.log")
     isa = get_isabelle_client(server_info)
@@ -163,7 +153,7 @@ def plan_and_fill(
         return max(0.0, timeout - (time.monotonic() - t0))
 
     try:
-        # 1) Outline selection
+        # 1) Outline
         if legacy_single_outline:
             skel = propose_isar_skeleton(goal, model=model, temp=0.35, force_outline=force_outline)
             full = skel.text
@@ -171,22 +161,16 @@ def plan_and_fill(
             temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
             k = int(outline_k) if outline_k is not None else 3
             best, _diag = propose_isar_skeleton_diverse_best(
-                goal,
-                isabelle=isa,
-                session_id=session,
-                model=model,
-                temps=temps,
-                k=k,
-                force_outline=force_outline,
+                goal, isabelle=isa, session_id=session, model=model, temps=temps, k=k, force_outline=force_outline,
             )
             full = best.text
 
-        # If auto-mode and no holes ⇒ return the (checked) whole-proof as-is
+        # 2) Early exit if complete in auto-mode
         spans = find_sorry_spans(full)
         if mode == "auto" and not spans:
             return PlanAndFillResult(True, full, [], [])
 
-        # 2) Fill holes left→right under a shared wall-clock
+        # 3) Fill holes with shared time + local repair
         lemma_line = _first_lemma_line(full)
         if not lemma_line:
             return PlanAndFillResult(False, full, [], [0])
@@ -196,50 +180,68 @@ def plan_and_fill(
         failed: List[int] = []
 
         hole_idx = 0
-        while True:
-            if "sorry" not in full:
-                break
-            if left_s() <= 0:
-                break
+        while "sorry" in full and left_s() > 0:
             spans = find_sorry_spans(full)
             if not spans:
                 break
 
-            span = spans[0]  # earliest hole
+            span = spans[0]
             remaining = max(1, len(spans))
             per_hole_budget = int(max(5, left_s() / remaining))
 
-            full, ok, script = _fill_one_hole(
-                isa, session, full, span, goal_text, model, per_hole_budget
-            )
+            full2, ok, script = _fill_one_hole(isa, session, full, span, goal_text, model, per_hole_budget)
             if ok:
+                full = full2
                 fills.append(script)
-            else:
-                failed.append(hole_idx)
+                hole_idx += 1
+                continue
 
+            # Local repair on failure
+            if repairs and left_s() > 6:
+                patched, applied, reason = try_local_repairs(
+                    full_text=full,
+                    hole_span=span,
+                    goal_text=goal_text,
+                    model=model,
+                    isabelle=isa,
+                    session=session,
+                    repair_budget_s=min(8.0, max(4.0, left_s() * 0.25)),
+                    max_ops_to_try=max_repairs_per_hole,
+                    trace=repair_trace,
+                )
+                if applied and patched != full:
+                    full = patched
+                    # retry same hole (spans recomputed)
+                    continue
+
+            failed.append(hole_idx)
             hole_idx += 1
 
         success = ("sorry" not in full)
         return PlanAndFillResult(success, full, fills, failed)
 
     finally:
-        # Robust shutdown
+        # Robust shutdown across subprocess.Popen vs asyncio.subprocess.Process
         try:
             isa.shutdown()
         except Exception:
             pass
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except TypeError:
-                proc.wait()
-        except Exception:
-            try:
-                proc.kill()
+            if hasattr(proc, "terminate"):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            if hasattr(proc, "kill"):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            is_popen = all(hasattr(proc, attr) for attr in ("poll", "communicate", "pid"))
+            if is_popen:
                 try:
                     proc.wait(timeout=2)
-                except TypeError:
-                    proc.wait()
-            except Exception:
-                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass

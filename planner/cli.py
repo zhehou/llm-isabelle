@@ -29,21 +29,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--timeout", type=int, default=120, help="Total wall-clock seconds for planning + filling")
     ap.add_argument("--mode", choices=["auto", "outline"], default="auto",
                     help="auto: allow whole proofs; outline: force placeholders and fill")
+
     # Diverse-outline controls
     ap.add_argument("--diverse-outlines", dest="diverse", action="store_true",
                     help="Enable diverse outline sampling + quick sketch check")
     ap.add_argument("--single-outline", dest="diverse", action="store_false",
                     help="Disable diversity; use a single low-temp outline")
-    ap.set_defaults(diverse=True)  # default ON to use Hybrid planner flow
+    ap.set_defaults(diverse=True)
     ap.add_argument("--k", type=int, default=3, help="Number of outline candidates (when --diverse-outlines)")
     ap.add_argument("--temps", type=_parse_temps, default=None,
                     help="Comma-separated temps for outline sampling, e.g. '0.35,0.55,0.85'")
+
+    # Local repair controls
+    ap.add_argument("--repairs", dest="repairs", action="store_true",
+                    help="Enable local LLM-guided repairs if a hole fails to fill (default).")
+    ap.add_argument("--no-repairs", dest="repairs", action="store_false",
+                    help="Disable local repairs; only try direct fill for each hole.")
+    ap.set_defaults(repairs=True)
+    ap.add_argument("--max-repairs-per-hole", type=int, default=2,
+                    help="Max repair ops to try for each failing hole (default: 2).")
+    ap.add_argument("--repair-trace", action="store_true",
+                    help="Print repair proposals and decisions for debugging.")
+
     args = ap.parse_args(argv)
 
     # Goal handling
     goal = args.goal
     if not goal:
-        # read from stdin, strip quotes if user pasted the whole lemma line
         data = sys.stdin.read().strip()
         if data.startswith('lemma "') and data.endswith('"'):
             data = data[len('lemma "'): -1]
@@ -57,10 +69,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         model=args.model,
         timeout=args.timeout,
         mode=args.mode,
-        # pass-through diverse-outline controls
         outline_k=args.k if args.diverse else 1,
         outline_temps=args.temps,
         legacy_single_outline=(not args.diverse),
+        repairs=args.repairs,
+        max_repairs_per_hole=args.max_repairs_per_hole,
+        repair_trace=args.repair_trace,
     )
 
     print(res.outline, end="" if res.outline.endswith("\n") else "\n")
