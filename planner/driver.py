@@ -81,7 +81,7 @@ def _fill_one_hole(
         models=None,
         save_dir=None,
         use_sledge=True,
-        sledge_timeout=5,
+        sledge_timeout=10,
         sledge_every=2,
         trace=False,
         use_color=False,

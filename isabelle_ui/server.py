@@ -95,12 +95,12 @@ def _env_str(name: str, default: Optional[str]) -> Optional[str]:
 class ProveReq(BaseModel):
     goal: str
     model: Optional[str] = None
-    timeout: int = 8
-    beam: int = 2
+    timeout: int = 60
+    beam: int = 4
     max_depth: int = 8
     facts_limit: int = 6
     sledge: bool = True
-    sledge_timeout: int = 5
+    sledge_timeout: int = 20
     sledge_every: int = 2
     quickcheck: bool = True
     qc_timeout: int = 2
