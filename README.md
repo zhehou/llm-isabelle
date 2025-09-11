@@ -257,6 +257,13 @@ Controlling the divserity of multiple outlines
 python -m planner.cli --timeout 60 --diverse-outlines --k 3 --temps "0.35,0.55,0.85" --mode auto "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
+Enable proof outline repair (by LLM)
+```bash
+python -m planner.cli --model "gemini:gemini-2.5-flash" \                   
+  --timeout 120 --mode outline --repairs --repair-trace \
+  "map f (xs @ ys) = map f xs @ map f ys"
+```
+
 ### 3.9 Isabelle/jEdit GUI integration
 Run the HTTP server:
 ```bash
