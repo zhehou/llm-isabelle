@@ -272,6 +272,41 @@ python -m planner.cli --model "gemini:gemini-2.5-flash" \
   "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
+Benchmarking a file of lemmas/proof goals
+```bash
+python -m planner.experiments bench \  
+  --file datasets/lists.txt \                                 
+  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 120 --strict-no-sorry --verify \
+  --model "qwen3-coder:30b" --shuffle --seed 42
+```
+
+Regression testing and save a baseline
+```bash
+python -m planner.experiments regress \
+  --file datasets/lists.txt \                                 
+  --mode auto --diverse --k 3 --timeout 120 \
+  --strict-no-sorry --verify \
+  --save-baseline datasets/baselines/planner_lists.json
+```
+
+Regression testing against previously saved baseline
+```bash
+python -m planner.experiments regress \
+  --file datasets/lists.txt --model "gemini:gemini-2.5-flash"\
+  --mode auto --diverse --k 3 --timeout 120 \
+  --strict-no-sorry --verify \
+  --baseline datasets/baselines/planner_lists.json \
+  --tol-rate 0.00 --tol-time 2.0
+```
+
+python -m planner.experiments regress \
+  --file datasets/lists.txt --model "gemini:gemini-2.5-flash"\
+  --mode auto --diverse --k 3 --timeout 120 \
+  --strict-no-sorry --verify \
+  --baseline datasets/baselines/planner_lists.json \
+  --tol-rate 0.00 --tol-time 2.0
+
 ### 3.5 Planner data corpus and micro RAG
 
 Extract a data corpus for the planner from AFP (replace the path to afp thys with a valid path)
@@ -299,6 +334,16 @@ python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
   --hintlex data/isar_hintlex.json \
   --alpha 1.0 --beta 0.6 --gamma 0.25 \
   --lib-templates
+```
+
+Benchmarking a file of lemmas/proof goals with the micro RAG
+```bash
+python -m planner.experiments bench \  
+  --file datasets/lists.txt \                                 
+  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 120 --strict-no-sorry --verify \
+  --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
+  --model "qwen3-coder:30b" --shuffle --seed 42
 ```
 
 ### 3.6 Isabelle/jEdit GUI integration

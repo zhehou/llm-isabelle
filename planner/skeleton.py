@@ -29,14 +29,14 @@ from planner.repair import _facts_from_state as _facts_from_state
 _SESSION = requests.Session()
 
 # -----------------------------------------------------------------------------
-# Prompt for OUTLINES
+# Prompt for OUTLINES  (nudged with ?case and calculational patterns)
 # -----------------------------------------------------------------------------
 SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
 
 TASK
 Given a lemma statement, produce a CLEAN Isar proof OUTLINE that exposes the decomposition strategy
-(e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof` with intermediate `have`/`show` steps).
-Think in English first, then translate the outline into Isar. Leave nontrivial reasoning steps as `sorry`.
+(e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof -` with intermediate `have`/`also`/`finally`).
+Leave nontrivial reasoning steps as `sorry`.
 
 OUTPUT REQUIREMENTS
 - Output ONLY Isabelle text (no explanations, no code fences).
@@ -47,53 +47,68 @@ OUTPUT REQUIREMENTS
     … (case/induction structure, small `have`/`show` stubs, `sorry` where reasoning is omitted) …
   qed
 - Prefer structured outlines:
-  • For lists/nats: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`.
-  • For booleans/sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)`.
-  • For set/algebraic goals: include helpful rewrites as hints (e.g., `using`/`simp add:`) before a `sorry`.
+  • For lists/nats: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`,
+    and in each case branch use `show ?case ...`.
+  • For booleans/sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)` with `show ?case`.
+  • For calculational reasoning: use `proof -`, then `have ...`, `also`, `finally show ?thesis` with the Isar token `...`.
+  • **Name intermediate facts** and reuse them with `using`:
+      - `have f1: "…"` then later `have f2: "…" using f0 f1 …`, and finally `show ?thesis using f1 f2 …`.
 
 STYLE EXAMPLES
 lemma "{goal}"
 proof (induction xs)
   case Nil
-  then show ?thesis by simp
+  have f1: "…"
+    using Nil.prems
+    sorry
+  show ?case
+    using f1
+    sorry
 next
   case (Cons x xs)
-  have H1: "…"
+  have f1: "…"
+    using Cons.prems
     sorry
-  then show ?thesis
+  have f2: "…"
+    using Cons.IH f1
+    sorry
+  show ?case
+    using f2
     sorry
 qed
 
 lemma "{goal}"
 proof (cases b)
   case True
-  then show ?thesis
+  have f1: "…"
+    sorry
+  show ?case
+    using f1
     sorry
 next
   case False
-  then show ?thesis
+  have f2: "…"
     sorry
-qed
-
-lemma "{goal}"
-proof
-  show "P"
-    sorry
-next
-  show "Q"
+  show ?case
+    using f2
     sorry
 qed
 
 lemma "{goal}"
 proof -
-  have "A ⟹ B"
+  have f1: "A = B"
     sorry
-  moreover have "B ⟹ C"
+  have f2: "B = C"
+    using f1
     sorry
-  ultimately show ?thesis
+  also have "... = D"
+    sorry
+  finally show ?thesis
+    using f2
     sorry
 qed
 """
+
 
 @dataclass(slots=True)
 class Skeleton:
@@ -104,6 +119,11 @@ SORRY_RE = re.compile(r"\bsorry\b")
 PROOF_RE = re.compile(r"(?m)^\s*proof(?:\b|\s|\()", re.UNICODE)
 QED_RE   = re.compile(r"(?m)^\s*qed\b", re.UNICODE)
 BY_INLINE_RE = re.compile(r"\s+by\s+.*$")
+# New regex helpers for sanitization
+CASE_START_RE = re.compile(r"(?m)^\s*case\b")
+NEXT_OR_QED_RE = re.compile(r"(?m)^\s*(next|qed)\b")
+SHOW_THESIS_RE = re.compile(r"(?m)^\s*(?:then\s+)?show\s+\?thesis\b")
+BARE_PROOF_RE = re.compile(r"(?m)^\s*proof\s*$")
 
 # =============================================================================
 # Provider shims: Ollama (default), Hugging Face ("hf:"), Gemini ("gemini:")
@@ -296,8 +316,64 @@ def _ensure_lemma_header(text: str, goal: str) -> str:
         return f'lemma "{goal}"\n{body}'
     return text
 
+def _normalize_calculation_ellipsis(text: str) -> str:
+    # Replace Unicode ellipsis and spaced PDF (. . .) with Isar token "..."
+    text = text.replace("…", "...")
+    text = re.sub(r"\.\s*\.\s*\.", "...", text)
+    return text
+
+def _crop_to_first_proof_block(text: str) -> str:
+    """
+    Keep only the first lemma..qed block; drop anything before/after to avoid splices.
+    """
+    # Find first lemma
+    m_lemma = re.search(r'(?m)^\s*lemma\s+"[^"]*"', text)
+    if not m_lemma:
+        return text
+    tail = text[m_lemma.start():]
+    # Find first proof and its matching first qed after it
+    m_proof = PROOF_RE.search(tail)
+    if not m_proof:
+        return tail
+    after_proof = tail[m_proof.end():]
+    m_qed = QED_RE.search(after_proof)
+    if not m_qed:
+        return tail
+    end = m_proof.end() + m_qed.end()
+    return tail[:end] + "\n"
+
+def _fix_case_show_thesis(text: str) -> str:
+    """
+    Inside case blocks, rewrite '[then ]show ?thesis' -> 'show ?case'.
+    """
+    lines = text.splitlines()
+    in_case = False
+    for i, L in enumerate(lines):
+        if CASE_START_RE.match(L):
+            in_case = True
+        elif NEXT_OR_QED_RE.match(L):
+            in_case = False
+        if in_case and SHOW_THESIS_RE.search(L):
+            # Drop optional 'then ' as well
+            lines[i] = SHOW_THESIS_RE.sub("show ?case", L, count=1)
+    return "\n".join(lines)
+
+def _maybe_proof_dash(text: str) -> str:
+    """
+    If there is a bare 'proof' at top-level and calculational cues present, prefer 'proof -'.
+    """
+    if not BARE_PROOF_RE.search(text):
+        return text
+    if re.search(r"(?m)^\s*(have|also|moreover|ultimately|finally|hence|thus)\b", text):
+        return BARE_PROOF_RE.sub("proof -", text, count=1)
+    return text
+
 def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     text = _ensure_lemma_header(text, goal)
+    # Normalize ellipsis first (avoid Unicode / spaced form)
+    text = _normalize_calculation_ellipsis(text)
+
+    # Keep content from *this* lemma onwards
     goal_header = f'lemma "{goal}"'
     idx = text.find(goal_header)
     if idx >= 0:
@@ -306,10 +382,14 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
         first_lemma = text.find("lemma ")
         if first_lemma >= 0:
             text = text[first_lemma:]
+
+    # Ensure proof/qed skeleton exists
     if not PROOF_RE.search(text):
         text = text.rstrip() + "\nproof\n  sorry\nqed\n"
     if not QED_RE.search(text):
         text = text.rstrip() + "\nqed\n"
+
+    # Force an outline (remove inline 'by' if requested by caller)
     if force_outline:
         lines = text.splitlines()
         for i, L in enumerate(lines):
@@ -321,6 +401,14 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
             if m_qed:
                 insert_at = m_qed.start()
                 text = text[:insert_at] + "  sorry\n" + text[insert_at:]
+
+    # Light Isar fixups
+    text = _fix_case_show_thesis(text)  # ?thesis -> ?case inside case blocks
+    text = _maybe_proof_dash(text)      # bare 'proof' -> 'proof -' if we see calculational cues
+
+    # Trim to the first complete lemma..qed block to avoid trailing splices
+    text = _crop_to_first_proof_block(text)
+
     if not text.endswith("\n"):
         text += "\n"
     return text
@@ -522,10 +610,10 @@ def _lib_templates_for_goal(goal: str) -> List[Skeleton]:
 f'''lemma "{goal}"
 proof (induction xs)
   case Nil
-  then show ?thesis by simp
+  show ?case by simp
 next
   case (Cons x xs)
-  then show ?thesis
+  show ?case
     sorry
 qed
 ''')
@@ -534,10 +622,10 @@ qed
 f'''lemma "{goal}"
 proof (induction n)
   case 0
-  then show ?thesis by simp
+  show ?case by simp
 next
   case (Suc n)
-  then show ?thesis
+  show ?case
     sorry
 qed
 ''')
@@ -546,11 +634,24 @@ qed
 f'''lemma "{goal}"
 proof (cases b)
   case True
-  then show ?thesis
+  show ?case
     sorry
 next
   case False
-  then show ?thesis
+  show ?case
+    sorry
+qed
+''')
+    lib.append(
+f'''lemma "{goal}"
+proof -
+  have f1: "(* fill a useful intermediate statement *)"
+    sorry
+  have f2: "(* another useful intermediate *)"
+    using f1
+    sorry
+  show ?thesis
+    using f1 f2
     sorry
 qed
 ''')
