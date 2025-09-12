@@ -321,8 +321,8 @@ Aggregate priors, generate a micro RAG (hint lexicon) from AFP.
 ```bash
 python -m planner.priors \
   --input datasets/isar_pairs_rich.jsonl \
-  --priors data/isar_priors.json \
-  --hintlex data/isar_hintlex.json \
+  --priors datasets/isar_priors.json \
+  --hintlex datasets/isar_hintlex.json \
   --min-count 3 --topk 8
 ```
 
@@ -330,8 +330,8 @@ Run the planner with the new knowledge (alpha (default 1.0): weight on subgoals 
 ```bash
 python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
   --context-hints \
-  --priors data/isar_priors.json \
-  --hintlex data/isar_hintlex.json \
+  --priors datasets/isar_priors.json \
+  --hintlex datasets/isar_hintlex.json \
   --alpha 1.0 --beta 0.6 --gamma 0.25 \
   --lib-templates
 ```
