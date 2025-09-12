@@ -205,6 +205,7 @@ Supervised (sklearn / XGBoost):
 python -m prover.train_reranker --algo sklearn-logreg --target bandit
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 ```
+
 RL-style Q-estimation:
 ```bash
 python -m prover.train_reranker --algo xgb-regressor --target q --attempts logs/attempts.log.jsonl --runs logs/runs.log.jsonl
@@ -215,13 +216,12 @@ AWR++ (with teacher & listwise):
 # Train a teacher model first
 python -m prover.train_reranker --algo xgb-ranker
 # Then train an AWR++ with knowledge distilled from the teacher
-python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto
-python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo awr --tau 0.6 --epochs 8 --batch 1024 --listwise_norm --teacher_w 0.3 --teacher auto --attempts logs/attempts.log.jsonl --runs logs/runs.log.jsonl
 ```
 
 Deep Q Network:
 ```bash
-python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500
+python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92 --target_update 500 --attempts logs/attempts.log.jsonl --runs logs/runs.log.jsonl
 ```
 
 Combining the above in curriculum training
@@ -299,13 +299,6 @@ python -m planner.experiments regress \
   --baseline datasets/baselines/planner_lists.json \
   --tol-rate 0.00 --tol-time 2.0
 ```
-
-python -m planner.experiments regress \
-  --file datasets/lists.txt --model "gemini:gemini-2.5-flash"\
-  --mode auto --diverse --k 3 --timeout 120 \
-  --strict-no-sorry --verify \
-  --baseline datasets/baselines/planner_lists.json \
-  --tol-rate 0.00 --tol-time 2.0
 
 ### 3.5 Planner data corpus and micro RAG
 
