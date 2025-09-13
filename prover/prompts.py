@@ -17,6 +17,9 @@ Rules:
 - Split on datatypes or booleans when subgoals suggest it: `apply (cases x)`, `apply (cases rule: list.exhaust)`, `apply (induction n)`, `apply (induction xs)`.
 - You may rewrite with packages: `apply (subst ...)`, `apply (simp add: algebra_simps field_simps)`, `apply (simp split: option.splits if_splits)`.
 - Do NOT emit comments, bullets, `have`/`show`, or code fences.
+- Never use placeholder names like `foo_def`, `bar_def`, or `my_fun_def`.
+- Only use `*_def` if that exact name already appears in the “Helpful facts”.
+- section or (rarely) in the latest subgoal text; otherwise avoid `*_def`.
 
 Examples of acceptable lines:
 apply simp
@@ -44,8 +47,6 @@ apply (intro impI)
 apply fastforce
 apply blast
 apply (subst append_Nil2)
-apply (unfolding foo_def bar_def)
-apply (simp only: foo_def bar_def)
 """
 
 SYSTEM_FINISH = """You are an Isabelle/HOL proof expert.

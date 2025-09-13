@@ -287,26 +287,22 @@ def propose_steps(
         "apply simp",
         "apply auto",
         "apply clarsimp",
-        "apply (simp only: foo_def)",
-        "apply (simp add: foo_def)",
         "apply (induction xs)",
         "apply (cases xs)",
     ]
 
-    # If no facts provided, synthesize a couple likely *_def guesses from goal words.
-    if not facts:
+    if facts:
+        facts_blob = " ".join(facts)
         words = _STEM_RE.findall((goal + " " + state_hint))
         stems = [w for w in words if not w[0].isupper()]
-        stems = list(dict.fromkeys(stems))[:3]  # dedup, keep order, cap 3
+        stems = list(dict.fromkeys(stems))[:3]
         for s in stems:
-            merged.insert(0, f"apply (auto simp add: {s}_def)")
-            merged.insert(0, f"apply (simp only: {s}_def)")
-            merged.insert(0, f"apply (simp add: {s}_def)")
-
-    if facts:
+            if f"{s}_def" in facts_blob:
+                merged.insert(0, f"apply (auto simp add: {s}_def)")
+                merged.insert(0, f"apply (simp only: {s}_def)")
+                merged.insert(0, f"apply (simp add: {s}_def)")
         merged = augment_with_facts_for_steps(merged, facts)
     return rank_candidates(merged, goal, state_hint, facts, reranker=reranker, depth=depth)
-
 
 def propose_finishers(
     models: List[str],
@@ -335,8 +331,7 @@ def propose_finishers(
         base_lists.append(base)
 
     base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or [
-        "done", "by simp", "by auto", "by clarsimp",
-        "by (simp only: foo_def)", "by (simp add: foo_def)",
+        "done", "by simp", "by auto", "by clarsimp",        
         "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"
     ]
 
