@@ -1,6 +1,6 @@
 # Isabellm: A playground for Free and Lightweight LLM-Guided Isabelle/HOL Provers
 
-This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, or **Hugging Face**).
+This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, etc).
 
 Key features:
 - Stepwise prover (in the prover folder)
@@ -306,14 +306,14 @@ Extract a data corpus for the planner from AFP (replace the path to afp thys wit
 ```bash
 python - <<'PY'
 from planner.extract import mine_afp_corpus_rich
-mine_afp_corpus_rich(src_dir="/path/to/afp/thys", out_jsonl="datasets/isar_pairs_rich.jsonl")
+mine_afp_corpus_rich(src_dir="/path/to/afp/thys", out_jsonl="datasets/isar_pairs_afp.jsonl")
 PY
 ```
 
 Aggregate priors, generate a micro RAG (hint lexicon) from AFP.
 ```bash
 python -m planner.priors \
-  --input datasets/isar_pairs_rich.jsonl \
+  --input datasets/isar_pairs_afp.jsonl \
   --priors datasets/isar_priors.json \
   --hintlex datasets/isar_hintlex.json \
   --min-count 3 --topk 8
@@ -337,6 +337,26 @@ python -m planner.experiments bench \
   --timeout 120 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
   --model "qwen3-coder:30b" --shuffle --seed 42
+```
+
+Extract correct proofs from the planner's log
+```bash
+python logs/filter_positive_planner_logs.py logs/planner.log.jsonl \
+  --isar-pairs-jsonl datasets/isar_pairs_new.jsonl --require-verified
+```
+
+Combine with previous planner data
+```bash
+cat datasets/isar_pairs_afp.jsonl datasets/isar_pairs_new.jsonl > datasets/isar_pairs_combo.jsonl
+```
+
+Continual improvement using the combined micro RAG
+```bash
+python -m planner.priors \
+  --input datasets/isar_pairs_combo.jsonl \
+  --priors data/isar_priors.json \
+  --hintlex data/isar_hintlex.json \
+  --min-count 3 --topk 8
 ```
 
 ### 3.6 Isabelle/jEdit GUI integration

@@ -31,21 +31,15 @@ _SESSION = requests.Session()
 # -----------------------------------------------------------------------------
 # Prompt for OUTLINES  (nudged with ?case and calculational patterns)
 # -----------------------------------------------------------------------------
-SKELETON_PROMPT = """You are an Isabelle/HOL proof expert.
+SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
 
 TASK
-Given a lemma statement, produce a CLEAN Isar proof OUTLINE that exposes the decomposition strategy
-(e.g., `proof (induction …)`, `proof (cases …)`, or a short `proof -` with intermediate `have`/`also`/`finally`).
-Leave nontrivial reasoning steps as `sorry`.
+Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar outline that compiles. Leave nontrivial reasoning steps as `sorry`.
 
 OUTPUT REQUIREMENTS
 - Output ONLY Isabelle text (no explanations, no code fences).
 - Start at or after a line exactly of the form:
   lemma "{goal}"
-- Ensure there is a well-formed block:
-  proof
-    … (case/induction structure, small `have`/`show` stubs, `sorry` where reasoning is omitted) …
-  qed
 - Prefer structured outlines:
   • For lists/nats: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`,
     and in each case branch use `show ?case ...`.
@@ -53,6 +47,46 @@ OUTPUT REQUIREMENTS
   • For calculational reasoning: use `proof -`, then `have ...`, `also`, `finally show ?thesis` with the Isar token `...`.
   • **Name intermediate facts** and reuse them with `using`:
       - `have f1: "…"` then later `have f2: "…" using f0 f1 …`, and finally `show ?thesis using f1 f2 …`.
+
+OUTPUT GRAMMAR
+Top-level:
+- lemma "{goal}" <proof>
+<proof> ::= <refinement>* <proper_proof>
+<refinement> ::=
+  | apply <method>
+  | using <thms>
+  | unfolding <thms>
+<proper_proof> ::=
+  | proof [<method>] <statement>* qed [<method>]
+  | by <method> [<method>] | sorry | done
+<statement> ::=
+  | fix <vars>
+  | assume <name>: "<prop>"
+  | have "<prop>" <proof>
+  | show ?case <proof>          # use inside cases/induction branches
+  | show ?thesis <proof>        # otherwise at the end
+  | then <goal_stmt>
+  | from <thms> <goal_stmt>
+  | with <thms> <goal_stmt>
+  | also                        # calculational chains
+  | finally <goal_stmt>
+  | next                        # separates branches
+<goal_stmt> ::= have "<prop>" <proof> | show "<prop>" <proof>
+# Structured shells the model may choose:
+#   proof (induction <var>)  …  next …  qed
+#   proof (cases <expr>)     …  next …  qed
+#   proof -                  …             qed
+# Methods (small, stable set):
+<method> ::=
+  | "induction" <var> [ "arbitrary:" <vars> ]
+  | "cases" <expr>
+  | "-"
+  | "simp" [ "add:" <thms> ] [ "only:" <thms> ]
+  | "auto" [ "simp" "add:" <thms> ]
+  | "blast" | "fastforce" | "clarsimp"
+  | "intro" <thms> | "elim" <thms> | "rule" <thm>
+  | "metis" [ <thms> ]
+  | "(" <method> ")"            # parenthesized method (e.g., by (simp add: …))
 
 STYLE EXAMPLES
 lemma "{goal}"
