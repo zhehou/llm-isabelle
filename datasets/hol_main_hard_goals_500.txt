@@ -1,0 +1,500 @@
+abs((a1952::int) - b1952) = abs(b1952 - a1952)
+A2148 = B2148 ⟷ (A2148 ⊆ B2148 ∧ B2148 ⊆ A2148)
+(∀x819. P819 x819 ⟶ Q819 x819) ⟷ ¬(∃x819. P819 x819 ∧ ¬ Q819 x819)
+bij_betw f1012 A1012 B1012 ⟷ (inj_on f1012 A1012 ∧ f1012 ` A1012 = B1012)
+inj_on f24 A24 ⟷ (∀x24∈A24. ∀y24∈A24. f24 x24 = f24 y24 ⟶ x24 = y24)
+r1814 ⊆ rtrancl r1814
+x3072 ∈ f3072 -` A3072 ⟷ f3072 x3072 ∈ A3072
+f1858 -` (A1858 ∩ B1858) = (f1858 -` A1858) ∩ (f1858 -` B1858)
+map_option f1174 (map_option g1174 o1174) = map_option (f1174 ∘ g1174) o1174
+length ([m870..<(m870+n870)]) = n870
+A1348 = B1348 ⟷ (A1348 ⊆ B1348 ∧ B1348 ⊆ A1348)
+(a349::int) + (b349 + c349) = (a349 + b349) + c349
+zip (map f3825 xs3825) (map g3825 ys3825) = map (λ(x,y). (f3825 x, g3825 y)) (zip xs3825 ys3825)
+((if P1041 x1041 then y1041 else z1041) = y1041) ⟷ P1041 x1041
+(¬ (∃x976. P976 x976)) ⟷ (∀x976. ¬ P976 x976)
+f1570 -` (A1570 ∩ B1570) = (f1570 -` A1570) ∩ (f1570 -` B1570)
+Domain (r1664 O s1664) ⊆ Domain r1664
+(∀x2123 y2123. (x2123,y2123) ∈ r2123 ⟶ (y2123,x2123) ∈ converse r2123)
+map fst (zip xs6559 ys6559) = take (min (length xs6559) (length ys6559)) xs6559
+(a726::int) + b726 = b726 + a726
+((if P869 x869 then True else False) = P869 x869)
+length ([m1390..<(m1390+n1390)]) = n1390
+Range Id = UNIV
+case_sum f295 g295 (Inl x295) = f295 x295
+snd (x1981,y1981) = y1981
+(∀n856::nat. m856 ≤ m856 + n856)
+map f3746 (drop n3746 xs3746) = drop n3746 (map f3746 xs3746)
+trans r1723 ⟶ r1723 O r1723 ⊆ r1723
+i4719 < length xs4719 ⟹ nth (map f4719 xs4719) i4719 = f4719 (nth xs4719 i4719)
+(a309::int) + (b309 + c309) = (a309 + b309) + c309
+(f = g) ⟷ (∀x1115. f x1115 = g x1115)
+((if P212 x212 then True else False) = P212 x212)
+(A3731 ⊆ B3731) ⟷ (∀x3731. x3731 ∈ A3731 ⟶ x3731 ∈ B3731)
+map_option f1876 None = None
+distinct xs3848 ⟹ set (remdups xs3848) = set xs3848
+set (take n1149 xs1149) ⊆ set xs1149
+surj f1105 ⟷ (∀y1105. ∃x1105. f1105 x1105 = y1105)
+(A3594 - B3594) ∪ (A3594 ∩ B3594) = A3594
+Range Id = UNIV
+i1029 < length xs1029 ⟹ nth (map f1029 xs1029) i1029 = f1029 (nth xs1029 i1029)
+(g ∘ f) ` A1849 = g ` (f ` A1849)
+(A1539 ⊆ B1539) ⟷ (∀x1539. x1539 ∈ A1539 ⟶ x1539 ∈ B1539)
+map f2449 (take n2449 xs2449) = take n2449 (map f2449 xs2449)
+{x1669∈A1669. P1669 x1669} ∪ {x1669∈A1669. ¬ P1669 x1669} = A1669
+x1763 ∈ set (remove1 x1763 (x1763 # xs1763)) ⟷ x1763 ∈ set xs1763
+filter P1270 (xs1270 @ ys1270) = filter P1270 xs1270 @ filter P1270 ys1270
+(a782::int) + b782 = b782 + a782
+surj f667 ⟷ (∀y667. ∃x667. f667 x667 = y667)
+(∀x1423. P1423 x1423) ⟶ ((∃x1423. Q1423 x1423) ⟶ ∃x1423. P1423 x1423 ∧ Q1423 x1423)
+distinct xs5054 ⟹ set (remdups xs5054) = set xs5054
+(m571::nat) + Suc n571 = Suc (m571 + n571)
+(x2590 ∈ A2590 ∧ x2590 ∈ B2590) ⟷ x2590 ∈ (A2590 ∩ B2590)
+zip (map f2403 xs2403) (map g2403 ys2403) = map (λ(x,y). (f2403 x, g2403 y)) (zip xs2403 ys2403)
+(A1082 - B1082) ∪ (A1082 ∩ B1082) = A1082
+(∀n1089::nat. m1089 ≤ n1089 ⟶ m1089 ≤ n1089 + k1089)
+bij_betw f1606 A1606 B1606 ⟷ (inj_on f1606 A1606 ∧ f1606 ` A1606 = B1606)
+abs(-(a1599::int)) = abs a1599
+abs((a1267::int) + b1267) ≤ abs a1267 + abs b1267
+distinct xs1850 ⟹ set (remdups xs1850) = set xs1850
+length ([m1918..<(m1918+n1918)]) = n1918
+Domain (r800 O s800) ⊆ Domain r800
+(A779 - B779) ∩ B779 = {}
+f1 -` (A1 ∪ B1) = (f1 -` A1) ∪ (f1 -` B1)
+map_option f668 (map_option g668 o668) = map_option (f668 ∘ g668) o668
+Range (converse r1967) = Domain r1967
+inj_on f1482 A1482 ⟷ (∀x1482∈A1482. ∀y1482∈A1482. f1482 x1482 = f1482 y1482 ⟶ x1482 = y1482)
+(A1114 - B1114) ∪ (A1114 ∩ B1114) = A1114
+Domain (converse r2128) = Range r2128
+f1809 -` (A1809 ∪ B1809) = (f1809 -` A1809) ∪ (f1809 -` B1809)
+map fst (zip xs2455 ys2455) = take (min (length xs2455) (length ys2455)) xs2455
+bij_betw f1108 A1108 B1108 ⟷ (inj_on f1108 A1108 ∧ f1108 ` A1108 = B1108)
+set (take n4857 xs4857) ⊆ set xs4857
+(a1830::int) + b1830 = b1830 + a1830
+filter P1954 (xs1954 @ ys1954) = filter P1954 xs1954 @ filter P1954 ys1954
+{x3829∈A3829. P3829 x3829} ∪ {x3829∈A3829. ¬ P3829 x3829} = A3829
+length (zip xs2130 ys2130) = min (length xs2130) (length ys2130)
+i1641 < length xs1641 ⟹ nth (map f1641 xs1641) i1641 = f1641 (nth xs1641 i1641)
+rtrancl r1365 O rtrancl r1365 ⊆ rtrancl r1365
+(x,y) ∈ (A × B) ⟷ (x ∈ A ∧ y ∈ B)
+bij_betw f748 A748 B748 ⟷ (inj_on f748 A748 ∧ f748 ` A748 = B748)
+map_option f1997 None = None
+snd (x1398,y1398) = y1398
+(x,y) ∈ (A × B) ⟷ (x ∈ A ∧ y ∈ B)
+f839 ` (A839 ∩ B839) ⊆ (f839 ` A839) ∩ (f839 ` B839)
+abs((a960::int) - b960) = abs(b960 - a960)
+(a1806::int) + b1806 = b1806 + a1806
+(∀x107 y107. (x107,y107) ∈ r107 ⟶ (y107,x107) ∈ converse r107)
+length ([m502..<(m502+n502)]) = n502
+(∀x21∈A21. f21 x21 = g21 x21) ⟶ f21 ` A21 = g21 ` A21
+(x3854 ∈ A3854 ∧ x3854 ∈ B3854) ⟷ x3854 ∈ (A3854 ∩ B3854)
+x5147 ∈ set (remove1 x5147 (x5147 # xs5147)) ⟷ x5147 ∈ set xs5147
+i2433 < length xs2433 ⟹ nth (map f2433 xs2433) i2433 = f2433 (nth xs2433 i2433)
+(f = g) ⟷ (∀x845. f x845 = g x845)
+abs((a1971::int) + b1971) ≤ abs a1971 + abs b1971
+case_sum f1549 g1549 (Inl x1549) = f1549 x1549
+(min (m1250::nat) n1250) + (max m1250 n1250) = m1250 + n1250
+Domain (converse r1696) = Range r1696
+(x,y) ∈ (A × B) ⟷ (x ∈ A ∧ y ∈ B)
+distinct xs626 ⟹ set (remdups xs626) = set xs626
+(A332 × B332) ∩ (A332 × C332) = A332 × (B332 ∩ C332)
+Range Id = UNIV
+((if P1051 x1051 then y1051 else z1051) = z1051) ⟷ ¬ P1051 x1051
+rev (rev xs336) = xs336
+rev (xs3145 @ ys3145) = rev ys3145 @ rev xs3145
+(f = g) ⟷ (∀x773. f x773 = g x773)
+(A668 × B668) ∩ (A668 × C668) = A668 × (B668 ∩ C668)
+Range (r1413 O s1413) ⊆ Range s1413
+(∀n1585::nat. m1585 ≤ n1585 ⟶ m1585 ≤ n1585 + k1585)
+¬ (i311 < length xs311) ⟹ nth (xs311 @ ys311) i311 = nth ys311 (i311 - length xs311)
+Range (r1467 O s1467) ⊆ Range s1467
+case_option d477 f477 None = d477
+i6358 < length xs6358 ⟹ nth (xs6358 @ ys6358) i6358 = nth xs6358 i6358
+rev (rev xs2964) = xs2964
+case_sum f64 g64 (Inl x64) = f64 x64
+rev (xs5035 @ ys5035) = rev ys5035 @ rev xs5035
+(x3181,x3181) ∈ Id ⟷ True
+surj f679 ⟷ (∀y679. ∃x679. f679 x679 = y679)
+(A3075 ⊆ B3075) ⟷ (∀x3075. x3075 ∈ A3075 ⟶ x3075 ∈ B3075)
+(∀x81∈A81. f81 x81 = g81 x81) ⟶ f81 ` A81 = g81 ` A81
+(min (m1394::nat) n1394) + (max m1394 n1394) = m1394 + n1394
+(m661::nat) ≤ n661 ⟶ m661 + k661 ≤ n661 + k661
+(∀x609∈A609. f609 x609 = g609 x609) ⟶ f609 ` A609 = g609 ` A609
+abs((a155::int) + b155) ≤ abs a155 + abs b155
+length (zip xs4038 ys4038) = min (length xs4038) (length ys4038)
+(a121::int) - b121 = a121 + (-b121)
+zip (map f3087 xs3087) (map g3087 ys3087) = map (λ(x,y). (f3087 x, g3087 y)) (zip xs3087 ys3087)
+map fst (zip xs1861 ys1861) = take (min (length xs1861) (length ys1861)) xs1861
+r1686 ⊆ s1686 ⟹ r1686 O t1686 ⊆ s1686 O t1686
+f3032 ` (A3032 ∪ B3032) = (f3032 ` A3032) ∪ (f3032 ` B3032)
+take n6696 xs6696 @ drop n6696 xs6696 = xs6696
+set (take n6171 xs6171) ⊆ set xs6171
+{x1478∈A1478. P1478 x1478} ∩ {x1478∈A1478. ¬ P1478 x1478} = {}
+(A43 - B43) ∩ B43 = {}
+(A2092 × B2092) ∩ (A2092 × C2092) = A2092 × (B2092 ∩ C2092)
+A3508 = B3508 ⟷ (A3508 ⊆ B3508 ∧ B3508 ⊆ A3508)
+abs((a1560::int) - b1560) = abs(b1560 - a1560)
+(x3742 ∈ A3742 ∧ x3742 ∈ B3742) ⟷ x3742 ∈ (A3742 ∩ B3742)
+fst (x1298,y1298) = x1298
+x3833 ∈ set (remove1 x3833 (x3833 # xs3833)) ⟷ x3833 ∈ set xs3833
+abs(-(a543::int)) = abs a543
+{x581∈A581. P581 x581} ∪ {x581∈A581. ¬ P581 x581} = A581
+set (drop n2608 xs2608) ⊆ set xs2608
+map f2504 (drop n2504 xs2504) = drop n2504 (map f2504 xs2504)
+(a526::int) + b526 = b526 + a526
+zip (map f5337 xs5337) (map g5337 ys5337) = map (λ(x,y). (f5337 x, g5337 y)) (zip xs5337 ys5337)
+(min (m338::nat) n338) + (max m338 n338) = m338 + n338
+bij_betw f238 A238 B238 ⟷ (inj_on f238 A238 ∧ f238 ` A238 = B238)
+(∀n1128::nat. m1128 ≤ m1128 + n1128)
+((if P376 x376 then y376 else z376) = z376) ⟷ ¬ P376 x376
+case_option d1291 f1291 None = d1291
+(x2253,x2253) ∈ Id ⟷ True
+map_option f1338 (Some x1338) = Some (f1338 x1338)
+(m595::nat) + Suc n595 = Suc (m595 + n595)
+(f = g) ⟷ (∀x743. f x743 = g x743)
+(x,y) ∈ (A × B) ⟷ (x ∈ A ∧ y ∈ B)
+rev (rev xs1146) = xs1146
+(A2155 - B2155) ∩ B2155 = {}
+(∀x1617∈A1617. f1617 x1617 = g1617 x1617) ⟶ f1617 ` A1617 = g1617 ` A1617
+set (drop n4246 xs4246) ⊆ set xs4246
+f3682 -` (A3682 ∩ B3682) = (f3682 -` A3682) ∩ (f3682 -` B3682)
+map fst (zip xs4867 ys4867) = take (min (length xs4867) (length ys4867)) xs4867
+((if P106 x106 then y106 else z106) = z106) ⟷ ¬ P106 x106
+inj_on f630 A630 ⟷ (∀x630∈A630. ∀y630∈A630. f630 x630 = f630 y630 ⟶ x630 = y630)
+rev (xs6403 @ ys6403) = rev ys6403 @ rev xs6403
+r354 ⊆ s354 ⟹ r354 O t354 ⊆ s354 O t354
+length (filter P6635 xs6635) ≤ length xs6635
+f1986 -` (A1986 ∩ B1986) = (f1986 -` A1986) ∩ (f1986 -` B1986)
+(a1489::int) - b1489 = a1489 + (-b1489)
+(∀x1779∈A1779. f1779 x1779 = g1779 x1779) ⟶ f1779 ` A1779 = g1779 ` A1779
+(a1937::int) - b1937 = a1937 + (-b1937)
+- ((a954::int) + b954) = (-a954) + (-b954)
+Range (r1017 O s1017) ⊆ Range s1017
+map f2252 (drop n2252 xs2252) = drop n2252 (map f2252 xs2252)
+f3793 -` (A3793 ∪ B3793) = (f3793 -` A3793) ∪ (f3793 -` B3793)
+(min (m674::nat) n674) + (max m674 n674) = m674 + n674
+(min (m378::nat) n378) + (max m378 n378) = m378 + n378
+(∀x18. P18 x18 ⟶ Q18 x18) ⟷ ¬(∃x18. P18 x18 ∧ ¬ Q18 x18)
+- ((a626::int) + b626) = (-a626) + (-b626)
+zip (map f621 xs621) (map g621 ys621) = map (λ(x,y). (f621 x, g621 y)) (zip xs621 ys621)
+set (drop n6010 xs6010) ⊆ set xs6010
+(f = g) ⟷ (∀x638. f x638 = g x638)
+{x2165∈A2165. P2165 x2165} ∪ {x2165∈A2165. ¬ P2165 x2165} = A2165
+i1894 < length xs1894 ⟹ nth (xs1894 @ ys1894) i1894 = nth xs1894 i1894
+i76 < length xs76 ⟹ nth (xs76 @ ys76) i76 = nth xs76 i76
+Domain Id = UNIV
+(x398 ∈ A398 ∧ x398 ∈ B398) ⟷ x398 ∈ (A398 ∩ B398)
+converse (rtrancl r2392) = rtrancl (converse r2392)
+map Suc ([m1591..<(m1591+n1591)]) = [Suc m1591 ..< (Suc (m1591+n1591))]
+f1080 ` (A1080 ∪ B1080) = (f1080 ` A1080) ∪ (f1080 ` B1080)
+(A1306 - B1306) ∪ (A1306 ∩ B1306) = A1306
+map f5924 (drop n5924 xs5924) = drop n5924 (map f5924 xs5924)
+(x767 ∈ A767 ∨ x767 ∈ B767) ⟷ x767 ∈ (A767 ∪ B767)
+map Suc ([m455..<(m455+n455)]) = [Suc m455 ..< (Suc (m455+n455))]
+(A2620 × B2620) ∩ (A2620 × C2620) = A2620 × (B2620 ∩ C2620)
+(A2707 ⊆ B2707) ⟷ (∀x2707. x2707 ∈ A2707 ⟶ x2707 ∈ B2707)
+split f618 (x618,y618) = f618 x618 y618
+rev (rev xs5574) = xs5574
+map Suc ([m1015..<(m1015+n1015)]) = [Suc m1015 ..< (Suc (m1015+n1015))]
+{x3910∈A3910. P3910 x3910} ∩ {x3910∈A3910. ¬ P3910 x3910} = {}
+surj f685 ⟷ (∀y685. ∃x685. f685 x685 = y685)
+(min (m290::nat) n290) + (max m290 n290) = m290 + n290
+(min (a876::int) b876) + (max a876 b876) = a876 + b876
+rev (xs3865 @ ys3865) = rev ys3865 @ rev xs3865
+converse (converse r1440) = r1440
+map Suc ([m671..<(m671+n671)]) = [Suc m671 ..< (Suc (m671+n671))]
+case_sum f1605 g1605 (Inr y1605) = g1605 y1605
+r1091 ⊆ s1091 ⟹ t1091 O r1091 ⊆ t1091 O s1091
+set (drop n214 xs214) ⊆ set xs214
+distinct xs3074 ⟹ set (remdups xs3074) = set xs3074
+map_option f1009 (map_option g1009 o1009) = map_option (f1009 ∘ g1009) o1009
+i2236 < length xs2236 ⟹ nth (xs2236 @ ys2236) i2236 = nth xs2236 i2236
+x4355 ∈ set (remove1 x4355 (x4355 # xs4355)) ⟷ x4355 ∈ set xs4355
+length (filter P6959 xs6959) ≤ length xs6959
+length (zip xs4794 ys4794) = min (length xs4794) (length ys4794)
+f2465 -` (A2465 ∪ B2465) = (f2465 -` A2465) ∪ (f2465 -` B2465)
+(∀x123∈A123. f123 x123 = g123 x123) ⟶ f123 ` A123 = g123 ` A123
+Domain (r1862 O s1862) ⊆ Domain r1862
+{x598∈A598. P598 x598} ∩ {x598∈A598. ¬ P598 x598} = {}
+set (drop n1078 xs1078) ⊆ set xs1078
+((if P689 x689 then True else False) = P689 x689)
+(a277::int) + (b277 + c277) = (a277 + b277) + c277
+length ([m1150..<(m1150+n1150)]) = n1150
+Domain Id = UNIV
+- ((a282::int) + b282) = (-a282) + (-b282)
+Domain Id = UNIV
+(∀x235. P235 x235) ⟶ ((∃x235. Q235 x235) ⟶ ∃x235. P235 x235 ∧ Q235 x235)
+(A826 - B826) ∪ (A826 ∩ B826) = A826
+abs(-(a1679::int)) = abs a1679
+(x429,x429) ∈ Id ⟷ True
+r2001 O Id = r2001
+A708 = B708 ⟷ (A708 ⊆ B708 ∧ B708 ⊆ A708)
+(∀x1029. P1029 x1029 ⟶ Q1029 x1029) ∧ (∀x1029. Q1029 x1029 ⟶ R1029 x1029) ⟶ (∀x1029. P1029 x1029 ⟶ R1029 x1029)
+x827 ∈ set (remove1 x827 (x827 # xs827)) ⟷ x827 ∈ set xs827
+{x821∈A821. P821 x821} ∪ {x821∈A821. ¬ P821 x821} = A821
+map fst (zip xs6847 ys6847) = take (min (length xs6847) (length ys6847)) xs6847
+r2298 ⊆ s2298 ⟹ r2298 O t2298 ⊆ s2298 O t2298
+(∀x1125∈A1125. f1125 x1125 = g1125 x1125) ⟶ f1125 ` A1125 = g1125 ` A1125
+map_option f921 (map_option g921 o921) = map_option (f921 ∘ g921) o921
+map f5906 (drop n5906 xs5906) = drop n5906 (map f5906 xs5906)
+Domain (r1520 O s1520) ⊆ Domain r1520
+(m669::nat) ≤ n669 ⟶ m669 + k669 ≤ n669 + k669
+(A2835 ⊆ B2835) ⟷ (∀x2835. x2835 ∈ A2835 ⟶ x2835 ∈ B2835)
+map Suc ([m1711..<(m1711+n1711)]) = [Suc m1711 ..< (Suc (m1711+n1711))]
+(∀n1881::nat. m1881 ≤ n1881 ⟶ m1881 ≤ n1881 + k1881)
+set (drop n5488 xs5488) ⊆ set xs5488
+r2462 ⊆ rtrancl r2462
+map snd (zip xs5498 ys5498) = take (min (length xs5498) (length ys5498)) ys5498
+map snd (zip xs3338 ys3338) = take (min (length xs3338) (length ys3338)) ys3338
+(converse (r739 O s739)) = (converse s739) O (converse r739)
+{x1590∈A1590. P1590 x1590} ∩ {x1590∈A1590. ¬ P1590 x1590} = {}
+(A1676 × B1676) ∩ (A1676 × C1676) = A1676 × (B1676 ∩ C1676)
+case_sum f593 g593 (Inr y593) = g593 y593
+map f4124 (drop n4124 xs4124) = drop n4124 (map f4124 xs4124)
+map fst (zip xs1609 ys1609) = take (min (length xs1609) (length ys1609)) xs1609
+zip (map f3879 xs3879) (map g3879 ys3879) = map (λ(x,y). (f3879 x, g3879 y)) (zip xs3879 ys3879)
+distinct xs3470 ⟹ set (remdups xs3470) = set xs3470
+length (filter P5303 xs5303) ≤ length xs5303
+(A275 ⊆ B275) ⟷ (∀x275. x275 ∈ A275 ⟶ x275 ∈ B275)
+map_option f1064 (map_option g1064 o1064) = map_option (f1064 ∘ g1064) o1064
+case_option d412 f412 (Some x412) = f412 x412
+case_sum f174 g174 (Inl x174) = f174 x174
+(A1724 × B1724) ∩ (A1724 × C1724) = A1724 × (B1724 ∩ C1724)
+{x486∈A486. P486 x486} ∩ {x486∈A486. ¬ P486 x486} = {}
+map fst (zip xs3193 ys3193) = take (min (length xs3193) (length ys3193)) xs3193
+map f1118 (drop n1118 xs1118) = drop n1118 (map f1118 xs1118)
+x2080 ∈ f2080 -` A2080 ⟷ f2080 x2080 ∈ A2080
+(∀x147∈A147. f147 x147 = g147 x147) ⟶ f147 ` A147 = g147 ` A147
+Domain (converse r778) = Range r778
+r732 ⊆ s732 ⟹ r732 O t732 ⊆ s732 O t732
+(m573::nat) ≤ n573 ⟶ m573 + k573 ≤ n573 + k573
+map f4700 (drop n4700 xs4700) = drop n4700 (map f4700 xs4700)
+{x3093∈A3093. P3093 x3093} ∪ {x3093∈A3093. ¬ P3093 x3093} = A3093
+map snd (zip xs3824 ys3824) = take (min (length xs3824) (length ys3824)) ys3824
+Domain (r512 O s512) ⊆ Domain r512
+(f = g) ⟷ (∀x1127. f x1127 = g x1127)
+length (filter P5159 xs5159) ≤ length xs5159
+(f = g) ⟷ (∀x185. f x185 = g x185)
+(A970 - B970) ∪ (A970 ∩ B970) = A970
+map f4520 (drop n4520 xs4520) = drop n4520 (map f4520 xs4520)
+(∀n1033::nat. m1033 ≤ n1033 ⟶ m1033 ≤ n1033 + k1033)
+(A1708 × B1708) ∩ (A1708 × C1708) = A1708 × (B1708 ∩ C1708)
+(x157,x157) ∈ Id ⟷ True
+map_option f369 None = None
+(∀n713::nat. m713 ≤ n713 ⟶ m713 ≤ n713 + k713)
+((if P483 x483 then y483 else z483) = y483) ⟷ P483 x483
+A1556 = B1556 ⟷ (A1556 ⊆ B1556 ∧ B1556 ⊆ A1556)
+trans r2245 ⟶ r2245 O r2245 ⊆ r2245
+(x3949,x3949) ∈ Id ⟷ True
+¬ (i3317 < length xs3317) ⟹ nth (xs3317 @ ys3317) i3317 = nth ys3317 (i3317 - length xs3317)
+zip (map f5913 xs5913) (map g5913 ys5913) = map (λ(x,y). (f5913 x, g5913 y)) (zip xs5913 ys5913)
+rev (xs5773 @ ys5773) = rev ys5773 @ rev xs5773
+r1504 ⊆ s1504 ⟹ converse r1504 ⊆ converse s1504
+zip (map f3141 xs3141) (map g3141 ys3141) = map (λ(x,y). (f3141 x, g3141 y)) (zip xs3141 ys3141)
+{x421∈A421. P421 x421} ∪ {x421∈A421. ¬ P421 x421} = A421
+{x3894∈A3894. P3894 x3894} ∩ {x3894∈A3894. ¬ P3894 x3894} = {}
+length (zip xs2418 ys2418) = min (length xs2418) (length ys2418)
+((if P70 x70 then y70 else z70) = z70) ⟷ ¬ P70 x70
+i2793 < length xs2793 ⟹ nth (map f2793 xs2793) i2793 = f2793 (nth xs2793 i2793)
+inj_on f690 A690 ⟷ (∀x690∈A690. ∀y690∈A690. f690 x690 = f690 y690 ⟶ x690 = y690)
+rev (xs4909 @ ys4909) = rev ys4909 @ rev xs4909
+(∀x1347∈A1347. f1347 x1347 = g1347 x1347) ⟶ f1347 ` A1347 = g1347 ` A1347
+zip (map f3861 xs3861) (map g3861 ys3861) = map (λ(x,y). (f3861 x, g3861 y)) (zip xs3861 ys3861)
+case_sum f1825 g1825 (Inr y1825) = g1825 y1825
+(m1211::nat) + Suc n1211 = Suc (m1211 + n1211)
+map_option f688 None = None
+map fst (zip xs5947 ys5947) = take (min (length xs5947) (length ys5947)) xs5947
+A3572 = B3572 ⟷ (A3572 ⊆ B3572 ∧ B3572 ⊆ A3572)
+Id O r722 = r722
+inj_on f1722 A1722 ⟷ (∀x1722∈A1722. ∀y1722∈A1722. f1722 x1722 = f1722 y1722 ⟶ x1722 = y1722)
+trans r1633 ⟶ r1633 O r1633 ⊆ r1633
+x416 ∈ f416 -` A416 ⟷ f416 x416 ∈ A416
+(min (m1978::nat) n1978) + (max m1978 n1978) = m1978 + n1978
+length ([m766..<(m766+n766)]) = n766
+f497 -` (A497 ∪ B497) = (f497 -` A497) ∪ (f497 -` B497)
+length (zip xs276 ys276) = min (length xs276) (length ys276)
+{x373∈A373. P373 x373} ∪ {x373∈A373. ¬ P373 x373} = A373
+(x143 ∈ A143 ∨ x143 ∈ B143) ⟷ x143 ∈ (A143 ∪ B143)
+(a142::int) + b142 = b142 + a142
+map fst (zip xs5623 ys5623) = take (min (length xs5623) (length ys5623)) xs5623
+set (take n6477 xs6477) ⊆ set xs6477
+(m403::nat) + Suc n403 = Suc (m403 + n403)
+(A3658 - B3658) ∪ (A3658 ∩ B3658) = A3658
+(A363 - B363) ∩ B363 = {}
+set (drop n6640 xs6640) ⊆ set xs6640
+{x1125∈A1125. P1125 x1125} ∪ {x1125∈A1125. ¬ P1125 x1125} = A1125
+trans r589 ⟶ r589 O r589 ⊆ r589
+(g ∘ f) ` A745 = g ` (f ` A745)
+- ((a498::int) + b498) = (-a498) + (-b498)
+{x726∈A726. P726 x726} ∩ {x726∈A726. ¬ P726 x726} = {}
+(x,y) ∈ (A × B) ⟷ (x ∈ A ∧ y ∈ B)
+r2207 ⊆ s2207 ⟹ t2207 O r2207 ⊆ t2207 O s2207
+map snd (zip xs3230 ys3230) = take (min (length xs3230) (length ys3230)) ys3230
+(A2428 × B2428) ∩ (A2428 × C2428) = A2428 × (B2428 ∩ C2428)
+(m1667::nat) + Suc n1667 = Suc (m1667 + n1667)
+surj f67 ⟷ (∀y67. ∃x67. f67 x67 = y67)
+(min (m1970::nat) n1970) + (max m1970 n1970) = m1970 + n1970
+(a481::int) - b481 = a481 + (-b481)
+((if P1302 x1302 then y1302 else z1302) = y1302) ⟷ P1302 x1302
+abs(-(a1295::int)) = abs a1295
+f1186 -` (A1186 ∩ B1186) = (f1186 -` A1186) ∩ (f1186 -` B1186)
+length (filter P3737 xs3737) ≤ length xs3737
+snd (x540,y540) = y540
+(a125::int) + (b125 + c125) = (a125 + b125) + c125
+(∀n1521::nat. m1521 ≤ n1521 ⟶ m1521 ≤ n1521 + k1521)
+(min (m130::nat) n130) + (max m130 n130) = m130 + n130
+length (zip xs366 ys366) = min (length xs366) (length ys366)
+bij_betw f544 A544 B544 ⟷ (inj_on f544 A544 ∧ f544 ` A544 = B544)
+Range (converse r1193) = Domain r1193
+case_sum f945 g945 (Inr y945) = g945 y945
+map fst (zip xs295 ys295) = take (min (length xs295) (length ys295)) xs295
+(∀x2321 y2321. (x2321,y2321) ∈ r2321 ⟶ (y2321,x2321) ∈ converse r2321)
+surj f703 ⟷ (∀y703. ∃x703. f703 x703 = y703)
+x2969 ∈ set (remove1 x2969 (x2969 # xs2969)) ⟷ x2969 ∈ set xs2969
+A2788 = B2788 ⟷ (A2788 ⊆ B2788 ∧ B2788 ⊆ A2788)
+map_option f151 (map_option g151 o151) = map_option (f151 ∘ g151) o151
+inj_on f1830 A1830 ⟷ (∀x1830∈A1830. ∀y1830∈A1830. f1830 x1830 = f1830 y1830 ⟶ x1830 = y1830)
+distinct xs4982 ⟹ set (remdups xs4982) = set xs4982
+take n360 xs360 @ drop n360 xs360 = xs360
+(x877,x877) ∈ Id ⟷ True
+(f = g) ⟷ (∀x305. f x305 = g x305)
+rev (xs5017 @ ys5017) = rev ys5017 @ rev xs5017
+- ((a1354::int) + b1354) = (-a1354) + (-b1354)
+(∀n1448::nat. m1448 ≤ m1448 + n1448)
+x1776 ∈ f1776 -` A1776 ⟷ f1776 x1776 ∈ A1776
+A900 = B900 ⟷ (A900 ⊆ B900 ∧ B900 ⊆ A900)
+(∀n617::nat. m617 ≤ n617 ⟶ m617 ≤ n617 + k617)
+Domain (r1484 O s1484) ⊆ Domain r1484
+length (zip xs6576 ys6576) = min (length xs6576) (length ys6576)
+f2840 ` (A2840 ∪ B2840) = (f2840 ` A2840) ∪ (f2840 ` B2840)
+distinct xs1436 ⟹ set (remdups xs1436) = set xs1436
+f754 -` (A754 ∩ B754) = (f754 -` A754) ∩ (f754 -` B754)
+bij_betw f4 A4 B4 ⟷ (inj_on f4 A4 ∧ f4 ` A4 = B4)
+map f2108 (drop n2108 xs2108) = drop n2108 (map f2108 xs2108)
+inj_on f1338 A1338 ⟷ (∀x1338∈A1338. ∀y1338∈A1338. f1338 x1338 = f1338 y1338 ⟶ x1338 = y1338)
+{x3669∈A3669. P3669 x3669} ∪ {x3669∈A3669. ¬ P3669 x3669} = A3669
+map f4358 (drop n4358 xs4358) = drop n4358 (map f4358 xs4358)
+(∀n800::nat. m800 ≤ m800 + n800)
+bij_betw f1912 A1912 B1912 ⟷ (inj_on f1912 A1912 ∧ f1912 ` A1912 = B1912)
+abs((a1043::int) + b1043) ≤ abs a1043 + abs b1043
+fst (x429,y429) = x429
+(m332::nat) + n332 = n332 + m332
+(¬ (∃x256. P256 x256)) ⟷ (∀x256. ¬ P256 x256)
+case_option d884 f884 None = d884
+(m1173::nat) ≤ n1173 ⟶ m1173 + k1173 ≤ n1173 + k1173
+bij_betw f1810 A1810 B1810 ⟷ (inj_on f1810 A1810 ∧ f1810 ` A1810 = B1810)
+fst (x737,y737) = x737
+{x1894∈A1894. P1894 x1894} ∩ {x1894∈A1894. ¬ P1894 x1894} = {}
+A2900 = B2900 ⟷ (A2900 ⊆ B2900 ∧ B2900 ⊆ A2900)
+inj_on f666 A666 ⟷ (∀x666∈A666. ∀y666∈A666. f666 x666 = f666 y666 ⟶ x666 = y666)
+(A2282 - B2282) ∪ (A2282 ∩ B2282) = A2282
+f2007 ` (A2007 ∩ B2007) ⊆ (f2007 ` A2007) ∩ (f2007 ` B2007)
+(g ∘ f) ` A3593 = g ` (f ` A3593)
+inj_on f924 A924 ⟷ (∀x924∈A924. ∀y924∈A924. f924 x924 = f924 y924 ⟶ x924 = y924)
+(g ∘ f) x1232 = g (f x1232)
+abs((a819::int) + b819) ≤ abs a819 + abs b819
+rtrancl r1401 O rtrancl r1401 ⊆ rtrancl r1401
+length (filter P1235 xs1235) ≤ length xs1235
+(converse (r1171 O s1171)) = (converse s1171) O (converse r1171)
+case_sum f1527 g1527 (Inl x1527) = f1527 x1527
+(a1782::int) + b1782 = b1782 + a1782
+(g ∘ f) x650 = g (f x650)
+zip (map f6561 xs6561) (map g6561 ys6561) = map (λ(x,y). (f6561 x, g6561 y)) (zip xs6561 ys6561)
+distinct xs6008 ⟹ set (remdups xs6008) = set xs6008
+inj_on f228 A228 ⟷ (∀x228∈A228. ∀y228∈A228. f228 x228 = f228 y228 ⟶ x228 = y228)
+A164 = B164 ⟷ (A164 ⊆ B164 ∧ B164 ⊆ A164)
+A1524 = B1524 ⟷ (A1524 ⊆ B1524 ∧ B1524 ⊆ A1524)
+abs((a1784::int) - b1784) = abs(b1784 - a1784)
+bij_betw f1066 A1066 B1066 ⟷ (inj_on f1066 A1066 ∧ f1066 ` A1066 = B1066)
+(¬ (∃x1444. P1444 x1444)) ⟷ (∀x1444. ¬ P1444 x1444)
+(f = g) ⟷ (∀x116. f x116 = g x116)
+length (filter P929 xs929) ≤ length xs929
+f2786 -` (A2786 ∩ B2786) = (f2786 -` A2786) ∩ (f2786 -` B2786)
+(min (a1876::int) b1876) + (max a1876 b1876) = a1876 + b1876
+surj f583 ⟷ (∀y583. ∃x583. f583 x583 = y583)
+f3794 -` (A3794 ∩ B3794) = (f3794 -` A3794) ∩ (f3794 -` B3794)
+distinct xs4478 ⟹ set (remdups xs4478) = set xs4478
+(m1077::nat) ≤ n1077 ⟶ m1077 + k1077 ≤ n1077 + k1077
+take n4014 xs4014 @ drop n4014 xs4014 = xs4014
+(m1379::nat) + Suc n1379 = Suc (m1379 + n1379)
+(∀x316. P316 x316) ⟶ ((∃x316. Q316 x316) ⟶ ∃x316. P316 x316 ∧ Q316 x316)
+{x965∈A965. P965 x965} ∪ {x965∈A965. ¬ P965 x965} = A965
+case_option d1643 f1643 None = d1643
+f3384 ` (A3384 ∪ B3384) = (f3384 ` A3384) ∪ (f3384 ` B3384)
+(m877::nat) ≤ n877 ⟶ m877 + k877 ≤ n877 + k877
+(∀x1180. P1180 x1180) ⟶ ((∃x1180. Q1180 x1180) ⟶ ∃x1180. P1180 x1180 ∧ Q1180 x1180)
+filter P2098 (xs2098 @ ys2098) = filter P2098 xs2098 @ filter P2098 ys2098
+abs(-(a87::int)) = abs a87
+(∀n1105::nat. m1105 ≤ n1105 ⟶ m1105 ≤ n1105 + k1105)
+f3352 ` (A3352 ∪ B3352) = (f3352 ` A3352) ∪ (f3352 ` B3352)
+set (take n4083 xs4083) ⊆ set xs4083
+A2676 = B2676 ⟷ (A2676 ⊆ B2676 ∧ B2676 ⊆ A2676)
+(∃x1370. P1370 x1370 ∧ (Q1370 x1370 ⟶ R1370 x1370)) ⟶ (∃x1370. P1370 x1370 ⟶ R1370 x1370)
+length (filter P101 xs101) ≤ length xs101
+i1948 < length xs1948 ⟹ nth (xs1948 @ ys1948) i1948 = nth xs1948 i1948
+(∃x1307. P1307 x1307 ∧ (Q1307 x1307 ⟶ R1307 x1307)) ⟶ (∃x1307. P1307 x1307 ⟶ R1307 x1307)
+distinct xs1724 ⟹ set (remdups xs1724) = set xs1724
+rtrancl r1383 O rtrancl r1383 ⊆ rtrancl r1383
+map_option f1349 (Some x1349) = Some (f1349 x1349)
+(g ∘ f) x176 = g (f x176)
+map_option f854 (Some x854) = Some (f854 x854)
+(A1868 × B1868) ∩ (A1868 × C1868) = A1868 × (B1868 ∩ C1868)
+¬ (i1589 < length xs1589) ⟹ nth (xs1589 @ ys1589) i1589 = nth ys1589 (i1589 - length xs1589)
+(min (m1346::nat) n1346) + (max m1346 n1346) = m1346 + n1346
+i3316 < length xs3316 ⟹ nth (xs3316 @ ys3316) i3316 = nth xs3316 i3316
+(a1337::int) - b1337 = a1337 + (-b1337)
+(A3564 × B3564) ∩ (A3564 × C3564) = A3564 × (B3564 ∩ C3564)
+Range Id = UNIV
+x3824 ∈ f3824 -` A3824 ⟷ f3824 x3824 ∈ A3824
+trans r301 ⟶ r301 O r301 ⊆ r301
+take n3510 xs3510 @ drop n3510 xs3510 = xs3510
+(∃x812. P812 x812 ∧ (Q812 x812 ⟶ R812 x812)) ⟶ (∃x812. P812 x812 ⟶ R812 x812)
+(∀x377 y377. (x377,y377) ∈ r377 ⟶ (y377,x377) ∈ converse r377)
+i885 < length xs885 ⟹ nth (map f885 xs885) i885 = f885 (nth xs885 i885)
+x3491 ∈ set (remove1 x3491 (x3491 # xs3491)) ⟷ x3491 ∈ set xs3491
+case_option d951 f951 (Some x951) = f951 x951
+(f = g) ⟷ (∀x131. f x131 = g x131)
+bij_betw f742 A742 B742 ⟷ (inj_on f742 A742 ∧ f742 ` A742 = B742)
+A3716 = B3716 ⟷ (A3716 ⊆ B3716 ∧ B3716 ⊆ A3716)
+case_sum f1979 g1979 (Inr y1979) = g1979 y1979
+(A2042 - B2042) ∪ (A2042 ∩ B2042) = A2042
+set (take n2535 xs2535) ⊆ set xs2535
+(f = g) ⟷ (∀x1268. f x1268 = g x1268)
+¬ (i5423 < length xs5423) ⟹ nth (xs5423 @ ys5423) i5423 = nth ys5423 (i5423 - length xs5423)
+Domain Id = UNIV
+trans r1039 ⟶ r1039 O r1039 ⊆ r1039
+map fst (zip xs5083 ys5083) = take (min (length xs5083) (length ys5083)) xs5083
+x1457 ∈ set (remove1 x1457 (x1457 # xs1457)) ⟷ x1457 ∈ set xs1457
+take n0 xs0 @ drop n0 xs0 = xs0
+trans r1957 ⟶ r1957 O r1957 ⊆ r1957
+Domain (converse r1804) = Range r1804
+(∀x775. P775 x775) ⟶ ((∃x775. Q775 x775) ⟶ ∃x775. P775 x775 ∧ Q775 x775)
+fst (x627,y627) = x627
+converse (converse r828) = r828
+distinct xs3056 ⟹ set (remdups xs3056) = set xs3056
+take n756 xs756 @ drop n756 xs756 = xs756
+surj f1129 ⟷ (∀y1129. ∃x1129. f1129 x1129 = y1129)
+{x774∈A774. P774 x774} ∩ {x774∈A774. ¬ P774 x774} = {}
+inj_on f1146 A1146 ⟷ (∀x1146∈A1146. ∀y1146∈A1146. f1146 x1146 = f1146 y1146 ⟶ x1146 = y1146)
+rev (rev xs1506) = xs1506
+case_sum f20 g20 (Inl x20) = f20 x20
+distinct xs6692 ⟹ set (remdups xs6692) = set xs6692
+take n3096 xs3096 @ drop n3096 xs3096 = xs3096
+snd (x1266,y1266) = y1266
+(min (m570::nat) n570) + (max m570 n570) = m570 + n570
+¬ (i851 < length xs851) ⟹ nth (xs851 @ ys851) i851 = nth ys851 (i851 - length xs851)
+(¬ (∃x904. P904 x904)) ⟷ (∀x904. ¬ P904 x904)
+f2279 ` (A2279 ∩ B2279) ⊆ (f2279 ` A2279) ∩ (f2279 ` B2279)
+surj f559 ⟷ (∀y559. ∃x559. f559 x559 = y559)
+Range (r351 O s351) ⊆ Range s351
+abs((a24::int) - b24) = abs(b24 - a24)
+(g ∘ f) x698 = g (f x698)
+(∃x1253. P1253 x1253 ∧ (Q1253 x1253 ⟶ R1253 x1253)) ⟶ (∃x1253. P1253 x1253 ⟶ R1253 x1253)
+A2052 = B2052 ⟷ (A2052 ⊆ B2052 ∧ B2052 ⊆ A2052)
+(min (a548::int) b548) + (max a548 b548) = a548 + b548
+zip (map f4239 xs4239) (map g4239 ys4239) = map (λ(x,y). (f4239 x, g4239 y)) (zip xs4239 ys4239)
+rev (xs1327 @ ys1327) = rev ys1327 @ rev xs1327
+map snd (zip xs278 ys278) = take (min (length xs278) (length ys278)) ys278
+set (take n4299 xs4299) ⊆ set xs4299
+abs((a864::int) - b864) = abs(b864 - a864)
+map snd (zip xs6758 ys6758) = take (min (length xs6758) (length ys6758)) ys6758

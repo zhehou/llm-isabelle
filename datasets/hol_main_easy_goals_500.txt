@@ -1,0 +1,500 @@
+a119 + (b119 + a119) = b119 + (a119 + a119)
+A56 - (A56 ∩ B56) = A56 - B56
+A102 ⟶ A102 ∨ B102
+r226p ⊆ r226 ⟹ s226p ⊆ s226 ⟹ r226p O s226p ⊆ r226 O s226
+r103 ⊆ s103 ⟹ converse r103 ⊆ converse s103
+Id O r14 = r14
+f171 ` (A171 ∩ B171) ⊆ f171 ` A171 ∩ f171 ` B171
+A19 ⊆ B19 ⟹ A19 ∪ C19 ⊆ B19 ∪ C19
+- ((a271::int) + b271) = (-a271) + (-b271)
+m133 + Suc n133 = Suc (m133 + n133)
+(A356 ⟶ C356) ⟶ ((B356 ⟶ C356) ⟶ (A356 ∨ B356 ⟶ C356))
+(m318::nat) + 0 = m318
+rev (rev xs128) = xs128
+A130 ∧ B130 ⟶ A130
+A122 ⟶ A122 ∨ B122
+B383 ⟶ A383 ∨ B383
+x495 ∈ A495 ∩ B495 ⟷ x495 ∈ A495 ∧ x495 ∈ B495
+(converse (r52 O s52)) = converse s52 O converse r52
+set (rev xs469) = set xs469
+m365 + (n365 + m365) = n365 + (m365 + m365)
+(A108 ∧ (B108 ∨ C108)) ⟷ (A108 ∧ B108) ∨ (A108 ∧ C108)
+(m198::nat) + 0 = m198
+{x414∈A414. True} = A414
+a161 + (b161 + a161) = b161 + (a161 + a161)
+(a372::int) + (-a372) = 0
+(m132::nat) + 0 = m132
+filter P118 (xs118 @ ys118) = filter P118 xs118 @ filter P118 ys118
+r2p ⊆ r2 ⟹ s2p ⊆ s2 ⟹ r2p O s2p ⊆ r2 O s2
+x239 ∈ set (map f239 xs239) ⟷ (∃y∈set xs239. f239 y = x239)
+m313 + Suc n313 = Suc (m313 + n313)
+r239 O Id = r239
+(A26 ⟶ C26) ⟶ ((B26 ⟶ C26) ⟶ (A26 ∨ B26 ⟶ C26))
+A253 ∪ (B253 ∩ C253) = (A253 ∪ B253) ∩ (A253 ∪ C253)
+a359 + (b359 + a359) = b359 + (a359 + a359)
+map f131 (xs131 @ ys131) = map f131 xs131 @ map f131 ys131
+surj f93 ⟷ (∀y93. ∃x93. f93 x93 = y93)
+Id O r238 = r238
+A236 - (A236 ∩ B236) = A236 - B236
+A481 ⊆ A481 ∪ B481
+inj_on f78 A78 ⟷ (∀x78∈A78. ∀y78∈A78. f78 x78 = f78 y78 ⟶ x78 = y78)
+A18 ⊆ B18 ⟹ A18 ∩ C18 ⊆ B18 ∩ C18
+(A379 ⟶ A379)
+inj f256 ⟷ (∀x256 y256. f256 x256 = f256 y256 ⟶ x256 = y256)
+(A396 ⟶ C396) ⟶ ((B396 ⟶ C396) ⟶ (A396 ∨ B396 ⟶ C396))
+bij_betw f170 A170 B170 ⟹ inj_on f170 A170
+inj_on f108 A108 ⟷ (∀x108∈A108. ∀y108∈A108. f108 x108 = f108 y108 ⟶ x108 = y108)
+(m372::nat) + 0 = m372
+r183 O Id = r183
+(A177 ⟶ B177) ⟷ (¬A177 ∨ B177)
+rev (xs281 @ ys281) = rev ys281 @ rev xs281
+(m96::nat) + 0 = m96
+f111 ` (A111 ∩ B111) ⊆ f111 ` A111 ∩ f111 ` B111
+inj f250 ⟷ (∀x250 y250. f250 x250 = f250 y250 ⟶ x250 = y250)
+A322 ⟶ A322 ∨ B322
+m161 + (n161 + m161) = n161 + (m161 + m161)
+trans r300 ⟹ r300 O r300 ⊆ r300
+(a74::int) - a74 = 0
+(0::int) ≤ abs a33
+bij_betw f181 A181 B181 ⟹ f181 ` A181 = B181
+(m264::nat) + 0 = m264
+A387 ∩ (B387 ∪ C387) = (A387 ∩ B387) ∪ (A387 ∩ C387)
+¬(A284 ∧ B284) ⟷ (¬A284 ∨ ¬B284)
+(A187 ⟶ B187) ⟷ (¬A187 ∨ B187)
+a208 + b208 = b208 + a208
+r33 ⊆ s33 ⟹ converse r33 ⊆ converse s33
+r285 ⊆ s285 ⟹ converse r285 ⊆ converse s285
+(A326 ⟶ C326) ⟶ ((B326 ⟶ C326) ⟶ (A326 ∨ B326 ⟶ C326))
+converse (converse r53) = r53
+A13 ∪ (B13 ∩ C13) = (A13 ∪ B13) ∩ (A13 ∪ C13)
+(0::int) ≤ abs a357
+(0::int) ≤ abs a363
+rev (xs257 @ ys257) = rev ys257 @ rev xs257
+- ((a103::int) + b103) = (-a103) + (-b103)
+bij_betw f194 A194 B194 ⟹ inj_on f194 A194
+A266 - (A266 ∩ B266) = A266 - B266
+inj_on f216 A216 ⟷ (∀x216∈A216. ∀y216∈A216. f216 x216 = f216 y216 ⟶ x216 = y216)
+bij_betw f155 A155 B155 ⟹ y155 ∈ B155 ⟹ (∃x155∈A155. f155 x155 = y155)
+x458 ∈ insert x458 A458 ⟷ True
+a245 + (b245 + a245) = b245 + (a245 + a245)
+converse (converse r193) = r193
+a299 + (b299 + a299) = b299 + (a299 + a299)
+a154 + b154 = b154 + a154
+A292 ⟶ A292 ∨ B292
+m395 + (n395 + m395) = n395 + (m395 + m395)
+a100 + b100 = b100 + a100
+x300 ∈ A300 ∩ B300 ⟷ x300 ∈ A300 ∧ x300 ∈ B300
+m87 ≤ m87
+converse (converse r102) = r102
+{x269∈A269. P x269} ⊆ A269
+set (rev xs293) = set xs293
+bij_betw f254 A254 B254 ⟹ inj_on f254 A254
+r205p ⊆ r205 ⟹ s205p ⊆ s205 ⟹ r205p O s205p ⊆ r205 O s205
+- ((a121::int) + b121) = (-a121) + (-b121)
+m181 + Suc n181 = Suc (m181 + n181)
+A499 ⊆ B499 ⟹ A499 ∪ C499 ⊆ B499 ∪ C499
+a304 + b304 = b304 + a304
+inj f28 ⟷ (∀x28 y28. f28 x28 = f28 y28 ⟶ x28 = y28)
+(A229 ⟶ A229)
+(converse (r38 O s38)) = converse s38 O converse r38
+A131 ∧ B131 ⟶ B131
+Id O r392 = r392
+map f43 (xs43 @ ys43) = map f43 xs43 @ map f43 ys43
+Id O r196 = r196
+A271 ∧ B271 ⟶ B271
+{x464∈A464. P x464} ⊆ A464
+m223 + Suc n223 = Suc (m223 + n223)
+(converse (r388 O s388)) = converse s388 O converse r388
+f470 ` (A470 ∪ B470) = f470 ` A470 ∪ f470 ` B470
+a184 + b184 = b184 + a184
+set (map f444 xs444) = f444 ` set xs444
+set (map f20 xs20) = f20 ` set xs20
+- ((a133::int) + b133) = (-a133) + (-b133)
+x279 ∈ set (map f279 xs279) ⟷ (∃y∈set xs279. f279 y = x279)
+f185 ` (A185 ∪ B185) = f185 ` A185 ∪ f185 ` B185
+r184p ⊆ r184 ⟹ s184p ⊆ s184 ⟹ r184p O s184p ⊆ r184 O s184
+(0::int) ≤ abs a393
+r110 ⊆ s110 ⟹ converse r110 ⊆ converse s110
+m199 + Suc n199 = Suc (m199 + n199)
+m107 + (n107 + m107) = n107 + (m107 + m107)
+r176 O Id = r176
+(m294::nat) + 0 = m294
+length (map f154 xs154) = length xs154
+m290 ≤ m290 + n290
+map f35 (xs35 @ ys35) = map f35 xs35 @ map f35 ys35
+bij_betw f182 A182 B182 ⟹ inj_on f182 A182
+A498 ⊆ B498 ⟹ A498 ∩ C498 ⊆ B498 ∩ C498
+A166 ⊆ A166 ∪ B166
+x487 ∈ set (map f487 xs487) ⟷ (∃y∈set xs487. f487 y = x487)
+set (rev xs421) = set xs421
+A372 ⟶ A372 ∨ B372
+A192 ⟶ A192 ∨ B192
+A49 ⊆ B49 ⟹ A49 ∪ C49 ⊆ B49 ∪ C49
+A226 ⊆ A226 ∪ B226
+a70 + b70 = b70 + a70
+x255 ∈ A255 ∩ B255 ⟷ x255 ∈ A255 ∧ x255 ∈ B255
+rev (xs129 @ ys129) = rev ys129 @ rev xs129
+(m342::nat) + 0 = m342
+A260 ∧ B260 ⟶ A260
+inj_on f276 A276 ⟷ (∀x276∈A276. ∀y276∈A276. f276 x276 = f276 y276 ⟶ x276 = y276)
+bij_betw f263 A263 B263 ⟹ y263 ∈ B263 ⟹ (∃x263∈A263. f263 x263 = y263)
+m340 + n340 = n340 + m340
+set (rev xs317) = set xs317
+m67 + Suc n67 = Suc (m67 + n67)
+(converse (r129 O s129)) = converse s129 O converse r129
+m166 + n166 = n166 + m166
+(A47 ⟶ B47) ⟷ (¬A47 ∨ B47)
+{x69∈A69. True} = A69
+m99 ≤ m99
+(converse (r192 O s192)) = converse s192 O converse r192
+a125 + (b125 + a125) = b125 + (a125 + a125)
+a364 + b364 = b364 + a364
+(a398::int) - a398 = 0
+r302 O Id = r302
+set (map f180 xs180) = f180 ` set xs180
+x247 ∈ insert x247 A247
+length (map f258 xs258) = length xs258
+B13 ⟶ A13 ∨ B13
+(converse (r178 O s178)) = converse s178 O converse r178
+length (map f450 xs450) = length xs450
+A331 ⊆ A331 ∪ B331
+x479 ∈ set (map f479 xs479) ⟷ (∃y∈set xs479. f479 y = x479)
+f35 ` (A35 ∪ B35) = f35 ` A35 ∪ f35 ` B35
+- ((a61::int) + b61) = (-a61) + (-b61)
+Id O r322 = r322
+(0::int) ≤ abs a117
+a239 + (b239 + a239) = b239 + (a239 + a239)
+m394 + n394 = n394 + m394
+a377 + (b377 + a377) = b377 + (a377 + a377)
+(0::int) ≤ abs a267
+surj f231 ⟷ (∀y231. ∃x231. f231 x231 = y231)
+f261 ` (A261 ∩ B261) ⊆ f261 ` A261 ∩ f261 ` B261
+m109 + Suc n109 = Suc (m109 + n109)
+(m72::nat) + 0 = m72
+A2 ⟶ A2 ∨ B2
+m353 + (n353 + m353) = n353 + (m353 + m353)
+surj f27 ⟷ (∀y27. ∃x27. f27 x27 = y27)
+rev (xs401 @ ys401) = rev ys401 @ rev xs401
+(A79 ⟶ A79)
+A58 ∪ (B58 ∩ C58) = (A58 ∪ B58) ∩ (A58 ∪ C58)
+inj_on f186 A186 ⟷ (∀x186∈A186. ∀y186∈A186. f186 x186 = f186 y186 ⟶ x186 = y186)
+r359p ⊆ r359 ⟹ s359p ⊆ s359 ⟹ r359p O s359p ⊆ r359 O s359
+(converse (r80 O s80)) = converse s80 O converse r80
+(A237 ⟶ B237) ⟷ (¬A237 ∨ B237)
+r86p ⊆ r86 ⟹ s86p ⊆ s86 ⟹ r86p O s86p ⊆ r86 O s86
+(a294::int) + (-a294) = 0
+a346 + b346 = b346 + a346
+A350 ∧ B350 ⟶ A350
+filter P390 (xs390 @ ys390) = filter P390 xs390 @ filter P390 ys390
+B283 ⟶ A283 ∨ B283
+m81 ≤ m81
+A115 - (B115 ∪ C115) = (A115 - B115) ∩ (A115 - C115)
+f125 ` (A125 ∪ B125) = f125 ` A125 ∪ f125 ` B125
+a202 + b202 = b202 + a202
+length (map f346 xs346) = length xs346
+m151 + Suc n151 = Suc (m151 + n151)
+f276 ` (A276 ∩ B276) ⊆ f276 ` A276 ∩ f276 ` B276
+(converse (r185 O s185)) = converse s185 O converse r185
+m61 + Suc n61 = Suc (m61 + n61)
+(m384::nat) + 0 = m384
+set (rev xs133) = set xs133
+A467 ∩ B467 ⊆ A467
+(m108::nat) + 0 = m108
+A423 ⊆ B423 ⟹ A423 ∩ C423 ⊆ B423 ∩ C423
+r376 ⊆ s376 ⟹ converse r376 ⊆ converse s376
+length (map f34 xs34) = length xs34
+a376 + b376 = b376 + a376
+bij_betw f229 A229 B229 ⟹ f229 ` A229 = B229
+length (map f194 xs194) = length xs194
+m19 + Suc n19 = Suc (m19 + n19)
+rev (xs249 @ ys249) = rev ys249 @ rev xs249
+f95 ` (A95 ∪ B95) = f95 ` A95 ∪ f95 ` B95
+(converse (r115 O s115)) = converse s115 O converse r115
+trans r20 ⟹ r20 O r20 ⊆ r20
+A262 ⟶ A262 ∨ B262
+inj_on f84 A84 ⟷ (∀x84∈A84. ∀y84∈A84. f84 x84 = f84 y84 ⟶ x84 = y84)
+(A86 ⟶ C86) ⟶ ((B86 ⟶ C86) ⟶ (A86 ∨ B86 ⟶ C86))
+m309 ≤ m309
+(m168::nat) + 0 = m168
+Id O r42 = r42
+m310 + n310 = n310 + m310
+(0::int) ≤ abs a375
+(A29 ⟶ A29)
+A290 ∧ B290 ⟶ A290
+(a84::int) + (-a84) = 0
+A241 ∧ B241 ⟶ B241
+r37p ⊆ r37 ⟹ s37p ⊆ s37 ⟹ r37p O s37p ⊆ r37 O s37
+(A276 ⟶ C276) ⟶ ((B276 ⟶ C276) ⟶ (A276 ∨ B276 ⟶ C276))
+(A128 ∧ (B128 ∨ C128)) ⟷ (A128 ∧ B128) ∨ (A128 ∧ C128)
+bij_betw f53 A53 B53 ⟹ y53 ∈ B53 ⟹ (∃x53∈A53. f53 x53 = y53)
+(0::int) ≤ abs a177
+m5 + (n5 + m5) = n5 + (m5 + m5)
+converse (converse r74) = r74
+r240p ⊆ r240 ⟹ s240p ⊆ s240 ⟹ r240p O s240p ⊆ r240 O s240
+set (map f388 xs388) = f388 ` set xs388
+A477 ∩ (B477 ∪ C477) = (A477 ∩ B477) ∪ (A477 ∩ C477)
+(a198::int) + (-a198) = 0
+f141 ` (A141 ∩ B141) ⊆ f141 ` A141 ∩ f141 ` B141
+m238 + n238 = n238 + m238
+m260 ≤ m260 + n260
+rev (rev xs336) = xs336
+converse (converse r95) = r95
+rev (xs337 @ ys337) = rev ys337 @ rev xs337
+map f67 (xs67 @ ys67) = map f67 xs67 @ map f67 ys67
+A379 ⊆ B379 ⟹ A379 ∪ C379 ⊆ B379 ∪ C379
+(A386 ⟶ C386) ⟶ ((B386 ⟶ C386) ⟶ (A386 ∨ B386 ⟶ C386))
+(A397 ⟶ B397) ⟷ (¬A397 ∨ B397)
+set (rev xs165) = set xs165
+bij_betw f151 A151 B151 ⟹ f151 ` A151 = B151
+filter P134 (xs134 @ ys134) = filter P134 xs134 @ filter P134 ys134
+map f83 (xs83 @ ys83) = map f83 xs83 @ map f83 ys83
+rev (rev xs312) = xs312
+A221 ∧ B221 ⟶ B221
+(a146::int) - a146 = 0
+A3 ⊆ B3 ⟹ A3 ∩ C3 ⊆ B3 ∩ C3
+(A248 ∧ (B248 ∨ C248)) ⟷ (A248 ∧ B248) ∨ (A248 ∧ C248)
+rev (xs49 @ ys49) = rev ys49 @ rev xs49
+bij_betw f89 A89 B89 ⟹ y89 ∈ B89 ⟹ (∃x89∈A89. f89 x89 = y89)
+A47 ∩ B47 ⊆ A47
+trans r118 ⟹ r118 O r118 ⊆ r118
+{x384∈A384. True} = A384
+(a156::int) + (-a156) = 0
+- ((a349::int) + b349) = (-a349) + (-b349)
+set (rev xs237) = set xs237
+{x174∈A174. True} = A174
+(0::int) ≤ abs a387
+f351 ` (A351 ∩ B351) ⊆ f351 ` A351 ∩ f351 ` B351
+a167 + (b167 + a167) = b167 + (a167 + a167)
+filter P294 (xs294 @ ys294) = filter P294 xs294 @ filter P294 ys294
+converse (converse r123) = r123
+(A308 ∧ (B308 ∨ C308)) ⟷ (A308 ∧ B308) ∨ (A308 ∧ C308)
+x215 ∈ set (map f215 xs215) ⟷ (∃y∈set xs215. f215 y = x215)
+m154 + n154 = n154 + m154
+A1 ⊆ A1 ∪ B1
+(A207 ⟶ B207) ⟷ (¬A207 ∨ B207)
+(m114::nat) + 0 = m114
+A60 ∧ B60 ⟶ A60
+A382 ⟶ A382 ∨ B382
+r68 ⊆ s68 ⟹ converse r68 ⊆ converse s68
+A281 - (A281 ∩ B281) = A281 - B281
+rev (rev xs64) = xs64
+set (rev xs389) = set xs389
+map f371 (xs371 @ ys371) = map f371 xs371 @ map f371 ys371
+A475 - (B475 ∪ C475) = (A475 - B475) ∩ (A475 - C475)
+length (map f42 xs42) = length xs42
+A240 ∧ B240 ⟶ A240
+A274 ⊆ B274 ⟹ A274 ∪ C274 ⊆ B274 ∪ C274
+inj_on f252 A252 ⟷ (∀x252∈A252. ∀y252∈A252. f252 x252 = f252 y252 ⟶ x252 = y252)
+(A8 ∧ (B8 ∨ C8)) ⟷ (A8 ∧ B8) ∨ (A8 ∧ C8)
+bij_betw f299 A299 B299 ⟹ y299 ∈ B299 ⟹ (∃x299∈A299. f299 x299 = y299)
+converse (converse r186) = r186
+x263 ∈ set (map f263 xs263) ⟷ (∃y∈set xs263. f263 y = x263)
+r268p ⊆ r268 ⟹ s268p ⊆ s268 ⟹ r268p O s268p ⊆ r268 O s268
+set (map f132 xs132) = f132 ` set xs132
+m176 ≤ m176 + n176
+rev (xs393 @ ys393) = rev ys393 @ rev xs393
+{x234∈A234. True} = A234
+A377 ∩ B377 ⊆ A377
+Id O r315 = r315
+A491 - (A491 ∩ B491) = A491 - B491
+(A239 ⟶ A239)
+m272 ≤ m272 + n272
+(m120::nat) + 0 = m120
+(A249 ⟶ A249)
+trans r384 ⟹ r384 O r384 ⊆ r384
+¬(A234 ∧ B234) ⟷ (¬A234 ∨ ¬B234)
+¬(A205 ∨ B205) ⟷ (¬A205 ∧ ¬B205)
+m292 + n292 = n292 + m292
+rev (rev xs352) = xs352
+map f459 (xs459 @ ys459) = map f459 xs459 @ map f459 ys459
+m75 ≤ m75
+A244 ⊆ B244 ⟹ A244 ∪ C244 ⊆ B244 ∪ C244
+A232 ⟶ A232 ∨ B232
+rev (rev xs480) = xs480
+(A328 ∧ (B328 ∨ C328)) ⟷ (A328 ∧ B328) ∨ (A328 ∧ C328)
+A361 ⊆ A361 ∪ B361
+A280 ∧ B280 ⟶ A280
+m337 + Suc n337 = Suc (m337 + n337)
+(A278 ∧ (B278 ∨ C278)) ⟷ (A278 ∧ B278) ∨ (A278 ∧ C278)
+Id O r63 = r63
+set (rev xs53) = set xs53
+A91 ⊆ A91 ∪ B91
+m233 + (n233 + m233) = n233 + (m233 + m233)
+(converse (r108 O s108)) = converse s108 O converse r108
+m271 + Suc n271 = Suc (m271 + n271)
+m335 + (n335 + m335) = n335 + (m335 + m335)
+A162 ⟶ A162 ∨ B162
+(a36::int) + (-a36) = 0
+¬(A335 ∨ B335) ⟷ (¬A335 ∧ ¬B335)
+set (rev xs117) = set xs117
+- ((a277::int) + b277) = (-a277) + (-b277)
+m215 + (n215 + m215) = n215 + (m215 + m215)
+m41 + (n41 + m41) = n41 + (m41 + m41)
+(converse (r395 O s395)) = converse s395 O converse r395
+Id O r168 = r168
+A436 ⊆ A436 ∪ B436
+r386 O Id = r386
+Id O r77 = r77
+r187 ⊆ s187 ⟹ converse r187 ⊆ converse s187
+set (rev xs21) = set xs21
+A136 ⊆ A136 ∪ B136
+trans r328 ⟹ r328 O r328 ⊆ r328
+rev (rev xs272) = xs272
+- ((a67::int) + b67) = (-a67) + (-b67)
+(A297 ⟶ B297) ⟷ (¬A297 ∨ B297)
+(A38 ∧ (B38 ∨ C38)) ⟷ (A38 ∧ B38) ∨ (A38 ∧ C38)
+set (rev xs277) = set xs277
+(a44::int) - a44 = 0
+m206 ≤ m206 + n206
+{x9∈A9. True} = A9
+A300 ∧ B300 ⟶ A300
+(m102::nat) + 0 = m102
+x473 ∈ insert x473 A473 ⟷ True
+rev (rev xs472) = xs472
+(a110::int) - a110 = 0
+x142 ∈ insert x142 A142
+surj f129 ⟷ (∀y129. ∃x129. f129 x129 = y129)
+A281 ∧ B281 ⟶ B281
+r100p ⊆ r100 ⟹ s100p ⊆ s100 ⟹ r100p O s100p ⊆ r100 O s100
+surj f213 ⟷ (∀y213. ∃x213. f213 x213 = y213)
+r267 O Id = r267
+f246 ` (A246 ∩ B246) ⊆ f246 ` A246 ∩ f246 ` B246
+(a192::int) + (-a192) = 0
+m125 + (n125 + m125) = n125 + (m125 + m125)
+(converse (r339 O s339)) = converse s339 O converse r339
+a5 + (b5 + a5) = b5 + (a5 + a5)
+(m66::nat) + 0 = m66
+A32 ⟶ A32 ∨ B32
+m171 ≤ m171
+converse (converse r326) = r326
+{x24∈A24. True} = A24
+x150 ∈ A150 ∩ B150 ⟷ x150 ∈ A150 ∧ x150 ∈ B150
+a352 + b352 = b352 + a352
+A72 ∩ (B72 ∪ C72) = (A72 ∩ B72) ∪ (A72 ∩ C72)
+x38 ∈ insert x38 A38 ⟷ True
+(0::int) ≤ abs a255
+(a362::int) - a362 = 0
+r215 ⊆ s215 ⟹ converse r215 ⊆ converse s215
+r254p ⊆ r254 ⟹ s254p ⊆ s254 ⟹ r254p O s254p ⊆ r254 O s254
+m377 + (n377 + m377) = n377 + (m377 + m377)
+A462 ∩ (B462 ∪ C462) = (A462 ∩ B462) ∪ (A462 ∩ C462)
+bij_betw f104 A104 B104 ⟹ inj_on f104 A104
+A433 ∪ (B433 ∩ C433) = (A433 ∪ B433) ∩ (A433 ∪ C433)
+trans r181 ⟹ r181 O r181 ⊆ r181
+filter P470 (xs470 @ ys470) = filter P470 xs470 @ filter P470 ys470
+- ((a223::int) + b223) = (-a223) + (-b223)
+r128p ⊆ r128 ⟹ s128p ⊆ s128 ⟹ r128p O s128p ⊆ r128 O s128
+(A208 ∧ (B208 ∨ C208)) ⟷ (A208 ∧ B208) ∨ (A208 ∧ C208)
+(A378 ∧ (B378 ∨ C378)) ⟷ (A378 ∧ B378) ∨ (A378 ∧ C378)
+- ((a151::int) + b151) = (-a151) + (-b151)
+r233p ⊆ r233 ⟹ s233p ⊆ s233 ⟹ r233p O s233p ⊆ r233 O s233
+A180 ∧ B180 ⟶ A180
+¬(A14 ∧ B14) ⟷ (¬A14 ∨ ¬B14)
+inj_on f66 A66 ⟷ (∀x66∈A66. ∀y66∈A66. f66 x66 = f66 y66 ⟶ x66 = y66)
+x135 ∈ A135 ∩ B135 ⟷ x135 ∈ A135 ∧ x135 ∈ B135
+converse (converse r172) = r172
+- ((a229::int) + b229) = (-a229) + (-b229)
+rev (xs209 @ ys209) = rev ys209 @ rev xs209
+m159 ≤ m159
+x151 ∈ set (map f151 xs151) ⟷ (∃y∈set xs151. f151 y = x151)
+m197 + (n197 + m197) = n197 + (m197 + m197)
+(A39 ⟶ A39)
+a221 + (b221 + a221) = b221 + (a221 + a221)
+a130 + b130 = b130 + a130
+x210 ∈ A210 ∩ B210 ⟷ x210 ∈ A210 ∧ x210 ∈ B210
+m134 ≤ m134 + n134
+(A147 ⟶ B147) ⟷ (¬A147 ∨ B147)
+bij_betw f212 A212 B212 ⟹ inj_on f212 A212
+m285 ≤ m285
+m163 + Suc n163 = Suc (m163 + n163)
+A206 - (A206 ∩ B206) = A206 - B206
+rev (rev xs160) = xs160
+A122 ∩ B122 ⊆ A122
+A171 ∧ B171 ⟶ B171
+r362 ⊆ s362 ⟹ converse r362 ⊆ converse s362
+bij_betw f193 A193 B193 ⟹ f193 ` A193 = B193
+B163 ⟶ A163 ∨ B163
+surj f165 ⟷ (∀y165. ∃x165. f165 x165 = y165)
+A460 - (B460 ∪ C460) = (A460 - B460) ∩ (A460 - C460)
+(converse (r122 O s122)) = converse s122 O converse r122
+f21 ` (A21 ∩ B21) ⊆ f21 ` A21 ∩ f21 ` B21
+inj f148 ⟷ (∀x148 y148. f148 x148 = f148 y148 ⟶ x148 = y148)
+m193 + Suc n193 = Suc (m193 + n193)
+(a120::int) + (-a120) = 0
+x233 ∈ insert x233 A233 ⟷ True
+trans r69 ⟹ r69 O r69 ⊆ r69
+A265 - (B265 ∪ C265) = (A265 - B265) ∩ (A265 - C265)
+A325 - (B325 ∪ C325) = (A325 - B325) ∩ (A325 - C325)
+rev (rev xs88) = xs88
+A101 ∧ B101 ⟶ B101
+A334 ⊆ B334 ⟹ A334 ∪ C334 ⊆ B334 ∪ C334
+inj_on f60 A60 ⟷ (∀x60∈A60. ∀y60∈A60. f60 x60 = f60 y60 ⟶ x60 = y60)
+filter P86 (xs86 @ ys86) = filter P86 xs86 @ filter P86 ys86
+converse (converse r116) = r116
+a251 + (b251 + a251) = b251 + (a251 + a251)
+A252 ∩ (B252 ∪ C252) = (A252 ∩ B252) ∪ (A252 ∩ C252)
+A42 ∩ (B42 ∪ C42) = (A42 ∩ B42) ∪ (A42 ∩ C42)
+bij_betw f266 A266 B266 ⟹ inj_on f266 A266
+(A158 ∧ (B158 ∨ C158)) ⟷ (A158 ∧ B158) ∨ (A158 ∧ C158)
+x327 ∈ set (map f327 xs327) ⟷ (∃y∈set xs327. f327 y = x327)
+converse (converse r11) = r11
+A417 ∩ (B417 ∪ C417) = (A417 ∩ B417) ∪ (A417 ∩ C417)
+set (rev xs285) = set xs285
+inj_on f132 A132 ⟷ (∀x132∈A132. ∀y132∈A132. f132 x132 = f132 y132 ⟶ x132 = y132)
+Id O r350 = r350
+converse (converse r32) = r32
+trans r13 ⟹ r13 O r13 ⊆ r13
+(A96 ⟶ C96) ⟶ ((B96 ⟶ C96) ⟶ (A96 ∨ B96 ⟶ C96))
+A391 ⊆ A391 ∪ B391
+rev (rev xs32) = xs32
+bij_betw f44 A44 B44 ⟹ inj_on f44 A44
+(converse (r241 O s241)) = converse s241 O converse r241
+(a338::int) - a338 = 0
+r243 ⊆ s243 ⟹ converse r243 ⊆ converse s243
+inj_on f138 A138 ⟷ (∀x138∈A138. ∀y138∈A138. f138 x138 = f138 y138 ⟶ x138 = y138)
+filter P486 (xs486 @ ys486) = filter P486 xs486 @ filter P486 ys486
+set (rev xs37) = set xs37
+(a138::int) + (-a138) = 0
+bij_betw f56 A56 B56 ⟹ inj_on f56 A56
+B113 ⟶ A113 ∨ B113
+(0::int) ≤ abs a27
+r169 O Id = r169
+(a240::int) + (-a240) = 0
+m278 ≤ m278 + n278
+(a62::int) - a62 = 0
+(A156 ⟶ C156) ⟶ ((B156 ⟶ C156) ⟶ (A156 ∨ B156 ⟶ C156))
+{x44∈A44. P x44} ⊆ A44
+map f179 (xs179 @ ys179) = map f179 xs179 @ map f179 ys179
+bij_betw f115 A115 B115 ⟹ f115 ` A115 = B115
+(a96::int) + (-a96) = 0
+map f187 (xs187 @ ys187) = map f187 xs187 @ map f187 ys187
+filter P494 (xs494 @ ys494) = filter P494 xs494 @ filter P494 ys494
+A73 ∪ (B73 ∩ C73) = (A73 ∪ B73) ∩ (A73 ∪ C73)
+bij_betw f277 A277 B277 ⟹ f277 ` A277 = B277
+m261 ≤ m261
+A378 ⊆ B378 ⟹ A378 ∩ C378 ⊆ B378 ∩ C378
+(converse (r143 O s143)) = converse s143 O converse r143
+A181 ∧ B181 ⟶ B181
+length (map f186 xs186) = length xs186
+(A6 ⟶ C6) ⟶ ((B6 ⟶ C6) ⟶ (A6 ∨ B6 ⟶ C6))
+m29 + (n29 + m29) = n29 + (m29 + m29)
+m105 ≤ m105
+A407 ∩ B407 ⊆ A407
+bij_betw f191 A191 B191 ⟹ y191 ∈ B191 ⟹ (∃x191∈A191. f191 x191 = y191)
+filter P166 (xs166 @ ys166) = filter P166 xs166 @ filter P166 ys166
+(A286 ⟶ C286) ⟶ ((B286 ⟶ C286) ⟶ (A286 ∨ B286 ⟶ C286))
+inj f52 ⟷ (∀x52 y52. f52 x52 = f52 y52 ⟶ x52 = y52)
+Id O r385 = r385
+f110 ` (A110 ∪ B110) = f110 ` A110 ∪ f110 ` B110
+r330 O Id = r330
+set (rev xs477) = set xs477
+r366p ⊆ r366 ⟹ s366p ⊆ s366 ⟹ r366p O s366p ⊆ r366 O s366
+rev (rev xs72) = xs72
+inj_on f36 A36 ⟷ (∀x36∈A36. ∀y36∈A36. f36 x36 = f36 y36 ⟶ x36 = y36)
+rev (rev xs48) = xs48
+(converse (r311 O s311)) = converse s311 O converse r311
+m170 ≤ m170 + n170
+A121 ⊆ A121 ∪ B121
+A385 - (B385 ∪ C385) = (A385 - B385) ∩ (A385 - C385)
+length (map f122 xs122) = length xs122
+a113 + (b113 + a113) = b113 + (a113 + a113)
