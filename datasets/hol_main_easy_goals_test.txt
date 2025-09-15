@@ -1,0 +1,100 @@
+(A ∧ (B ⟶ C)) ⟶ ((A ∧ B) ⟶ C)
+(A ⟶ (B ⟶ C)) ⟶ (A ∧ B ⟶ C)
+(¬ A ∧ ¬ B) ⟷ ¬(A ∨ B)
+(A ⟶ B) ⟷ (¬A ∨ B)
+(A ⟶ B) ⟶ (¬B ⟶ ¬A)
+(A ∧ (B ∨ C)) ⟶ ((A ∧ B) ∨ (A ∧ C))
+((A ⟶ C) ∧ (B ⟶ C)) ⟶ (A ∨ B ⟶ C)
+(∀x. P x) ⟷ (¬ (∃x. ¬ P x))
+(∃x. P x ∧ Q x) ⟶ ((∃x. P x) ∧ (∃x. Q x))
+(∀x. P x ⟶ Q x) ⟶ ((∃x. P x) ⟶ (∃x. Q x))
+(if A then B else B) = B
+(f = g) ⟷ (∀x. f x = g x)
+A ⊆ B ⟷ (A - B = {})
+Pow A ⊆ Pow B ⟷ A ⊆ B
+Pow A ∩ Pow B = Pow (A ∩ B)
+(A - B) ∪ (A ∩ B) = A
+(A - B) ∩ B = {}
+{x∈A. P x ∧ Q x} = {x∈A. P x} ∩ {x∈A. Q x}
+{x∈A. P x ∨ Q x} = {x∈A. P x} ∪ {x∈A. Q x}
+{x∈A. True} = A
+{x∈A. False} = {}
+f ` (A ∩ B) ⊆ (f ` A) ∩ (f ` B)
+f ` (A ∪ B) = (f ` A) ∪ (f ` B)
+(g ∘ f) ` A = g ` (f ` A)
+(A × (B ∩ C)) = (A × B) ∩ (A × C)
+((A ∩ B) × C) = (A × C) ∩ (B × C)
+x ∈ (A ∩ B) ⟷ (x ∈ A ∧ x ∈ B)
+x ∈ (A ∪ B) ⟷ (x ∈ A ∨ x ∈ B)
+converse Id = Id
+(r O s) O t = r O (s O t)
+Id O r = r
+r O Id = r
+converse (r O s) = (converse s) O (converse r)
+Domain (Id_on A) = A
+Range (Id_on A) = A
+Id_on A ⊆ Id
+Domain (r O s) ⊆ Domain r
+Range (r O s) ⊆ Range s
+(λx. x) = id
+(f ∘ id) = f
+(id ∘ f) = f
+(f ∘ (g ∘ h)) = ((f ∘ g) ∘ h)
+surj f ⟷ (∀y. ∃x. f x = y)
+inj f ⟷ (∀x y. f x = f y ⟶ x = y)
+inj_on f A ⟷ (∀x∈A. ∀y∈A. f x = f y ⟶ x = y)
+(f(x := f x)) = f
+(f(x := y)) x = y
+x ≠ z ⟶ (f(x := y)) z = f z
+map id xs = xs
+map (g ∘ f) xs = map g (map f xs)
+length (replicate n x) = n
+set (replicate n x) ⊆ {x}
+filter P (rev xs) = rev (filter P xs)
+concat (map (λx. [x]) xs) = xs
+map f (concat xss) = concat (map (map f) xss)
+take n (take m xs) = take (min n m) xs
+drop n (drop m xs) = drop (n + m) xs
+take n xs = take n (xs @ ys) ⟷ n ≤ length xs
+drop n (xs @ ys) = (drop n xs) @ (drop (n - length xs) ys)
+rev (map f xs) = map f (rev xs)
+set (filter P xs) = {x ∈ set xs. P x}
+distinct xs ⟷ length xs = length (remdups xs)
+remdups (remdups xs) = remdups xs
+zip (map f xs) (map g ys) = map (λp. (f (fst p), g (snd p))) (zip xs ys)
+length (zip xs ys) = min (length xs) (length ys)
+map fst (zip xs ys) = take (min (length xs) (length ys)) xs
+map snd (zip xs ys) = take (min (length xs) (length ys)) ys
+set (rev xs) = set xs
+(Suc m ≤ Suc n) ⟷ (m ≤ n)
+(m::nat) ≤ n ⟶ m ≤ n + k
+min (m::nat) n + k = min (m + k) (n + k)
+max (m::nat) n + k = max (m + k) (n + k)
+(m::nat) + 0 = m
+(0::nat) + m = m
+(m::nat) + Suc n = Suc (m + n)
+(m::nat) * (n + k) = m*n + m*k
+min (m::nat) n ≤ m
+m ≤ max (m::nat) n
+(min (m::nat) n) + (max m n) = m + n
+sum_list (map (λ_. (k::nat)) xs) = k * length xs
+length ([m..<m+n]) = n
+map Suc ([m..<m+n]) = [Suc m ..< Suc (m+n)]
+(m::nat) ≤ n ⟷ (∃k. m + k = n)
+(m::nat) ≠ 0 ⟷ (∃k. m = Suc k)
+abs ((a::int) - c) ≤ abs (a - b) + abs (b - c)
+((a::int) + b) - c = a + (b - c)
+((a::int) - b) + c = a + (c - b)
+-( (a::int) - b ) = b - a
+abs ((a::int) + b) = abs (b + a)
+min (a::int) b + c = min (a + c) (b + c)
+max (a::int) b + c = max (a + c) (b + c)
+(a::int) + 0 = a
+0 + (a::int) = a
+(a::int) + (b + c) = (a + b) + c
+fst (x,y) = x
+snd (x,y) = y
+case_prod f (x,y) = f x y
+map_option id o = o
+map_sum id id s = s
+case_sum f g (Inr y) = g y

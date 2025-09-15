@@ -1,0 +1,100 @@
+¬ (∀x∈A. P x) ⟷ (∃x∈A. ¬ P x)
+(∃x. P x ∧ Q x) ⟶ (∃x. P x)
+(∀x. P x ⟶ Q) ⟶ ((∃x. P x) ⟶ Q)
+(∀x∈A. P x ∧ Q x) ⟷ ((∀x∈A. P x) ∧ (∀x∈A. Q x))
+(∃x. P x ∨ Q x) ⟷ ((∃x. P x) ∨ (∃x. Q x))
+(¬ ∃x. P x) ⟷ (∀x. ¬ P x)
+(∀x. P x ⟶ R) ⟶ ((∃x. P x) ⟶ R)
+(∃x. P x) ⟶ (∀y. P y ⟶ ∃z. P z)
+(∃x. P x) ⟶ (∃y. P y ∧ ∃z. P z)
+((P ⟶ Q) ∧ (Q ⟶ R)) ⟶ (P ⟶ R)
+(P ∧ (Q ∨ R)) ⟶ ((P ∧ Q) ∨ (P ∧ R))
+(P ⟶ Q) ⟷ (¬ P ∨ Q)
+(P ∧ False) ⟶ Q
+(P ⟶ (Q ⟶ R)) ⟷ ((P ∧ Q) ⟶ R)
+(∀x. P x) ⟶ (∀y. P y)
+(A ∩ (B ∪ C)) = (A ∩ B) ∪ (A ∩ C)
+A ∪ (B ∩ C) = (A ∪ B) ∩ (A ∪ C)
+(A - B) ∪ (A ∩ B) = A
+(A ∩ B) ∪ (A - B) = A
+A ⊆ B ⟶ (A ∩ B = A)
+A ⊆ B ⟶ (A ∪ B = B)
+(A ⊆ B ∧ B ⊆ C) ⟶ (A ⊆ C)
+inj f ⟹ finite A ⟹ card (f ` A) = card A
+finite A ⟹ card (A ∪ B) + card (A ∩ B) = card A + card B
+finite A ⟹ finite B ⟹ card (A × B) = card A * card B
+finite A ⟹ card (Pow A) = 2 ^ card A
+finite A ⟹ card (A - {a}) = (if a∈A then card A - 1 else card A)
+finite A ⟹ finite B ⟹ (A ⊆ B ⟶ card A ≤ card B)
+finite A ⟹ finite B ⟹ card (A ∪ B) ≤ card A + card B
+inj_on f A ⟹ finite A ⟹ card (f ` A) = card A
+finite A ⟹ card (insert a A) = (if a∈A then card A else Suc (card A))
+(f ` (A ∩ B)) ⊆ (f ` A ∩ f ` B)
+A ⊆ f -` (f ` A)
+(f ` A) ∩ (f ` B) ⊆ f ` (A ∩ B)
+bij f ⟹ f -` (f ` A) = A
+sym r ⟹ sym (r⁻¹)
+(r O Id) = r
+(Id O r) = r
+trans r ⟹ trans (r⁻¹)
+refl r ⟹ refl (r⁻¹)
+antisym r ⟹ antisym (r⁻¹)
+r ⊆ s ⟹ rtrancl r ⊆ rtrancl s
+trancl (r ∪ s) = trancl (trancl r ∪ trancl s)
+Domain (r O s) = Domain s ∩ (s -` (Domain r))
+Range (r O s) = Range r ∩ (r `` (Range s))
+rev (xs @ ys) = rev ys @ rev xs
+length (map f xs) = length xs
+map f (xs @ ys) = map f xs @ map f ys
+take (length xs) (xs @ ys) = xs
+drop (length xs) (xs @ ys) = ys
+rev (rev xs) = xs
+map id xs = xs
+map (f ∘ g) xs = map f (map g xs)
+take (length xs) xs = xs
+drop (length xs) xs = []
+rev (map f xs) = map f (rev xs)
+length (rev xs) = length xs
+length (xs @ ys) = length xs + length ys
+length (take n xs) ≤ n
+take n (take m xs) = take (min n m) xs
+drop n (drop m xs) = drop (n+m) xs
+take n xs @ drop n xs = xs
+nth (xs @ ys) n = (if n < length xs then nth xs n else nth ys (n - length xs))
+concat (map (λx. [x]) xs) = xs
+sum_list (xs @ ys) = sum_list xs + sum_list ys
+(m + n) - n = m
+min (Suc n) (Suc m) = Suc (min n m)
+max (Suc n) (Suc m) = Suc (max n m)
+n ≤ m ⟶ n ≤ m + k
+n ≤ m ⟶ n ≤ m * k + m
+0 < n ⟶ m div n * n ≤ m
+n ≤ m ⟶ m - n + n = m
+n ≤ m ⟶ m - (m - n) = n
+abs (a::int) ≥ 0
+abs (a*b) = abs a * abs b
+abs (a+b) ≤ abs a + abs b
+abs (-a) = abs a
+min a b + max a b = a + b
+(a::int) ≤ b ∨ b ≤ a
+(a::int) * (b + c) = a*b + a*c
+(a::nat) ≤ b ⟶ a ≤ b + c
+(a::nat) ≤ b ⟶ a + c ≤ b + c
+a ≤ b ⟶ a * c ≤ b * c
+(a::nat) ≤ b ⟶ a div c ≤ b div c ∨ c=0
+a ≤ b ⟶ a mod c ≤ b mod c ∨ c=0
+fst (a,b) = a
+snd (a,b) = b
+(a,b) = (c,d) ⟶ a=c ∧ b=d
+case_option y f (Some x) = f x
+case_option y f None = y
+the (Some x) = x
+case_sum f g (Inl x) = f x
+case_sum f g (Inr y) = g y
+map_option f (Some x) = Some (f x)
+map_option f None = None
+prod_case f (a,b) = f a b
+map_sum f g (Inl x) = Inl (f x)
+map_sum f g (Inr y) = Inr (g y)
+split f (a,b) = f a b
+(case (a,b) of (x,y) ⇒ P x y) = P a b

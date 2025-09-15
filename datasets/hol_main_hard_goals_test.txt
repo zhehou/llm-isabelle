@@ -1,0 +1,100 @@
+(∀x. P x ⟶ Q x) ∧ (∃x. P x) ⟶ (∃x. Q x)
+(∀x. P x ⟷ Q x) ⟶ ((∀x. R x ⟶ P x) ⟷ (∀x. R x ⟶ Q x))
+(∀x. P x) ⟶ ((∀x. Q x ⟶ R x) ⟶ (∀x. P x ∧ Q x ⟶ R x))
+(∃x. P x ∧ (Q x ⟶ R x)) ⟶ ((∃x. P x ∧ Q x) ⟶ (∃x. R x))
+(if A then f x else f y) = f (if A then x else y)
+(if A then (B ⟶ C) else True) ⟷ (¬ A ∨ (B ⟶ C))
+(∀x. f x = g x) ⟶ (∃!x. f x = a) ⟶ (∃!x. g x = a)
+(∃!x. P x) ⟶ (∀x y. P x ∧ P y ⟶ x = y)
+finite A ⟹ card (A ∪ B) = card A + card (B - A)
+finite A ⟹ card (A ∩ B) + card (A - B) = card A - card (A ∩ (B - A))
+finite A ⟹ finite B ⟹ A ∩ B = {} ⟹ card (A ∪ B) = card A + card B
+finite A ⟹ card {x∈A. P x ∧ Q x} + card {x∈A. P x ∧ ¬ Q x} = card {x∈A. P x}
+finite A ⟹ card {x∈A. P x} + card {x∈A. ¬ P x} = card A
+finite A ⟹ inj_on f A ⟹ card (f ` A) = card A
+finite A ⟹ card ((A × B) ∩ (C × D)) = card (A ∩ C) * card (B ∩ D)
+finite A ⟹ finite B ⟹ card (A × B - C) = card (A × B) - card (C ∩ (A × B))
+finite A ⟹ sum (λx. (if x∈B then (1::nat) else 0)) A = card (A ∩ B)
+finite A ⟹ sum (λx. (if P x then (1::nat) else 0)) A = card {x∈A. P x}
+finite A ⟹ sum (λx. (if x∈A then (0::int) else 0)) A = 0
+finite A ⟹ sum (λx. c::int) A = c * int (card A)
+finite A ⟹ sum (λx. f x + g x::int) A = sum f A + sum g A
+finite A ⟹ (∀x∈A. f x = g x) ⟶ sum f A = (sum g A::int)
+finite A ⟹ card (A - {x}) = (if x∈A then card A - 1 else card A)
+finite A ⟹ card (insert x A) = (if x∈A then card A else Suc (card A))
+finite A ⟹ finite B ⟹ card { (x,y)∈A×B. P x ∧ Q y } ≤ card A * card B
+finite A ⟹ finite B ⟹ card ((A - C) × (B - D)) = (card A - card (A ∩ C)) * (card B - card (B ∩ D))
+finite A ⟹ finite B ⟹ A ⊆ B ⟹ card B = card A + card (B - A)
+finite A ⟹ card (A ∩ B) = card A - card (A - B)
+finite A ⟹ card (A ∪ B) + card (A ∩ B) = card A + card B
+finite A ⟹ card (SIGMA x∈A. F x) = sum (λx. card (F x)) A
+finite I ⟹ (∀i∈I. finite (F i)) ⟹ (∀i∈I. ∀j∈I. i≠j ⟶ F i ∩ F j = {}) ⟹ card (⋃i∈I. F i) = (∑i∈I. card (F i))
+finite A ⟹ inj_on f A ⟹ sum (λx. (1::nat)) (f ` A) = card A
+finite A ⟹ inj_on f A ⟹ card (SIGMA x∈A. {f x}) = card A
+finite A ⟹ card (A × {x}) = card A
+finite A ⟹ card ({x} × A) = card A
+finite A ⟹ finite B ⟹ (A ⊆ B) ⟷ (card A = card (A ∩ B))
+finite A ⟹ card {x∈A. x∈B} = card (A ∩ B)
+vimage f (A ∩ B) = vimage f A ∩ vimage f B
+vimage f (A ∪ B) = vimage f A ∪ vimage f B
+inj_on f A ⟹ vimage f (f ` A) ∩ A = A
+f ` (A - B) ⊆ (f ` A) - (f ` (A ∩ B))
+(g ∘ f) ` (A ∩ B) ⊆ g ` (f ` A) ∩ g ` (f ` B)
+{x∈A. P x} ∪ {x∈A. ¬ P x} = A
+{x∈A. P x} ∩ {x∈A. ¬ P x} = {}
+{(x,y)∈A×B. P x ∧ Q y} = (A ∩ {x. P x}) × (B ∩ {y. Q y})
+({x. P x} ∩ {x. Q x}) = {x. P x ∧ Q x}
+({x. P x} ∪ {x. Q x}) = {x. P x ∨ Q x}
+rtrancl r O rtrancl r = rtrancl r
+trancl Id = Id
+converse (trancl r) = trancl (converse r)
+converse (rtrancl r) = rtrancl (converse r)
+Domain (r O s) ⊆ Domain r
+Range (r O s) ⊆ Range s
+Domain (converse r) = Range r
+Range (converse r) = Domain r
+trans r ⟹ r O r ⊆ r
+acyclic r ⟷ (∀x. (x,x) ∉ trancl r)
+r ⊆ s ⟹ trancl r ⊆ trancl s
+inj_on f A ⟹ x∈A ⟹ inv_into A f (f x) = x
+inj f ⟹ inv f ∘ f = id
+surj f ⟹ f ∘ inv f = id
+(∀x. f x = g x) ⟹ f = g
+(λx. c) ∘ f = (λ_. c)
+(λx. x) ∘ f = f
+f ∘ (λx. x) = f
+(f ∘ g) ∘ h = f ∘ (g ∘ h)
+(g ∘ f) x = g (f x)
+(∀x∈A. f x = g x) ⟹ f ` A = g ` A
+sum_list (map f (xs @ ys)) = sum_list (map f xs) + sum_list (map f ys)
+sum_list (replicate n k) = n * k
+map f (take n xs) = take n (map f xs)
+map f (drop n xs) = drop n (map f xs)
+rev (take n xs) = drop (length xs - n) (rev xs) ⟷ n ≤ length xs
+rev (drop n xs) = take (length xs - n) (rev xs) ⟷ n ≤ length xs
+nth (map f xs) i = f (nth xs i) ⟷ i < length xs
+nth (xs @ ys) i = nth xs i ⟷ i < length xs
+¬ i < length xs ⟹ nth (xs @ ys) i = nth ys (i - length xs)
+length (takeWhile P xs) + length (dropWhile P xs) = length xs
+set (takeWhile P xs) ⊆ set xs
+set (dropWhile P xs) ⊆ set xs
+rotate (length xs mod (length xs)) xs = xs
+rotate (i + j) xs = rotate i (rotate j xs)
+xs ≠ [] ⟹ nth (rev xs) i = nth xs (length xs - Suc i) ⟷ i < length xs
+zip (take n xs) (take n ys) = take n (zip xs ys)
+zip (drop n xs) (drop n ys) = drop n (zip xs ys)
+map fst (zip xs ys) = take (min (length xs) (length ys)) xs
+map snd (zip xs ys) = take (min (length xs) (length ys)) ys
+length (zip xs ys) = min (length xs) (length ys)
+foldl f a (xs @ ys) = foldl f (foldl f a xs) ys
+foldr f b (xs @ ys) = foldr f (foldr f b ys) xs
+sum (λi. (k::nat)) {..<m} = m * k
+sum (λi. (f i + g i)::int) {..<m} = sum (λi. f i) {..<m} + sum (λi. g i) {..<m}
+set [m..<n] ∩ set [n..<p] = {}
+length [m..<n] + length [n..<p] = length [m..<p]
+(map Suc [m..<n]) = [Suc m ..< Suc n]
+sum (λ_. (1::nat)) {..<m} = m
+(a::int) - b = a + (-b)
+abs ((a::int) - c) ≤ abs (a - b) + abs (b - c)
+(min (a::int) b) + (max a b) = a + b
+(min (m::nat) n) + (max m n) = m + n
