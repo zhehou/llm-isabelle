@@ -168,6 +168,17 @@ python -m prover.cli --goal 'rev (rev xs) = xs' \
   --sledge --quickcheck --nitpick --facts-limit 6 --variants
 ```
 
+Test with baseline method (sledgehammer only)
+```bash
+python baselines/sledge_only.py \                                                              
+  --file datasets/logic.txt \
+  --imports Main \    
+  --provers "e z3 vampire cvc5" \
+  --sledge-timeout 60 \
+  --goal-timeout 60 \
+  --print-logs
+```
+
 **Advanced features for the prover**
 Prove multiple goals from a file
 ```bash
