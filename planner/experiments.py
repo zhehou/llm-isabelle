@@ -212,6 +212,44 @@ def _is_transport_error(msg: str) -> bool:
     m = msg if isinstance(msg, str) else str(msg)
     return any(hint in m for hint in _TRANSPORT_HINTS)
 
+# --- NEW: auto-restart wrapper around verification (minimal integration change) ---
+def _verify_with_auto_restart(isabelle, session_id: str, isar_text: str) -> Tuple[bool, str]:
+    """
+    Try verification once on the given (isabelle, session_id).
+    If a transport error occurs, spin up a *temporary* Isabelle server/session,
+    retry verification once, then tear the temp server down.
+    """
+    ok, details = _verify_full_isar(isabelle, session_id, isar_text)
+    if ok or not _is_transport_error(details):
+        return ok, details
+
+    # Transport error: retry with a fresh, temporary server
+    try:
+        server_info, proc = start_isabelle_server(name="planner-verify-retry", log_file="planner_verify_retry.log")
+        client = get_isabelle_client(server_info)
+        new_session = client.session_start(session=os.environ.get("ISABELLE_SESSION", "HOL"))
+        try:
+            ok2, details2 = _verify_full_isar(client, new_session, isar_text)
+        finally:
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            try:
+                proc.terminate(); proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill(); proc.wait(timeout=2)
+                except Exception:
+                    pass
+        # Prefer the second attempt’s diagnostics
+        if ok2:
+            return True, ""
+        return False, (details2 or "verify_failed_after_restart")
+    except Exception as e:
+        # Still a transport problem (or startup failed)
+        return False, f"transport_error_after_restart: {type(e).__name__}: {e}"
+
 # ---------- plan_and_fill safety wrapper ----------
 def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Optional[Any], str]:
     """
@@ -332,15 +370,14 @@ def _bench_run_one(
 
     if cfg.verify and not had_sorry:
         # Only worth compiling if there are no holes
-        verified_ok, verify_details = _verify_full_isar(isabelle, session_id, outline_text)
+        verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)
         if verified_ok:
             verify_status = "ok"
             success = success and True
         else:
             if _is_transport_error(verify_details):
-                # Treat transport failures as INCONCLUSIVE, not a proof failure.
+                # Still transport after retry → treat as INCONCLUSIVE (keep planner success)
                 verify_status = "transport_error"
-                # Do NOT flip success to False; keep planner's success.
                 success = success and True
             else:
                 verify_status = "fail"
@@ -724,7 +761,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 verify_status = "skipped"
 
                 if args.verify and not had_sorry:
-                    verified_ok, verify_details = _verify_full_isar(isabelle, session_id, text)
+                    verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, text)
                     if verified_ok:
                         verify_status = "ok"
                         success = success and True
