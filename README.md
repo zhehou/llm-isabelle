@@ -384,6 +384,7 @@ Then in jEdit, use **Macros → LLM Prover** at a proof state.
 ### 3.7 Evaluation using external datasets
 
 **Mini-F2F**
+
 Download the dataset
 ```bash
 git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/miniF2F  
@@ -415,9 +416,29 @@ ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/m
 ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 ```
 
-Maybe train rerankers using on the logs from the validation set, and then run the test set to see results. Also try the planner.
+Maybe train rerankers using on the logs from the validation set, and then run the test set to see results. 
+
+Also try the planner
+```bash
+# Validation 
+python -m planner.experiments bench \  
+  --file datasets/mini_f2f/mini_f2f_validation.txt \                                 
+  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 200 --strict-no-sorry --verify \
+  --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
+  --model "qwen3-coder:30b" --shuffle --seed 42
+
+# Testing
+python -m planner.experiments bench \  
+  --file datasets/mini_f2f/mini_f2f_test.txt \                                 
+  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 200 --strict-no-sorry --verify \
+  --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
+  --model "qwen3-coder:30b" --shuffle --seed 42
+```
 
 **PutnamBench**
+
 Download the dataset
 ```bash
 git clone https://github.com/trishullab/PutnamBench.git external/PutnamBench  
@@ -448,7 +469,15 @@ Run the prover on the PutnamBench dataset
 ISABELLE_LOGIC=PutnamBench_Base python -m prover.experiments bench --file datasets/putnambench/putnambench_goals.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b"
 ```
 
-Also try the planner.
+Also try the planner
+```bash
+python -m planner.experiments bench \  
+  --file datasets/putnambench/putnambench_goals.txt \                                 
+  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 200 --strict-no-sorry --verify \
+  --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
+  --model "qwen3-coder:30b" --shuffle --seed 42
+```
 
 ---
 
