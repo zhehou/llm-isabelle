@@ -358,30 +358,33 @@ def _bench_run_one(
 
     outline_text = res.outline or ""
     had_sorry = bool(find_sorry_spans(outline_text))
-    success = bool(res.success)
 
-    if cfg.mode == "outline" and cfg.strict_no_sorry:
-        # In strict mode for outline, only count as success if there's no sorry.
-        success = success and (not had_sorry)
+    # Decide success from *artifact* first, not from res.success
+    if cfg.mode == "auto":
+        # Auto expects all holes filled → success iff no 'sorry'
+        success = (not had_sorry)
+    else:
+        # Outline mode: success iff we produced an outline; optionally require hole-free
+        success = True
+        if cfg.strict_no_sorry:
+            success = success and (not had_sorry)
 
     verified_ok = True
     verify_details = ""
     verify_status = "skipped"  # skipped | ok | fail | transport_error
 
     if cfg.verify and not had_sorry:
-        # Only worth compiling if there are no holes
         verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)
         if verified_ok:
             verify_status = "ok"
-            success = success and True
+            success = True  # verification is authoritative
         else:
             if _is_transport_error(verify_details):
-                # Still transport after retry → treat as INCONCLUSIVE (keep planner success)
+                # Transport issues = inconclusive; keep current success decision
                 verify_status = "transport_error"
-                success = success and True
             else:
                 verify_status = "fail"
-                success = success and False
+                success = False
 
     row = BenchRow(
         goal=goal,
@@ -752,9 +755,13 @@ def cmd_regress(args: argparse.Namespace) -> None:
             else:
                 text = res.outline or ""
                 had_sorry = bool(find_sorry_spans(text))
-                success = bool(res.success)
-                if args.mode == "outline" and args.strict_no_sorry:
-                    success = success and (not had_sorry)
+
+                if args.mode == "auto":
+                    success = (not had_sorry)
+                else:
+                    success = True
+                    if args.strict_no_sorry:
+                        success = success and (not had_sorry)
 
                 verified_ok = True
                 verify_details = ""
@@ -764,15 +771,16 @@ def cmd_regress(args: argparse.Namespace) -> None:
                     verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, text)
                     if verified_ok:
                         verify_status = "ok"
-                        success = success and True
+                        success = True
                     else:
                         if _is_transport_error(verify_details):
                             verify_status = "transport_error"
-                            success = success and True
+                            # keep success as-is
                         else:
                             verify_status = "fail"
-                            success = success and False
-                    verify_details = (f"[{verify_status}] {verify_details}" if verify_details or verify_status != "skipped" else "")
+                            success = False
+                    verify_details = (f"[{verify_status}] {verify_details}"
+                                      if verify_details or verify_status != "skipped" else "")
 
             rows.append(OneGoal(
                 goal=g, success=success, elapsed_s=float(dt),

@@ -358,23 +358,59 @@ def _normalize_calculation_ellipsis(text: str) -> str:
 
 def _crop_to_first_proof_block(text: str) -> str:
     """
-    Keep only the first lemma..qed block; drop anything before/after to avoid splices.
+    Keep only the first lemma..(proof..qed)* block; be nesting-aware so the cropped
+    text ends at the *matching* 'qed' for the first 'proof', not at an inner one.
     """
-    # Find first lemma
+    # Find the first lemma line
     m_lemma = re.search(r'(?m)^\s*lemma\s+"[^"]*"', text)
     if not m_lemma:
         return text
     tail = text[m_lemma.start():]
-    # Find first proof and its matching first qed after it
+
+    # Find the first 'proof' after that lemma
     m_proof = PROOF_RE.search(tail)
     if not m_proof:
+        # No proof — still return from lemma onward (sanitizers may add a skeleton later)
         return tail
-    after_proof = tail[m_proof.end():]
-    m_qed = QED_RE.search(after_proof)
-    if not m_qed:
+
+    # Walk forward and balance nested 'proof'/'qed'
+    depth = 1
+    end_idx = None
+    pos = m_proof.end()
+
+    # We want earliest upcoming PROOF or QED at each step
+    while True:
+        m_next_proof = PROOF_RE.search(tail, pos)
+        m_next_qed   = QED_RE.search(tail, pos)
+
+        if not m_next_proof and not m_next_qed:
+            # No closing 'qed' — return as-is; later passes may append a final 'qed'
+            break
+
+        # Choose whichever comes first
+        choose_qed = False
+        if m_next_qed and m_next_proof:
+            choose_qed = (m_next_qed.start() <= m_next_proof.start())
+        elif m_next_qed and not m_next_proof:
+            choose_qed = True
+        else:
+            choose_qed = False
+
+        if choose_qed:
+            depth -= 1
+            pos = m_next_qed.end()
+            if depth == 0:
+                end_idx = pos
+                break
+        else:
+            depth += 1
+            pos = m_next_proof.end()
+
+    if end_idx is None:
+        # Could not find the matching outer 'qed'; return tail as-is (other sanitizers add one)
         return tail
-    end = m_proof.end() + m_qed.end()
-    return tail[:end] + "\n"
+
+    return tail[:end_idx] + "\n"
 
 def _fix_case_show_thesis(text: str) -> str:
     """
