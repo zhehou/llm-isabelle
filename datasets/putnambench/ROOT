@@ -1,0 +1,12 @@
+session "PutnamBench_Base" = HOL +
+  options [document = false]
+  sessions
+    "HOL-Analysis"
+    "HOL-Computational_Algebra"
+    "HOL-Number_Theory"
+    "HOL-Library"
+    "HOL-Algebra"
+    "HOL-Combinatorics"
+    "HOL-Probability"
+  theories
+    PutnamBench_Base

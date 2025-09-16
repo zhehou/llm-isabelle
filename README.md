@@ -381,7 +381,9 @@ Copy the `.bsh` macros from `isabelle_ui/` to your jEdit macros folder, e.g.
 
 Then in jEdit, use **Macros → LLM Prover** at a proof state.
 
-### 3.7 Evaluation using mini-F2F
+### 3.7 Evaluation using external datasets
+
+**Mini-F2F**
 Download the dataset
 ```bash
 git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/miniF2F  
@@ -389,11 +391,13 @@ git clone --depth=1 https://github.com/facebookresearch/miniF2F.git external/min
 
 Process the dataste for Isabelle/HOL
 ```bash
-python datasets/prep_minif2f_isabelle.py \
+python datasets/thys2goal.py \
+  --mode minif2f \
   --repo external/miniF2F \
   --outdir datasets/mini_f2f
 # mini_f2f_validation.txt and mini_f2f_test.txt are the ones to use.
 ```
+The above steps are already done in the repo. They are only for user verification.
 
 Build Isabelle session to include necessary imports (need ROOT and MiniF2F_Base.thy in datasets/mini_f2f)
 ```bash
@@ -411,7 +415,40 @@ ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/m
 ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
 ```
 
-Maybe train rerankers using on the logs from the validation set, and then run the test set to see results.
+Maybe train rerankers using on the logs from the validation set, and then run the test set to see results. Also try the planner.
+
+**PutnamBench**
+Download the dataset
+```bash
+git clone https://github.com/trishullab/PutnamBench.git external/PutnamBench  
+```
+
+Process the dataste for Isabelle/HOL
+```bash
+python datasets/thys2goal.py \
+  --mode generic \
+  --repo external/PutnamBench/isabelle \
+  --outfile datasets/putnambench/putnambench_goals.txt \
+  --keep-all-props \
+  --list-skipped \
+  --emit-wrappers \
+  --session-import HOL-Analysis
+```
+The above steps are already done in the repo. They are only for user verification.
+
+Build Isabelle session to include necessary imports (need ROOT and PutnamBench_Base.thy in datasets/PutnamBench)
+```bash
+# Make sure you have already registered AFP entries to Isabelle/HOL
+isabelle build -d datasets/putnambench -b PutnamBench_Base
+export ISABELLE_LOGIC=PutnamBench_Base
+```
+
+Run the prover on the PutnamBench dataset
+```bash
+ISABELLE_LOGIC=PutnamBench_Base python -m prover.experiments bench --file datasets/putnambench/putnambench_goals.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b"
+```
+
+Also try the planner.
 
 ---
 
