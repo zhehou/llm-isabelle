@@ -37,16 +37,23 @@ TASK
 Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar outline that compiles. Leave nontrivial reasoning steps as `sorry`.
 
 OUTPUT REQUIREMENTS
-- Output ONLY Isabelle text (no explanations, no code fences).
-- Start at or after a line exactly of the form:
+- Output ONLY Isabelle/Isar text (no explanations, no code fences).
+- Always begin at or after a line exactly of the form:
   lemma "{goal}"
-- Prefer structured outlines:
-  • For lists/nats: `proof (induction xs)` / `proof (induction n)` with `case Nil`/`case Cons` or `case 0`/`case (Suc n)`,
-    and in each case branch use `show ?case ...`.
-  • For booleans/sum-types: `proof (cases b)` / `proof (cases rule: <type>.exhaust)` with `show ?case`.
-  • For calculational reasoning: use `proof -`, then `have ...`, `also`, `finally show ?thesis` with the Isar token `...`.
-  • **Name intermediate facts** and reuse them with `using`:
-      - `have f1: "…"` then later `have f2: "…" using f0 f1 …`, and finally `show ?thesis using f1 f2 …`.
+- Choose proof strategies appropriate to the problem:
+  • Induction: use `proof (induction <var>)` with clear case splits (`case 0`/`case (Suc n)`, `case Nil`/`case Cons`, etc.), and in each branch end with `show ?case …`.
+  • Exhaustive case analysis: `proof (cases <expr>)` or `proof (cases rule: <type>.exhaust)` with `show ?case …`.
+  • Calculational reasoning: use `proof -`, chain `have …`, `also`, `moreover`, and `finally show ?thesis …`.
+  • Advanced methods: when suitable, use structured subproofs with `from … have …`, `ultimately show …`, `thus`, or `hence`.
+- **Intermediate facts should be named** and reused:
+  • `have f1: "…"` then later `have f2: "…" using f1 …`.
+  • Final steps should reference earlier facts: `show ?thesis using f1 f2 …`.
+- When goals are trivial, close with strong but simple tactics like `by simp`, `by auto`, `by blast`, `by fastforce`, but **not** with a bare `.`.
+- For complex or very hard problems:
+  • It is acceptable to leave nontrivial reasoning as `sorry`.
+  • Provide a well-structured skeleton so that further details can be filled in systematically.
+  • Nested proofs (`subgoal`, `proof - … qed`) may be used where appropriate.
+
 
 OUTPUT GRAMMAR
 Top-level:
