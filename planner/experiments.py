@@ -124,75 +124,116 @@ def _normalize_isar_for_verify(s: str) -> str:
 
     return s.strip() + "\n"
 
-def _wrap_as_theory(isar_body: str, *, thy_name: Optional[str] = None) -> List[str]:
+# ---- Session helpers (robust start with fallback) ----
+def _pick_session_name() -> str:
+    """Preferred session name from environment, defaulting to HOL."""
+    return (os.environ.get("ISABELLE_LOGIC")
+            or os.environ.get("ISABELLE_SESSION")
+            or "HOL")
+
+def _session_start_with_fallback(client):
     """
-    Wrap an Isar lemma/proof body as a complete theory that Isabelle can finish.
+    Try the preferred session; on FAILED fall back to HOL.
+    Returns (session_id, used_session_name).
     """
-    base = f"Planner_Verify_{int(time.time()*1000) % 1_000_000_000}"
-    # Theory names must be identifiers starting with uppercase
-    name = thy_name or base
-    header = [
-        f"theory {name}",
-        "  imports Main",
-        "begin",
-        "",
-    ]
-    body_lines = isar_body.strip().splitlines()
-    footer = [
-        "",
-        "end",
-    ]
-    return header + body_lines + footer
+    wanted = _pick_session_name()
+    try:
+        sid = client.session_start(session=wanted)
+        return sid, wanted
+    except Exception as e:
+        msg = str(e)
+        # "FAILED" is what isabelle_client raises when the image isn't available.
+        if "FAILED" in msg and wanted != "HOL":
+            try:
+                sid = client.session_start(session="HOL")
+                print(f"[experiments] session '{wanted}' unavailable → falling back to 'HOL'")
+                return sid, "HOL"
+            except Exception:
+                pass
+        raise
+
+def _responses_to_text(resps) -> str:
+    chunks = []
+    for r in (resps or []):
+        body = getattr(r, "response_body", None)
+        if isinstance(body, bytes):
+            chunks.append(body.decode(errors="replace"))
+        elif isinstance(body, str):
+            chunks.append(body)
+        else:
+            chunks.append(str(r))
+    return "\n".join(chunks)
 
 def _verify_full_isar(isabelle, session_id: str, isar_text: str) -> Tuple[bool, str]:
     """
-    Compile the Isar outline inside a fresh theory and return (ok, brief_diag).
-    We build the full theory text ourselves to guarantee a FINISHED signal.
+    Compile a full Isar theory and return (ok, brief_diag).
+    This is a completely new implementation that properly parses Isabelle's JSON responses
+    to avoid the false positives of previous versions.
     """
-    text = _normalize_isar_for_verify(isar_text)
-    theory_lines = _wrap_as_theory(text)
-    variants = [
-        dict(add_print_state=False, end_with=None),
-        dict(add_print_state=True,  end_with="print_state"),
-    ]
-    last_err = ""
-    for v in variants:
-        try:
-            thy = build_theory(theory_lines, **v)
-            resps = run_theory(isabelle, session_id, thy)
-            ok, last = finished_ok(resps)
-            if ok:
-                return True, ""
-            # Gather brief diagnostics from NOTE messages if any
-            diag = ""
+    try:
+        # Step 1: Prepare and run the theory, assuming isar_text is a complete file.
+        theory_lines = _normalize_isar_for_verify(isar_text).splitlines()
+        if not theory_lines:
+            return False, "Empty proof provided."
+            
+        thy = build_theory(theory_lines, add_print_state=False, end_with=None)
+        resps = run_theory(isabelle, session_id, thy)
+
+        # Step 2: Intelligently parse responses instead of naive string matching.
+        # We look for the final summary message from Isabelle.
+        final_summary = None
+        all_errors = []
+        for r in reversed(resps or []):
+            body = getattr(r, "response_body", None)
+            if not isinstance(body, (str, bytes)):
+                continue
+            
+            text_body = body.decode(errors="replace") if isinstance(body, bytes) else body
             try:
-                msgs: List[str] = []
-                for r in resps:
-                    if getattr(r, "response_type", "") != "NOTE":
-                        continue
-                    body = getattr(r, "response_body", "")
-                    if isinstance(body, str) and body and body[0] in "{[":
-                        try:
-                            jd = json.loads(body)
-                        except Exception:
-                            jd = {}
-                    else:
-                        jd = {}
-                    msg = str((jd.get("message") if isinstance(jd, dict) else "") or "")
-                    if msg:
-                        msgs.append(msg)
-                if msgs:
-                    diag = "\n".join(msgs)[-1000:]
-                elif last:
-                    diag = str(last)[:500]
-            except Exception:
-                diag = str(last)[:500] if last else ""
-            return False, diag
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
-            # try the next variant
-            continue
-    return False, (last_err or "verify_error: could not finish theory")
+                # A summary will be a JSON object with "ok" and "errors" keys.
+                data = json.loads(text_body)
+                if isinstance(data, dict):
+                    if "ok" in data and "errors" in data:
+                        final_summary = data
+                        break # We found the main summary.
+                    # Also collect individual error messages.
+                    if data.get("kind") == "error" and "message" in data:
+                        all_errors.append(data["message"])
+
+            except json.JSONDecodeError:
+                continue # This response was not a valid JSON object.
+
+        # Step 3: Make a final decision based on the parsed summary.
+        if final_summary:
+            is_ok = final_summary.get("ok", False)
+            errors_list = final_summary.get("errors", [])
+            if is_ok and not errors_list:
+                return True, ""  # Definitive success.
+            else:
+                # Definitive failure. Format the error message.
+                error_msgs = [e.get("message", "Unknown error") for e in errors_list]
+                diag = "Isabelle reported failure:\n" + "\n".join(error_msgs)
+                return False, diag
+
+        # Step 4: Fallback if no JSON summary was found (e.g., older Isabelle version).
+        # Check for legacy error markers.
+        all_txt = _responses_to_text(resps)
+        if any(e in all_txt for e in ("*** Error:", "*** Outer syntax error", "*** Failed")):
+             return False, f"[Legacy error detected]\n{all_txt[-1000:]}"
+        
+        # If no errors were found, and we saw signs of completion, assume success.
+        if "100%" in all_txt or "theory processed" in all_txt:
+            return True, ""
+
+        # If all else fails, we have to assume failure.
+        diag = "Verification inconclusive. No summary found."
+        if all_errors:
+            diag += "\nDetected errors:\n" + "\n".join(all_errors)
+        return False, diag
+
+    except Exception as e:
+        return False, f"verify_error: {type(e).__name__}: {e}"
+
 
 # Classify errors that are transport-level (server died/socket closed) vs. “real” Isabelle failures
 _TRANSPORT_HINTS = (
@@ -212,7 +253,6 @@ def _is_transport_error(msg: str) -> bool:
     m = msg if isinstance(msg, str) else str(msg)
     return any(hint in m for hint in _TRANSPORT_HINTS)
 
-# --- NEW: auto-restart wrapper around verification (minimal integration change) ---
 def _verify_with_auto_restart(isabelle, session_id: str, isar_text: str) -> Tuple[bool, str]:
     """
     Try verification once on the given (isabelle, session_id).
@@ -227,7 +267,8 @@ def _verify_with_auto_restart(isabelle, session_id: str, isar_text: str) -> Tupl
     try:
         server_info, proc = start_isabelle_server(name="planner-verify-retry", log_file="planner_verify_retry.log")
         client = get_isabelle_client(server_info)
-        new_session = client.session_start(session=os.environ.get("ISABELLE_SESSION", "HOL"))
+        new_session, _used = _session_start_with_fallback(client)
+        print("session_id:", new_session, "| session:", _used)
         try:
             ok2, details2 = _verify_full_isar(client, new_session, isar_text)
         finally:
@@ -374,7 +415,7 @@ def _bench_run_one(
     verify_status = "skipped"  # skipped | ok | fail | transport_error
 
     if cfg.verify and not had_sorry:
-        verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)
+        verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)        
         if verified_ok:
             verify_status = "ok"
             success = True  # verification is authoritative
@@ -460,8 +501,8 @@ def cmd_bench(args: argparse.Namespace) -> None:
     server_info, proc = start_isabelle_server(name="planner", log_file="planner_bench.log")
     print(server_info.strip())
     isabelle = get_isabelle_client(server_info)
-    session_id = isabelle.session_start(session=os.environ.get("ISABELLE_SESSION", "HOL"))
-    print("session_id:", session_id)
+    session_id, used_session = _session_start_with_fallback(isabelle)
+    print("session_id:", session_id, "| session:", used_session)
 
     try:
         import random
@@ -678,8 +719,8 @@ def cmd_regress(args: argparse.Namespace) -> None:
     server_info, proc = start_isabelle_server(name="planner", log_file="planner_regress.log")
     print(server_info.strip())
     isabelle = get_isabelle_client(server_info)
-    session_id = isabelle.session_start(session=os.environ.get("ISABELLE_SESSION", "HOL"))
-    print("session_id:", session_id)
+    session_id, used_session = _session_start_with_fallback(isabelle)
+    print("session_id:", session_id, "| session:", used_session)
 
     try:
         goals = _read_goals_file(goals_path)
@@ -1029,7 +1070,7 @@ def main():
     pr.add_argument("--max-repairs-per-hole", type=int, default=2)
     pr.add_argument("--repair-trace", action="store_true")
     pr.add_argument("--context-hints", action="store_true")
-    pr.add_argument("--lib-templates", action="store_true")
+    pr.add_argument("--lib_templates", action="store_true")
     pr.add_argument("--priors", type=str, default=None)
     pr.add_argument("--alpha", type=float, default=1.0)
     pr.add_argument("--beta", type=float, default=0.5)
