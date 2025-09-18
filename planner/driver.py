@@ -178,6 +178,11 @@ def plan_outline(
     finally:
         try:
             isa.shutdown()
+            try:
+                from planner.experiments import _close_client_loop_safely  # reuse helper
+                _close_client_loop_safely(isa)
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -328,6 +333,11 @@ def plan_and_fill(
         # Robust shutdown across subprocess.Popen vs asyncio.subprocess.Process
         try:
             isa.shutdown()
+            try:
+                from planner.experiments import _close_client_loop_safely  # reuse helper
+                _close_client_loop_safely(isa)
+            except Exception:
+                pass
         except Exception:
             pass
         try:

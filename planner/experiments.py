@@ -29,6 +29,8 @@ import traceback
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio, atexit, gc
+from asyncio.base_subprocess import BaseSubprocessTransport as _BST
 
 # Planner + Isabelle
 from planner.driver import plan_and_fill
@@ -40,6 +42,51 @@ from prover.isabelle_api import (
     run_theory,
     finished_ok,
 )
+
+def _drain_and_close_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    if not loop or loop.is_closed():
+        return
+    try:
+        # cancel pending tasks so transports can close while loop is alive
+        tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for t in tasks: t.cancel()
+        if tasks:
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        # drain async generators
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        pass
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+
+def _close_client_loop_safely(client) -> None:
+    loop = getattr(client, "loop", None) or getattr(client, "_loop", None)
+    # Force GC first so transports’ __del__ run while loop is still alive
+    gc.collect()
+    _drain_and_close_loop(loop)
+
+# last-ditch guard for interpreter teardown (silences only the closed-loop case)
+_orig_del = _BST.__del__
+def _quiet_bst_del(self, *a, **kw):
+    try:
+        _orig_del(self, *a, **kw)
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            return
+        raise
+_BST.__del__ = _quiet_bst_del
+
+@atexit.register
+def _planner_atexit_drain():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    # Drain/close any still-open default loop at process exit
+    _drain_and_close_loop(loop)
 
 # ---------- Common paths ----------
 BENCH_DIR = Path("datasets")
@@ -274,6 +321,9 @@ def _verify_with_auto_restart(isabelle, session_id: str, isar_text: str) -> Tupl
         finally:
             try:
                 client.shutdown()
+                try: _close_client_loop_safely(client)
+                except Exception: pass
+
             except Exception:
                 pass
             try:
@@ -604,6 +654,8 @@ def cmd_bench(args: argparse.Namespace) -> None:
     finally:
         try:
             isabelle.shutdown()
+            try: _close_client_loop_safely(isabelle)
+            except Exception: pass
         except Exception:
             pass
         try:
@@ -912,6 +964,8 @@ def cmd_regress(args: argparse.Namespace) -> None:
     finally:
         try:
             isabelle.shutdown()
+            try: _close_client_loop_safely(isabelle)
+            except Exception: pass
         except Exception:
             pass
         try:
