@@ -179,25 +179,49 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         if use_sledge and depth % max(1, sledge_every) == 0 and beam:
             try:
                 sledge_sugs = sledgehammer_finishers(isabelle, session_id, beam[0][1], timeout_s=sledge_timeout, limit=5)
-                if trace and sledge_sugs:
-                    print(color(use_color, "yellow", f"Sledgehammer finishers: {sledge_sugs}"))
+                if trace:
+                    if sledge_sugs:
+                        print(color(use_color, "yellow", f"Sledgehammer finishers: {sledge_sugs}"))
+                    else:
+                        print(color(use_color, "yellow", "Sledgehammer yielded no finishers at this depth"))
             except Exception as e:
                 if trace: print(color(use_color, "yellow", f" Sledgehammer error ignored: {e}"))
+        elif trace and use_sledge:
+            why = []
+            if not beam: why.append("no beam")
+            if sledge_every > 1 and (depth % sledge_every) != 0: why.append(f"depth {depth} not multiple of sledge_every={sledge_every}")
+            if not why: why.append("unknown condition")
+            print(color(use_color, "yellow", f"Sledgehammer skipped ({', '.join(why)})"))                
 
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
             mined = mine_lemmas_from_state(isabelle, session_id, state_hint, max_lemmas=hint_lemmas) if state_hint else []
             finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas,
                                               facts=facts_for_depth, temp=finish_temp, reranker=reranker)
-            finishers = (sledge_sugs + finishers_llm) if (j == 0 and sledge_sugs) else finishers_llm
-            for fin in finishers:
+
+            # Build finishers with explicit origin tags so we can print who proposed what.
+            finishers_with_origin: List[Tuple[str, str]] = []
+            # sledge proposals get priority (only for the first beam entry as before)
+            if j == 0 and sledge_sugs:
+                for s in sledge_sugs:
+                    if s not in [f for f, _ in finishers_with_origin]:
+                        finishers_with_origin.append((s, "sledge"))
+            # LLm finishers (only add if not already present)
+            for f in finishers_llm:
+                if f not in [ff for ff, _ in finishers_with_origin]:
+                    finishers_with_origin.append((f, "llm"))
+
+            if trace and finishers_with_origin:
+                pretty = ", ".join([f"{o}:{fin}" for fin, o in finishers_with_origin])
+                print(color(use_color, "blue", f"Finishers (origin): [{pretty}]"))
+
+            for fin, origin in finishers_with_origin:
                 if time_left_s() <= 0: break
                 ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin)
-                origin = "sledge" if (j == 0 and sledge_sugs and fin in sledge_sugs) else "llm"
                 logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached, extra={"origin": origin})
                 if trace:
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
-                    print(f"  finish {tag} {fin}  ({round(elapsed_ms)}ms)")
+                    print(f"  finish {tag} [{origin}] {fin}  ({round(elapsed_ms)}ms)")
                 if ok:
                     final = steps + [fin]
                     if do_minimize:
@@ -225,40 +249,53 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                             "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
 
         # ---- Expand ----
+        # ---- Expand ----
         for _, steps, state_hint, prev_n in beam:
             if time_left_s() <= 0: break
             extra_cands = variant_step_templates(state_hint) if variant_burst else []
-            cands = extra_cands + propose_steps(model_list, goal, steps, state_hint,
-                                               facts=facts_for_depth, reranker=reranker,
-                                               depth=depth, temp=steps_temp)
-            seen_c, dedup_c = set(), []
-            for c in cands:
+            llm_cands = propose_steps(model_list, goal, steps, state_hint,
+                                      facts=facts_for_depth, reranker=reranker,
+                                      depth=depth, temp=steps_temp)
+
+            # Build list of (cand, origin) where origin in {"variant","llm"}
+            cands_with_origin: List[Tuple[str, str]] = []
+            for c in extra_cands:
+                cands_with_origin.append((c, "variant"))
+            for c in llm_cands:
+                cands_with_origin.append((c, "llm"))
+
+            # Deduplicate preserving first-seen origin (so variant wins if first)
+            seen_c, dedup_pairs = set(), []
+            for c, origin in cands_with_origin:
                 if c not in seen_c:
-                    seen_c.add(c); dedup_c.append(c)
-            cands = dedup_c
-            if trace: print(color(use_color, "blue", f"Proposals: {cands}"))
-            if not cands: continue
+                    seen_c.add(c)
+                    dedup_pairs.append((c, origin))
+            if trace:
+                pretty = ", ".join([f"{o}:{c}" for c, o in dedup_pairs])
+                print(color(use_color, "blue", f"Proposals (origin): [{pretty}]"))
+            if not dedup_pairs: continue
+
             state_fp_before = state_fingerprint(state_hint or "")
             pid_seed = f"{logger.run_id}|d={depth_reached}|{state_fp_before}|{len(steps)}|{steps[-2:] if steps else ''}"
             proposal_id = hashlib.sha1(pid_seed.encode('utf-8')).hexdigest()[:12]
             best_local: List[Tuple[int, List[str], str, Optional[int]]] = []
             _flags = flags_from_goal(goal, state_hint or "")
             _should_boolean_precheck = bool(_flags.get("has_q", 0) or _flags.get("is_bool", 0))
-            for k, c in enumerate(cands):
+            for k, (c, origin) in enumerate(dedup_pairs):
                 if time_left_s() <= 0: break
                 pruned = False
                 if use_qc and _should_boolean_precheck and depth % max(1, qc_every) == 0:
                     try:
                         if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=qc_timeout):
                             pruned = True
-                            if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by quickcheck]"))
+                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by quickcheck]"))
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {e}"))
                 if not pruned and use_np and _should_boolean_precheck and depth % max(1, np_every) == 0:
                     try:
                         if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=np_timeout):
                             pruned = True
-                            if trace: print(color(use_color, "dim", f"  step  ·  {c}  [pruned by nitpick]"))
+                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by nitpick]"))
                     except Exception as e:
                         if trace: print(color(use_color, "yellow", f"  nitpick error ignored: {e}"))
                 if pruned:
@@ -267,7 +304,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                         subgoals_before=prev_n,
                         extra={"proposal_id": proposal_id, "proposal_k": int(k),
                                "state_fp_before": state_fp_before,
-                               "origin": ("variant" if c in extra_cands else "llm")}
+                               "origin": origin}
                     )
                     continue
                 ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(isabelle, session_id, steps, c)
@@ -279,14 +316,14 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                         "proposal_k": int(k),
                         "state_fp_before": state_fp_before,
                         "state_fp_after": state_fingerprint(hint or "") if ok else None,
-                        "origin": ("variant" if c in extra_cands else "llm"),
+                        "origin": origin,
                     }
                 )
                 if trace:
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
                     extra = f" n_sub={n_sub}" if n_sub is not None else ""
                     cache = color(use_color, "dim", " [cache]") if cache_hit else ""
-                    print(f"  step  {tag} {c}{extra} ({round(elapsed_ms)}ms){cache}")
+                    print(f"  step  {tag} [{origin}] {c}{extra} ({round(elapsed_ms)}ms){cache}")
                 if not ok: continue
                 score = n_sub if n_sub is not None else 9999
                 best_local.append((score, steps + [c], hint, n_sub))

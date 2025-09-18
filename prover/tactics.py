@@ -58,17 +58,19 @@ def _decode_body(obj: object) -> Optional[dict]:
     return None
 
 def _iter_note_messages(responses) -> Iterable[str]:
-    """Yield NOTE messages as plain strings across client variants."""
+    """Yield Sledge/Find/etc. messages; accept NOTE/WRITELN/INFORMATION/TRACING."""
     for r in (responses or []):
-        if _normalize_response_type(getattr(r, "response_type", None)) != "NOTE":
+        typ = _normalize_response_type(getattr(r, "response_type", None))
+        if typ not in ("NOTE", "WRITELN", "INFORMATION", "TRACING"):
             continue
         body = _decode_body(getattr(r, "response_body", None))
-        if not isinstance(body, dict):
-            continue
-        msg = body.get("message")
-        if msg is None:
-            continue
-        yield str(msg)
+        if isinstance(body, dict):
+            msg = body.get("message") or body.get("text") or body.get("content")
+            if msg is not None:
+                yield str(msg)
+        elif isinstance(body, str):
+            # Some clients may return a plain string
+            yield body
 
 # --- Variant step templates (tiny helper) ---
 VAR_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9_']*)\b")
@@ -134,47 +136,119 @@ def precheck_nitpick_refutes(isabelle, session_id: str, steps_with_candidate: Li
 # =============================================================================
 # Sledgehammer finishers
 # =============================================================================
-_SLEDGE_BY = re.compile(r"(?i)(?:try this:\s*)?(by\s+\([^)]+\)|by\s+\w+(?:\s+.+)?)")
-_SLEDGE_METIS_LINE = re.compile(r"(?i)^metis\b.*?:\s*(.*)$")
+import re
+from typing import List
+
+# More comprehensive regex patterns for Sledgehammer output
+_SLEDGE_BY = re.compile(r"(?i)(?:try this:\s*)?(by\s+\([^)]+\)|by\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
+_SLEDGE_APPLY = re.compile(r"(?i)(?:try this:\s*)?(apply\s+\([^)]+\)|apply\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
+_SLEDGE_METIS_LINE = re.compile(r"(?i)^.*?metis\b.*?:\s*(.*)$", re.MULTILINE)
+_SLEDGE_SIMP_LINE = re.compile(r"(?i)(?:try this:\s*)?(simp(?:\s+add:\s*[^)\n]*)?)", re.MULTILINE)
+_SLEDGE_AUTO_LINE = re.compile(r"(?i)(?:try this:\s*)?(auto(?:\s+[^)\n]*)?)", re.MULTILINE)
+# Strip timing tails like " (0.6 ms" / " (1 ms)" / " (2.3 s)" at line end (closing ')' optional)
+_TIMING_TAIL = re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)?\s*$", re.IGNORECASE)
+_TRY_THIS = re.compile(r"(?i)^\s*try this:\s*")
+
+def _normalize_finisher_text(s: str) -> str:
+    # Remove "Try this:" prefix
+    s = _TRY_THIS.sub("", s or "")
+    # Remove trailing timing annotation; safe because real tactic args are "(letter...)" not "(number...)"
+    s = _TIMING_TAIL.sub("", s)
+    # Trim trailing punctuation and normalize whitespace
+    s = s.strip().rstrip(",;")
+    s = " ".join(s.split())
+    return s
 
 def _extract_sledge_by_lines(text: str) -> List[str]:
     out: List[str] = []
-    for line in text.splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        m = _SLEDGE_BY.search(s)
-        if m:
-            out.append(re.sub(r"\s+", " ", m.group(1).strip()))
-            continue
-        m2 = _SLEDGE_METIS_LINE.match(s)
-        if m2:
-            facts = m2.group(1).strip()
-            out.append(f"by (metis {facts})" if facts else "by (metis)")
-    # de-dup in-order
-    seen, dedup = set(), []
-    for c in out:
-        if c not in seen:
-            seen.add(c); dedup.append(c)
-    return dedup
+
+    # "by ..." lines
+    for match in _SLEDGE_BY.finditer(text):
+        suggestion = _normalize_finisher_text(match.group(1))
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # "apply ..." lines
+    for match in _SLEDGE_APPLY.finditer(text):
+        suggestion = _normalize_finisher_text(match.group(1))
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # metis facts → "by (metis ...)"
+    for match in _SLEDGE_METIS_LINE.finditer(text):
+        facts = match.group(1).strip() if match.lastindex and match.lastindex >= 1 else ""
+        suggestion = _normalize_finisher_text(f"by (metis {facts})" if facts else "by (metis)")
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # simp/auto one-liners → "by simp"/"by auto"
+    for match in _SLEDGE_SIMP_LINE.finditer(text):
+        suggestion = _normalize_finisher_text(f"by {match.group(1).strip()}")
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    for match in _SLEDGE_AUTO_LINE.finditer(text):
+        suggestion = _normalize_finisher_text(f"by {match.group(1).strip()}")
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # Heuristic sweep for common finishers (kept, but normalized)
+    simple_finishers = ["by simp", "by auto", "by blast", "by force", "by fastforce"]
+    for line in text.split('\n'):
+        line_lower = line.lower().strip()
+        if any(word in line_lower for word in ["simp", "auto", "blast", "force", "fastforce"]):
+            for fin in simple_finishers:
+                if fin.split()[1] in line_lower and fin not in out:
+                    out.append(fin)
+                    break
+
+    return out
 
 def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_s: int = 5, limit: int = 5) -> List[str]:
+    """Get sledgehammer finisher suggestions."""
+    from .isabelle_api import build_theory, run_theory
+    
     sh_cmd = f"sledgehammer [timeout = {int(timeout_s)}]"
     thy = build_theory(steps + [sh_cmd], add_print_state=False, end_with="sorry")
-    texts: List[str] = []
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
-        if any(k in msg for k in ("Try this:", "by ", "metis", "Metis")):
-            texts.append(msg)
-    cands: List[str] = []
-    for t in texts:
-        cands.extend(_extract_sledge_by_lines(t))
-    out, seen = [], set()
+    
+    # Collect all response text, not just specific message types
+    all_text = ""
+    responses = run_theory(isabelle, session_id, thy)
+    
+    for r in (responses or []):
+        # Get response body regardless of type
+        body = getattr(r, "response_body", None)
+        if body is not None:
+            if isinstance(body, dict):
+                msg = body.get("message") or body.get("text") or body.get("content") or ""
+            elif isinstance(body, (bytes, bytearray)):
+                try:
+                    msg = body.decode("utf-8", "replace")
+                except:
+                    msg = str(body)
+            else:
+                msg = str(body)
+            all_text += msg + "\n"
+    
+    # Also try to get any note messages using the existing helper
+    from .tactics import _iter_note_messages
+    for msg in _iter_note_messages(responses):
+        all_text += msg + "\n"
+    
+    # Extract suggestions
+    cands = _extract_sledge_by_lines(all_text)
+    
+    # Filter and return valid finishers
+    out = []
+    seen = set()
     for c in cands:
-        if c.startswith("by ") or c == "done":
-            if c not in seen:
-                seen.add(c); out.append(c)
-                if len(out) >= limit:
-                    break
+        clean = c.strip()
+        if clean and (clean.startswith("by ") or clean == "done") and clean not in seen:
+            seen.add(clean)
+            out.append(clean)
+            if len(out) >= limit:
+                break
+    
     return out
 
 # =============================================================================
