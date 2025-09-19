@@ -5,7 +5,7 @@ import json
 import shutil
 import subprocess
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 import requests
 
@@ -267,6 +267,8 @@ def propose_steps(
     depth: int = 0,
     *,
     temp: float | None = None,
+    premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
+    premise_pool: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     user = USER_TEMPLATE.format(
         goal=goal,
@@ -302,7 +304,22 @@ def propose_steps(
                 merged.insert(0, f"apply (simp only: {s}_def)")
                 merged.insert(0, f"apply (simp add: {s}_def)")
         merged = augment_with_facts_for_steps(merged, facts)
-    return rank_candidates(merged, goal, state_hint, facts, reranker=reranker, depth=depth)
+    # Build 5-float pool tail for the reranker:
+    # [premise_cosine_top1, premise_cosine_topk_mean, premise_rerank_top1, premise_rerank_topk_mean, n_premises]
+    if premise_pool:
+        premise_tail = [
+            float(premise_pool.get("premise_cosine_top1", 0.0)),
+            float(premise_pool.get("premise_cosine_topk_mean", 0.0)),
+            float(premise_pool.get("premise_rerank_top1", 0.0)),
+            float(premise_pool.get("premise_rerank_topk_mean", 0.0)),
+            float(premise_pool.get("n_premises", 0.0)),
+        ]
+    else:
+        # fallback: keep zeros except for the available facts count
+        premise_tail = [0.0, 0.0, 0.0, 0.0, float(len(facts) if facts else 0.0)]
+    return rank_candidates(merged, goal, state_hint, facts,
+                           reranker=reranker, depth=depth,
+                           extra_tail=premise_tail, premise_scores=premise_scores)
 
 def propose_finishers(
     models: List[str],
@@ -315,6 +332,8 @@ def propose_finishers(
     *,
     temp: float | None = None,
     reranker=None,
+    premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
+    premise_pool: Optional[Dict[str, float]] = None,    
 ) -> List[str]:
     user = USER_TEMPLATE.format(
         goal=goal,
@@ -335,7 +354,11 @@ def propose_finishers(
         "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"
     ]
 
-    from .heuristics import suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers, live_features_for
+    from .heuristics import (
+        suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers,
+        live_features_for, extract_candidate_facts
+    )
+    from .premises import cand_features
     static_hints = suggest_common_lemmas(state_hint)
     dyn_hints = mined_lemmas[:max(0, hint_lemmas_limit)]
     lemma_finishers = mk_finisher_variants(static_hints + dyn_hints)
@@ -361,9 +384,47 @@ def propose_finishers(
     # Optional learned reranking
     if reranker and getattr(reranker, "available", lambda: False)():
         base_pos = {c: i for i, c in enumerate(ranked)}
+        # Build the same 5-float pool tail we use for step ranking
+        if premise_pool:
+            premise_tail = [
+                float(premise_pool.get("premise_cosine_top1", 0.0)),
+                float(premise_pool.get("premise_cosine_topk_mean", 0.0)),
+                float(premise_pool.get("premise_rerank_top1", 0.0)),
+                float(premise_pool.get("premise_rerank_topk_mean", 0.0)),
+                float(premise_pool.get("n_premises", 0.0)),
+            ]
+        else:
+            premise_tail = [0.0, 0.0, 0.0, 0.0, float(len(facts) if facts else 0.0)]        
         def rscore(cmd: str) -> float:
             try:
-                return float(reranker.score(live_features_for(cmd, goal, state_hint, depth=0)))
+                feats = live_features_for(cmd, goal, state_hint, depth=0)
+                # per-candidate tail from extracted facts
+                cand_tail_vals: List[float] = []
+                if premise_scores:
+                    cf = cand_features(extract_candidate_facts(cmd), premise_scores)
+                    cand_tail_vals = [
+                        cf.get("cand_cos_mean", 0.0),
+                        cf.get("cand_cos_max", 0.0),
+                        cf.get("cand_rerank_mean", 0.0),
+                        cf.get("cand_hit_topk", 0.0),
+                        cf.get("cand_n_facts", 0.0),
+                    ]
+                # align to expected_dim if present
+                exp = None
+                try:
+                    ed = getattr(reranker, "expected_dim", None)
+                    exp = ed() if callable(ed) else ed
+                except Exception:
+                    exp = None
+                if isinstance(exp, int) and exp > 0:
+                    full_tail = premise_tail + cand_tail_vals
+                    if len(feats) < exp:
+                        need = exp - len(feats)
+                        tail = full_tail[:need] + [0.0] * max(0, need - len(full_tail))
+                        feats = list(feats) + tail
+                    elif len(feats) > exp:
+                        feats = list(feats[:exp])
+                return float(reranker.score(feats))
             except Exception:
                 return 0.5
         ranked = sorted(ranked, key=lambda c: (-rscore(c), base_pos[c]))

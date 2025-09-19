@@ -111,4 +111,19 @@ def make_dataset(attempts_paths: List[str]) -> Tuple[List[List[float]], List[int
 
 def feature_names() -> List[str]:
     base = ["depth","n_sub","elapsed_ms","cache_hit","is_listy","is_natty","is_sety","has_q","is_bool"]
-    return base + [f"step::{t}" for t in STEP_TYPES] + ["len_cmd"]
+    names = base + [f"step::{t}" for t in STEP_TYPES] + ["len_cmd"]
+    # Appended at tail for backward compatibility:
+    names += [
+        "premise_cosine_top1",
+        "premise_cosine_topk_mean",
+        "premise_rerank_top1",
+        "premise_rerank_topk_mean",
+        "n_premises",
+        # --- NEW per-candidate summary tail ---
+        "cand_cos_mean",
+        "cand_cos_max",
+        "cand_rerank_mean",
+        "cand_hit_topk",
+        "cand_n_facts",        
+    ]
+    return names

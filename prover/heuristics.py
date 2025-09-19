@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 from .features import STEP_TYPES
+from .premises import cand_features
 
 # Reranker controls (kept identical)
 _RR_W = float(os.environ.get("RERANKER_WEIGHT", "0.5"))
@@ -71,6 +72,33 @@ def suggest_common_lemmas(state_hint: str) -> List[str]:
 def mk_finisher_variants(lemmas: List[str]) -> List[str]:
     return [f"by (simp add: {l})" for l in lemmas] + [f"by (metis {l})" for l in lemmas]
 
+# NEW: conservative extractor for lemma names in a single command
+# include dots so tokens like List.append_assoc remain intact
+_TOK = re.compile(r"[A-Za-z0-9_'.]+")
+def extract_candidate_facts(cmd: str) -> List[str]:
+    """
+    Pull likely lemma names after markers: add:, simp:, only:, metis, rule, intro, elim, erule, subst.
+    Returns unique order-preserving list.
+    """
+    s = cmd or ""
+    spans = []
+    for key in ("add:", "simp:", "only:", "metis", "rule", "intro", "elim", "erule", "subst"):
+        for m in re.finditer(rf"{re.escape(key)}\s+", s):
+            spans.append(m.end())
+    names: List[str] = []
+    seen = set()
+    for st in spans:
+        chunk = s[st:]
+        # stop at closing paren or end-of-string
+        stop = chunk.find(")")
+        if stop >= 0:
+            chunk = chunk[:stop]
+        toks = _TOK.findall(chunk)
+        for t in toks:
+            if t not in seen:
+                seen.add(t); names.append(t)
+    return names[:24]
+
 def _heuristic_score(cmd: str, goal: str, state: str, facts: Optional[List[str]] = None) -> float:
     g = (goal + " " + state).lower()
     score = 0.0
@@ -108,7 +136,9 @@ def rank_candidates(
     state_hint: str,
     facts: Optional[List[str]] = None,
     reranker=None,
-    depth: int = 0
+    depth: int = 0,
+    extra_tail: Optional[List[float]] = None,
+    premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> List[str]:
     # 1) Heuristic-only base (keep gentle length penalty)
     base = []
@@ -131,6 +161,32 @@ def rank_candidates(
         if rank < M:
             try:
                 feats = live_features_for(c, goal, state_hint, depth)
+                # If the model expects a longer vector, append tail (pool + per-candidate).
+                # Robustly obtain expected dimension (method or attr).
+                exp = None
+                try:
+                    ed = getattr(reranker, "expected_dim", None)
+                    exp = ed() if callable(ed) else ed
+                except Exception:
+                    exp = None
+                cand_tail_vals = []
+                if premise_scores:
+                    cf = cand_features(extract_candidate_facts(c), premise_scores)
+                    cand_tail_vals = [
+                        cf.get("cand_cos_mean", 0.0),
+                        cf.get("cand_cos_max", 0.0),
+                        cf.get("cand_rerank_mean", 0.0),
+                        cf.get("cand_hit_topk", 0.0),
+                        cf.get("cand_n_facts", 0.0),
+                    ]
+                if isinstance(exp, int) and exp > 0:
+                    full_tail = (extra_tail or []) + cand_tail_vals
+                    if len(feats) < exp:
+                        need = exp - len(feats)
+                        tail = full_tail[:need] + [0.0] * max(0, need - len(full_tail))
+                        feats = list(feats) + tail
+                    elif len(feats) > exp:
+                        feats = list(feats[:exp])                
                 p = float(reranker.score(feats))  # 0..1
                 s_adj += -_RR_W * p               # subtract so higher p ranks earlier
             except Exception:

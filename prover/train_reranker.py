@@ -125,9 +125,23 @@ def _row_from_attempt(rec: dict) -> List[float]:
     flags = _flags_from(goal, state_proxy)
     step_t = _step_prefix(cand)
     step_one_hot = [1 if step_t == t else 0 for t in STEP_TYPES]
-    return [depth, n_sub, elapsed, cache_hit,
-            flags["is_listy"], flags["is_natty"], flags["is_sety"], flags["has_q"], flags["is_bool"]] \
-           + step_one_hot + [len(cand)]
+    feats = [depth, n_sub, elapsed, cache_hit,
+             flags["is_listy"], flags["is_natty"], flags["is_sety"], flags["has_q"], flags["is_bool"]] \
+            + step_one_hot + [len(cand)]
+    # Premise-selection tail (appended at end; defaults to zeros if absent in logs)
+    feats += [
+        float(rec.get("premise_cosine_top1", 0.0) or 0.0),
+        float(rec.get("premise_cosine_topk_mean", 0.0) or 0.0),
+        float(rec.get("premise_rerank_top1", 0.0) or 0.0),
+        float(rec.get("premise_rerank_topk_mean", 0.0) or 0.0),
+        float(rec.get("n_premises", 0.0) or 0.0),
+        float(rec.get("cand_cos_mean", 0.0) or 0.0),
+        float(rec.get("cand_cos_max", 0.0) or 0.0),
+        float(rec.get("cand_rerank_mean", 0.0) or 0.0),
+        float(rec.get("cand_hit_topk", 0.0) or 0.0),
+        float(rec.get("cand_n_facts", 0.0) or 0.0),        
+    ]
+    return feats
 
 
 def _runs_success(paths: Iterable[Path]) -> Dict[str, int]:
@@ -159,7 +173,7 @@ def _make_bandit(attempts: List[str], runs: Optional[List[str]]) -> Tuple[List[L
     X: List[List[float]] = []; y: List[int] = []
     succ = _runs_success([Path(p) for p in (runs or [])]) if runs else {}
     for rec in _iter_jsonl([Path(p) for p in attempts]):
-        if rec.get("type") not in ("expand", "expand_macro"):
+        if rec.get("type") not in ("expand", "expand_macro", "finish"):
             continue
         rid = rec.get("run_id")
         label = succ.get(rid, 1 if rec.get("ok") else 0)
@@ -565,7 +579,13 @@ def main(argv=None) -> int:
             )
             reg.fit(X, y); dump(_RLQXGBWrapper(reg), out_path); print(f"[ok] RL-XGB regressor on {n} rows → {out_path}")
 
-        _write_pointer(out_path, "latest.joblib", meta={"path": out_path.name, "algo": args.algo, "target": args.target, "rows": n})
+        # also expose feature schema in latest.json for downstream consumers
+        try:
+            feat_schema = feature_names()
+        except Exception:
+            feat_schema = []
+        _write_pointer(out_path, "latest.joblib",
+                       meta={"path": out_path.name, "algo": args.algo, "target": args.target, "rows": n, "features": feat_schema})
         return 0
 
     # branch: DeepRL (TorchScript)
@@ -708,7 +728,12 @@ def main(argv=None) -> int:
 
     # pointer: latest.pt (for DeepRL branches)
     if args.algo in ("awr","dqn"):
-        _write_pointer(out_path, "latest.pt", meta={"path": out_path.name, "algo": args.algo, "rows": n})
+        try:
+            feat_schema = feature_names()
+        except Exception:
+            feat_schema = []
+        _write_pointer(out_path, "latest.pt",
+                       meta={"path": out_path.name, "algo": args.algo, "rows": n, "features": feat_schema})
 
     return 0
 

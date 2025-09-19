@@ -1,5 +1,5 @@
 # prover/ranker.py
-import os, glob, math
+import os, glob, math, json
 from pathlib import Path
 from typing import List, Optional, Any
 from joblib import load
@@ -36,6 +36,15 @@ class Reranker:
 
     def _try_load(self):
         dirp = Path(CFG_RERANKER_DIR)
+        # try to read expected feature schema (latest.json) if present
+        self._expected_dim = None
+        try:
+            meta = json.loads((dirp / "latest.json").read_text(encoding="utf-8"))
+            feats = meta.get("features")
+            if isinstance(feats, list) and feats:
+                self._expected_dim = int(len(feats))
+        except Exception:
+            pass        
 
         # ---- Prefer TorchScript (.pt/.pth) ----
         pt_candidates = []
@@ -93,10 +102,20 @@ class Reranker:
     def available(self) -> bool:
         return (not self._disabled) and (self.torch_model is not None or self.model is not None)
 
+    def expected_dim(self) -> Optional[int]:
+        return getattr(self, "_expected_dim", None)
+
     def score(self, feat_row: List[float]) -> float:
         if not self.available():
             return 0.5
         try:
+            # If we know expected dimension, pad/trim to match
+            exp = getattr(self, "_expected_dim", None)
+            if isinstance(exp, int) and exp > 0:
+                if len(feat_row) < exp:
+                    feat_row = list(feat_row) + [0.0] * (exp - len(feat_row))
+                elif len(feat_row) > exp:
+                    feat_row = list(feat_row[:exp])            
             if self.torch_model is not None:
                 import torch
                 with torch.no_grad():

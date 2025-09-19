@@ -104,6 +104,17 @@ def _load_from_env() -> Dict[str, Any]:
     # extra imports for the Scratch theory (space-separated)
     d["EXTRA_IMPORTS"] = _split_ws(os.environ.get("EXTRA_IMPORTS", ""))
 
+    # ---------- Premises / Context (optional; default off) ----------
+    # Two-stage premise selection and file-aware context boosts.
+    # Kept disabled by default for full backward compatibility.
+    d["PREMISES_ENABLE"]      = _get("PREMISES_ENABLE", False, _to_bool)
+    d["PREMISES_K_SELECT"]    = _get("PREMISES_K_SELECT", 512, _to_int)
+    d["PREMISES_K_RERANK"]    = _get("PREMISES_K_RERANK", 64, _to_int)
+    d["PROVER_CONTEXT_ENABLE"]= _get("PROVER_CONTEXT_ENABLE", False, _to_bool)
+    d["PROVER_CONTEXT_WINDOW"]= _get("PROVER_CONTEXT_WINDOW", 400, _to_int)
+    # Space-separated list of .thy files to pre-ingest for retrieval/context boosts
+    d["PROVER_CONTEXT_FILES"] = _split_ws(os.environ.get("PROVER_CONTEXT_FILES", ""))
+
     return d
 
 
@@ -136,6 +147,13 @@ class Snapshot:
     ollama_num_predict: int
     num_candidates: int
     isabelle_session: str
+    # new (premises/context)
+    premises_enable: bool
+    premises_k_select: int
+    premises_k_rerank: int
+    prover_context_enable: bool
+    prover_context_window: int
+    prover_context_files: str
 
 def snapshot_dict() -> Dict[str, Any]:
     return asdict(
@@ -158,8 +176,15 @@ def snapshot_dict() -> Dict[str, Any]:
             ollama_top_p=OLLAMA_TOP_P,
             ollama_timeout_s=OLLAMA_TIMEOUT_S,
             ollama_num_predict=OLLAMA_NUM_PREDICT,
-            num_candidates=NUM_CANDIDATES,
+            num_candidates=NUM_CANDIDATES,            
             isabelle_session=ISABELLE_SESSION,
+            # new (premises/context)
+            premises_enable=PREMISES_ENABLE,
+            premises_k_select=PREMISES_K_SELECT,
+            premises_k_rerank=PREMISES_K_RERANK,
+            prover_context_enable=PROVER_CONTEXT_ENABLE,
+            prover_context_window=PROVER_CONTEXT_WINDOW,
+            prover_context_files=" ".join(PROVER_CONTEXT_FILES),
         )
     )
 
@@ -191,6 +216,9 @@ __all__ = [
     "LOG_DIR", "ATTEMPTS_LOG", "RUNS_LOG",
     # Isabelle
     "ISABELLE_SESSION", "EXTRA_IMPORTS",
+    # Premises / Context
+    "PREMISES_ENABLE", "PREMISES_K_SELECT", "PREMISES_K_RERANK",
+    "PROVER_CONTEXT_ENABLE", "PROVER_CONTEXT_WINDOW", "PROVER_CONTEXT_FILES",    
     # Snapshot / utils
     "snapshot_dict", "refresh_from_env",
 ]

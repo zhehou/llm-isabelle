@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import statistics as stats
 import sys
 import time
@@ -33,6 +34,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .prover import prove_goal
+from . import config as CFG
+
+class _StoreSetFlag(argparse.Action):
+    """Like 'store', but also marks that the user explicitly provided this flag."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, f"__set_{self.dest}", True)
 
 # ---------- Common paths ----------
 BENCH_DIR = Path("datasets")
@@ -48,7 +56,7 @@ SUITE_MAP = {
 
 # Precompile once for small speedup on large files
 import re
-_LEMMA_RE = re.compile(r'lemma\\s+"(.+)"', re.IGNORECASE)
+_LEMMA_RE = re.compile(r'lemma\s+"(.+)"', re.IGNORECASE)
 
 # ---------- Shared goal IO ----------
 def _read_goals_file(path: Path) -> List[str]:
@@ -161,6 +169,17 @@ def _bench_write_csv(suite_name: str, cfg_name: str, rows: List[Dict[str, Any]])
     return out
 
 def cmd_bench(args: argparse.Namespace) -> None:
+    # Apply premises/context overrides (CLI > env > defaults)
+    if args.premises:            CFG.PREMISES_ENABLE = True
+    if args.no_premises:         CFG.PREMISES_ENABLE = False
+    if getattr(args, "__set_premises_k_select", False): CFG.PREMISES_K_SELECT = int(args.premises_k_select)
+    if getattr(args, "__set_premises_k_rerank", False): CFG.PREMISES_K_RERANK = int(args.premises_k_rerank)
+    if args.context:             CFG.PROVER_CONTEXT_ENABLE = True
+    if args.no_context:          CFG.PROVER_CONTEXT_ENABLE = False
+    if getattr(args, "__set_context_window", False):    CFG.PROVER_CONTEXT_WINDOW = int(args.context_window)
+    if getattr(args, "__set_context_files", False) and args.context_files:
+        parts = [p for p in re.split(r"[,\s]+", args.context_files.strip()) if p]
+        CFG.PROVER_CONTEXT_FILES = [os.path.expanduser(p) for p in parts]  
     # Resolve suites
     if args.file:
         suites: List[Tuple[str, Path]] = [(Path(args.file).stem, Path(args.file))]
@@ -328,6 +347,18 @@ def _reg_compare(current: Report, baseline_data: Dict[str, Any], *, tol_rate: fl
     return regressed
 
 def cmd_regress(args: argparse.Namespace) -> None:
+    # Apply premises/context overrides (CLI > env > defaults)
+    if args.premises:            CFG.PREMISES_ENABLE = True
+    if args.no_premises:         CFG.PREMISES_ENABLE = False
+    if getattr(args, "__set_premises_k_select", False): CFG.PREMISES_K_SELECT = int(args.premises_k_select)
+    if getattr(args, "__set_premises_k_rerank", False): CFG.PREMISES_K_RERANK = int(args.premises_k_rerank)
+    if args.context:             CFG.PROVER_CONTEXT_ENABLE = True
+    if args.no_context:          CFG.PROVER_CONTEXT_ENABLE = False
+    if getattr(args, "__set_context_window", False):    CFG.PROVER_CONTEXT_WINDOW = int(args.context_window)
+    if getattr(args, "__set_context_files", False) and args.context_files:
+        parts = [p for p in re.split(r"[,\s]+", args.context_files.strip()) if p]
+        CFG.PROVER_CONTEXT_FILES = [os.path.expanduser(p) for p in parts]
+
     if args.file:
         suite_name = Path(args.file).stem
         goals_path = Path(args.file)
@@ -552,7 +583,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
 # CLI
 # =============================================================================
 def main():
-    p = argparse.ArgumentParser(description="Prover experiments (bench | regress | aggregate)")
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pb = sub.add_parser("bench", help="Run suites/files and write CSVs")
@@ -573,6 +604,21 @@ def main():
     pb.add_argument("--models", type=str, default=None)
     pb.add_argument("--shuffle", action="store_true")
     pb.add_argument("--seed", type=int, default=0)
+    # ---- Premises / Context (bench) ----
+    pb.add_argument("--premises", action="store_true", help="Enable premises retrieval.")
+    pb.add_argument("--no-premises", action="store_true", help="Disable premises retrieval.")
+    pb.add_argument("--premises-k-select", type=int, default=CFG.PREMISES_K_SELECT,
+                    action=_StoreSetFlag, help="Top-K for fast SELECT stage.")
+    pb.add_argument("--premises-k-rerank", type=int, default=CFG.PREMISES_K_RERANK,
+                    action=_StoreSetFlag, help="Top-K for RE-RANK stage.")
+    pb.add_argument("--context", action="store_true", help="Enable file-aware context window.")
+    pb.add_argument("--no-context", action="store_true", help="Disable file-aware context window.")
+    pb.add_argument("--context-files", type=str,
+                    default=(" ".join(CFG.PROVER_CONTEXT_FILES) if CFG.PROVER_CONTEXT_FILES else ""),
+                    action=_StoreSetFlag,
+                    help="Space/comma-separated .thy files to seed context.")
+    pb.add_argument("--context-window", type=int, default=CFG.PROVER_CONTEXT_WINDOW,
+                    action=_StoreSetFlag, help="Context window size (implementation-defined).")
     pb.set_defaults(func=cmd_bench)
 
     pr = sub.add_parser("regress", help="Run and compare to baseline")
@@ -599,6 +645,21 @@ def main():
     pr.add_argument("--out", type=str, default=None)
     pr.add_argument("--tol-rate", type=float, default=0.00)
     pr.add_argument("--tol-time", type=float, default=2.0)
+    # ---- Premises / Context (regress) ----
+    pr.add_argument("--premises", action="store_true", help="Enable premises retrieval.")
+    pr.add_argument("--no-premises", action="store_true", help="Disable premises retrieval.")
+    pr.add_argument("--premises-k-select", type=int, default=CFG.PREMISES_K_SELECT,
+                    action=_StoreSetFlag, help="Top-K for fast SELECT stage.")
+    pr.add_argument("--premises-k-rerank", type=int, default=CFG.PREMISES_K_RERANK,
+                    action=_StoreSetFlag, help="Top-K for RE-RANK stage.")
+    pr.add_argument("--context", action="store_true", help="Enable file-aware context window.")
+    pr.add_argument("--no-context", action="store_true", help="Disable file-aware context window.")
+    pr.add_argument("--context-files", type=str,
+                    default=(" ".join(CFG.PROVER_CONTEXT_FILES) if CFG.PROVER_CONTEXT_FILES else ""),
+                    action=_StoreSetFlag,
+                    help="Space/comma-separated .thy files to seed context.")
+    pr.add_argument("--context-window", type=int, default=CFG.PROVER_CONTEXT_WINDOW,
+                    action=_StoreSetFlag, help="Context window size (implementation-defined).")
     pr.set_defaults(func=cmd_regress)
 
     pa = sub.add_parser("aggregate", help="Summarize CSVs")

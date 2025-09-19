@@ -1,8 +1,11 @@
 # prover/cli.py
 import argparse
 import os
+import re
 import requests
 import sys
+
+from . import config as CFG
 
 from .config import (
     MODEL,
@@ -20,6 +23,12 @@ from .config import (
 from .prover import prove_goal
 from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .tactics import mine_two_step_macros
+
+class _StoreSetFlag(argparse.Action):
+    """Like 'store', but also marks that the user explicitly provided this flag."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, f"__set_{self.dest}", True)
 
 # Avoid importing asyncio on Windows (perf + compatibility)
 if sys.platform != "win32":
@@ -125,7 +134,7 @@ def _prove_one(isabelle, session_id: str, goal: str, CFG, args, macro_map=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LLM-guided Isabelle/HOL stepwise prover")
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--goal", type=str)
     parser.add_argument("--goals-file", type=str)
     parser.add_argument("--model", type=str, default=None)
@@ -155,6 +164,20 @@ def main():
     parser.add_argument("--variant-timeout", type=int, default=None)
     parser.add_argument("--variant-tries", type=int, default=None)
     parser.add_argument("--no-reranker", action="store_true", help="Disable ML reranker (even if a model file exists).")
+    parser.add_argument("--premises", action="store_true", help="Enable premises retrieval.")
+    parser.add_argument("--no-premises", action="store_true", help="Disable premises retrieval.")
+    parser.add_argument("--premises-k-select", type=int, default=CFG.PREMISES_K_SELECT,
+                        action=_StoreSetFlag, help="Top-K for fast SELECT stage.")
+    parser.add_argument("--premises-k-rerank", type=int, default=CFG.PREMISES_K_RERANK,
+                        action=_StoreSetFlag, help="Top-K for RE-RANK stage.")
+    parser.add_argument("--context", action="store_true", help="Enable file-aware context window.")
+    parser.add_argument("--no-context", action="store_true", help="Disable file-aware context window.")
+    parser.add_argument("--context-files", type=str,
+                        default=(" ".join(CFG.PROVER_CONTEXT_FILES) if CFG.PROVER_CONTEXT_FILES else ""),
+                        action=_StoreSetFlag,
+                        help="Space/comma-separated .thy files to seed context.")
+    parser.add_argument("--context-window", type=int, default=CFG.PROVER_CONTEXT_WINDOW,
+                        action=_StoreSetFlag, help="Context window size (implementation-defined).")
     args = parser.parse_args()
 
     # Optional: check Ollama (fast, can be skipped by env)
@@ -168,7 +191,6 @@ def main():
             print(f"Warning: could not reach Ollama. Error: {e}")
 
     # Runtime overrides via module globals (backward compatible)
-    from . import config as CFG
     if args.model is not None:
         CFG.MODEL = args.model
     if args.beam is not None:
@@ -187,6 +209,23 @@ def main():
         CFG.VARIANT_TIMEOUT = args.variant_timeout
     if args.variant_tries is not None:
         CFG.VARIANT_TRIES = args.variant_tries
+    if args.premises:
+        CFG.PREMISES_ENABLE = True
+    if args.no_premises:
+        CFG.PREMISES_ENABLE = False
+    if getattr(args, "__set_premises_k_select", False):
+        CFG.PREMISES_K_SELECT = int(args.premises_k_select)
+    if getattr(args, "__set_premises_k_rerank", False):
+        CFG.PREMISES_K_RERANK = int(args.premises_k_rerank)
+    if args.context:
+        CFG.PROVER_CONTEXT_ENABLE = True
+    if args.no_context:
+        CFG.PROVER_CONTEXT_ENABLE = False
+    if getattr(args, "__set_context_window", False):
+        CFG.PROVER_CONTEXT_WINDOW = int(args.context_window)
+    if getattr(args, "__set_context_files", False) and args.context_files:
+        parts = [p for p in re.split(r"[,\s]+", args.context_files.strip()) if p]
+        CFG.PROVER_CONTEXT_FILES = [os.path.expanduser(p) for p in parts]
 
     loop, watcher = _setup_loop()
     server_info = proc = isabelle = session_id = None

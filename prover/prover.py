@@ -6,7 +6,10 @@ from .utils import color, parse_subgoals, state_fingerprint, RunLogger, slugify_
 from .config import (
     BEAM_WIDTH, MAX_DEPTH, HINT_LEMMAS, FACTS_LIMIT,
     MINIMIZE_DEFAULT, MINIMIZE_TIMEOUT, VARIANTS_DEFAULT,
-    VARIANT_TIMEOUT, VARIANT_TRIES
+    VARIANT_TIMEOUT, VARIANT_TRIES,
+    # new toggles (all default-off)
+    PREMISES_ENABLE, PREMISES_K_SELECT, PREMISES_K_RERANK,
+    PROVER_CONTEXT_ENABLE, PROVER_CONTEXT_WINDOW, PROVER_CONTEXT_FILES,    
 )
 from .llm import propose_steps, propose_finishers
 from .isabelle_api import build_theory, run_theory, finished_ok, last_print_state_block, use_calls_count
@@ -22,6 +25,10 @@ from .tactics import (
 from .minimize import minimize_proof
 from .features import flags_from_goal
 from .ranker import Reranker
+# new: premise retrieval & optional file-aware context
+from .premises import PremisesIndex, build_score_map, cand_features, selection_features
+from .heuristics import extract_candidate_facts
+from .context import ContextWindow
 
 _result_cache: Dict[Tuple[Tuple[str, ...], str], Tuple[bool, Optional[int], str]] = {}
 
@@ -124,6 +131,28 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
     display_model = ",".join(model_list)
     logger = RunLogger(goal, display_model)
 
+    # ----- optional: build a lightweight context window + retrieval index -----
+    ctx_win: Optional[ContextWindow] = None
+    prem_idx: Optional[PremisesIndex] = None
+    if PROVER_CONTEXT_ENABLE and PROVER_CONTEXT_FILES:
+        try:
+            ctx_win = ContextWindow(window_size=PROVER_CONTEXT_WINDOW)
+            for _pth in PROVER_CONTEXT_FILES:
+                try:
+                    ctx_win.ingest_theory(_pth)
+                except Exception:
+                    pass
+        except Exception:
+            ctx_win = None
+    if PREMISES_ENABLE:
+        try:
+            prem_idx = PremisesIndex()
+            if ctx_win is not None:
+                prem_idx.add_many(ctx_win.seed_pairs())
+            prem_idx.finalize()
+        except Exception:
+            prem_idx = None
+
     start_t = time.monotonic()
     def time_left_s() -> float: return budget - (time.monotonic() - start_t)
 
@@ -175,6 +204,49 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             except Exception as e:
                 if trace: print(color(use_color, "yellow", f"Facts mining error ignored: {e}"))
 
+        # new: premise retrieval (global or seeded by context window)
+        # We keep it conservative: use it as *additional hints* for the LLM/ranker
+        # and do not explode candidates.
+        premise_scores: Dict[str, Tuple[float, float]] = {}
+        pool_feats: Dict[str, float] = {
+            "premise_cosine_top1": 0.0,
+            "premise_cosine_topk_mean": 0.0,
+            "premise_rerank_top1": 0.0,
+            "premise_rerank_topk_mean": 0.0,
+            "n_premises": 0.0,
+        }        
+        if PREMISES_ENABLE and prem_idx is not None:
+            try:
+                state_proxy = beam[0][2] or ""
+                query_text = f"{goal}  {state_proxy}".strip()
+                picks = prem_idx.select(
+                    query_text,
+                    k_select=max(64, min(1024, PREMISES_K_SELECT)),
+                    k_rerank=max(16, min(256, PREMISES_K_RERANK)),
+                    boost_ids=(ctx_win.facts_for(PROVER_CONTEXT_FILES[0], 10**12) if (ctx_win and PROVER_CONTEXT_FILES) else None),
+                )
+                # real pool metrics from actual retrieval picks
+                pool_feats = selection_features(picks)                
+                premise_scores = build_score_map(picks)
+                # Convert fact_ids like 'File.thy:lemma_name:i' → lemma_name
+                sel_names = []
+                for fid, _s, _r in picks[:max(FACTS_LIMIT, facts_limit)]:
+                    parts = fid.split(":")
+                    sel_names.append(parts[1] if len(parts) >= 2 else fid)
+                if sel_names:
+                    # prepend retrieved names, then mined ones; keep unique and cap to limit
+                    seen = set()
+                    merged: List[str] = []
+                    for nm in (sel_names + facts_for_depth):
+                        if nm not in seen:
+                            seen.add(nm)
+                            merged.append(nm)
+                    facts_for_depth = merged[:facts_limit]
+                    if trace:
+                        print(color(use_color, "yellow", f"Premises (retrieved): {sel_names[:min(8,len(sel_names))]}"))
+            except Exception as e:
+                if trace: print(color(use_color, "yellow", f"Premises retrieval error ignored: {e}"))                
+
         sledge_sugs: List[str] = []
         if use_sledge and depth % max(1, sledge_every) == 0 and beam:
             try:
@@ -196,8 +268,11 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
             mined = mine_lemmas_from_state(isabelle, session_id, state_hint, max_lemmas=hint_lemmas) if state_hint else []
-            finishers_llm = propose_finishers(model_list, goal, steps, state_hint, mined, hint_lemmas,
-                                              facts=facts_for_depth, temp=finish_temp, reranker=reranker)
+            finishers_llm = propose_finishers(
+                model_list, goal, steps, state_hint, mined, hint_lemmas,
+                facts=facts_for_depth, temp=finish_temp, reranker=reranker,
+                premise_scores=premise_scores, premise_pool=pool_feats
+            )
 
             # Build finishers with explicit origin tags so we can print who proposed what.
             finishers_with_origin: List[Tuple[str, str]] = []
@@ -218,7 +293,26 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             for fin, origin in finishers_with_origin:
                 if time_left_s() <= 0: break
                 ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin)
-                logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached, extra={"origin": origin})
+                # per-candidate metrics (real if names match; else zeros)
+                cf = cand_features(extract_candidate_facts(fin), premise_scores) if premise_scores else {
+                    "cand_cos_mean": 0.0, "cand_cos_max": 0.0, "cand_rerank_mean": 0.0, "cand_hit_topk": 0.0, "cand_n_facts": 0.0
+                }
+                logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached,
+                    extra={
+                        "origin": origin,
+                        # Pool metrics (real numbers if PREMISES_ENABLE)
+                        "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
+                        "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
+                        "premise_rerank_top1": float(pool_feats.get("premise_rerank_top1", 0.0)),
+                        "premise_rerank_topk_mean": float(pool_feats.get("premise_rerank_topk_mean", 0.0)),
+                        "n_premises": float(pool_feats.get("n_premises", 0.0)),
+                        # Per-candidate (real if facts referenced & matched)
+                        "cand_cos_mean": float(cf.get("cand_cos_mean", 0.0)),
+                        "cand_cos_max": float(cf.get("cand_cos_max", 0.0)),
+                        "cand_rerank_mean": float(cf.get("cand_rerank_mean", 0.0)),
+                        "cand_hit_topk": float(cf.get("cand_hit_topk", 0.0)),
+                        "cand_n_facts": float(cf.get("cand_n_facts", 0.0)),
+                    })
                 if trace:
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
                     print(f"  finish {tag} [{origin}] {fin}  ({round(elapsed_ms)}ms)")
@@ -247,15 +341,16 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     if trace: print(color(use_color, "green", "✔ PROVED"))
                     return {"goal": goal, "success": True, "steps": final, "depth": depth_reached,
                             "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s, "model": display_model}
-
-        # ---- Expand ----
+        
         # ---- Expand ----
         for _, steps, state_hint, prev_n in beam:
             if time_left_s() <= 0: break
             extra_cands = variant_step_templates(state_hint) if variant_burst else []
             llm_cands = propose_steps(model_list, goal, steps, state_hint,
                                       facts=facts_for_depth, reranker=reranker,
-                                      depth=depth, temp=steps_temp)
+                                      depth=depth, temp=steps_temp,
+                                      premise_scores=premise_scores,
+                                      premise_pool=pool_feats)
 
             # Build list of (cand, origin) where origin in {"variant","llm"}
             cands_with_origin: List[Tuple[str, str]] = []
@@ -302,9 +397,25 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     logger.log_attempt(
                         "expand", steps, c, False, None, False, 0.0, depth_reached,
                         subgoals_before=prev_n,
-                        extra={"proposal_id": proposal_id, "proposal_k": int(k),
-                               "state_fp_before": state_fp_before,
-                               "origin": origin}
+                    extra={
+                           "proposal_id": proposal_id, "proposal_k": int(k),
+                           "state_fp_before": state_fp_before,
+                           "origin": origin,
+                           # real pool metrics from retrieval picks
+                           "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
+                           "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
+                           "premise_rerank_top1": float(pool_feats.get("premise_rerank_top1", 0.0)),
+                           "premise_rerank_topk_mean": float(pool_feats.get("premise_rerank_topk_mean", 0.0)),
+                           "n_premises": float(pool_feats.get("n_premises", 0.0)),
+                           # NEW per-candidate metrics
+                           **(lambda cf: {
+                               "cand_cos_mean": cf.get("cand_cos_mean", 0.0),
+                               "cand_cos_max": cf.get("cand_cos_max", 0.0),
+                               "cand_rerank_mean": cf.get("cand_rerank_mean", 0.0),
+                               "cand_hit_topk": cf.get("cand_hit_topk", 0.0),
+                               "cand_n_facts": cf.get("cand_n_facts", 0.0),
+                           })(cand_features(extract_candidate_facts(c), premise_scores))
+                    }
                     )
                     continue
                 ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(isabelle, session_id, steps, c)
@@ -317,6 +428,20 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                         "state_fp_before": state_fp_before,
                         "state_fp_after": state_fingerprint(hint or "") if ok else None,
                         "origin": origin,
+                        # real pool metrics from retrieval picks
+                        "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
+                        "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
+                        "premise_rerank_top1": float(pool_feats.get("premise_rerank_top1", 0.0)),
+                        "premise_rerank_topk_mean": float(pool_feats.get("premise_rerank_topk_mean", 0.0)),
+                        "n_premises": float(pool_feats.get("n_premises", 0.0)),
+                        # NEW per-candidate metrics
+                        **(lambda cf: {
+                            "cand_cos_mean": cf.get("cand_cos_mean", 0.0),
+                            "cand_cos_max": cf.get("cand_cos_max", 0.0),
+                            "cand_rerank_mean": cf.get("cand_rerank_mean", 0.0),
+                            "cand_hit_topk": cf.get("cand_hit_topk", 0.0),
+                            "cand_n_facts": cf.get("cand_n_facts", 0.0),
+                        })(cand_features(extract_candidate_facts(c), premise_scores)),
                     }
                 )
                 if trace:
