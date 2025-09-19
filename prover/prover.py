@@ -7,10 +7,9 @@ from .config import (
     BEAM_WIDTH, MAX_DEPTH, HINT_LEMMAS, FACTS_LIMIT,
     MINIMIZE_DEFAULT, MINIMIZE_TIMEOUT, VARIANTS_DEFAULT,
     VARIANT_TIMEOUT, VARIANT_TRIES,
-    # new toggles (all default-off)
-    PREMISES_ENABLE, PREMISES_K_SELECT, PREMISES_K_RERANK,
-    PROVER_CONTEXT_ENABLE, PROVER_CONTEXT_WINDOW, PROVER_CONTEXT_FILES,    
 )
+# IMPORTANT: read premise/context from live config, not frozen names
+from . import config as CFG
 from .llm import propose_steps, propose_finishers
 from .isabelle_api import build_theory, run_theory, finished_ok, last_print_state_block, use_calls_count
 
@@ -134,19 +133,28 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
     # ----- optional: build a lightweight context window + retrieval index -----
     ctx_win: Optional[ContextWindow] = None
     prem_idx: Optional[PremisesIndex] = None
-    if PROVER_CONTEXT_ENABLE and PROVER_CONTEXT_FILES:
+    if CFG.PROVER_CONTEXT_ENABLE and CFG.PROVER_CONTEXT_FILES:
         try:
-            ctx_win = ContextWindow(window_size=PROVER_CONTEXT_WINDOW)
-            for _pth in PROVER_CONTEXT_FILES:
+            ctx_win = ContextWindow(window_size=CFG.PROVER_CONTEXT_WINDOW)
+            for _pth in CFG.PROVER_CONTEXT_FILES:
                 try:
                     ctx_win.ingest_theory(_pth)
                 except Exception:
                     pass
         except Exception:
             ctx_win = None
-    if PREMISES_ENABLE:
+    if CFG.PREMISES_ENABLE:
         try:
             prem_idx = PremisesIndex()
+            # NEW: try to load trained premise models (bi-encoder + cross-encoder)
+            try:
+                prem_idx.try_load_encoder_from_env()
+            except Exception:
+                pass
+            try:
+                prem_idx.try_load_reranker_from_env()
+            except Exception:
+                pass
             if ctx_win is not None:
                 prem_idx.add_many(ctx_win.seed_pairs())
             prem_idx.finalize()
@@ -208,6 +216,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # We keep it conservative: use it as *additional hints* for the LLM/ranker
         # and do not explode candidates.
         premise_scores: Dict[str, Tuple[float, float]] = {}
+        picks_ids_compact: List[str] = []  # <-- for training supervision
         pool_feats: Dict[str, float] = {
             "premise_cosine_top1": 0.0,
             "premise_cosine_topk_mean": 0.0,
@@ -215,19 +224,21 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             "premise_rerank_topk_mean": 0.0,
             "n_premises": 0.0,
         }        
-        if PREMISES_ENABLE and prem_idx is not None:
+        if CFG.PREMISES_ENABLE and prem_idx is not None:
             try:
                 state_proxy = beam[0][2] or ""
                 query_text = f"{goal}  {state_proxy}".strip()
                 picks = prem_idx.select(
                     query_text,
-                    k_select=max(64, min(1024, PREMISES_K_SELECT)),
-                    k_rerank=max(16, min(256, PREMISES_K_RERANK)),
-                    boost_ids=(ctx_win.facts_for(PROVER_CONTEXT_FILES[0], 10**12) if (ctx_win and PROVER_CONTEXT_FILES) else None),
+                    k_select=max(64, min(1024, CFG.PREMISES_K_SELECT)),
+                    k_rerank=max(16, min(256, CFG.PREMISES_K_RERANK)),
+                    boost_ids=(ctx_win.facts_for(CFG.PROVER_CONTEXT_FILES[0], 10**12)
+                               if (ctx_win and CFG.PROVER_CONTEXT_FILES) else None),
                 )
                 # real pool metrics from actual retrieval picks
                 pool_feats = selection_features(picks)                
                 premise_scores = build_score_map(picks)
+                picks_ids_compact = [fid for fid, _s, _r in picks[:128]]
                 # Convert fact_ids like 'File.thy:lemma_name:i' → lemma_name
                 sel_names = []
                 for fid, _s, _r in picks[:max(FACTS_LIMIT, facts_limit)]:
@@ -293,13 +304,34 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             for fin, origin in finishers_with_origin:
                 if time_left_s() <= 0: break
                 ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin)
+                # If sledge/finisher solved before retrieval ran, lazily compute pool metrics now.
+                if CFG.PREMISES_ENABLE and prem_idx is not None and (not pool_feats or float(pool_feats.get("n_premises", 0.0)) == 0.0):
+                    try:
+                        state_proxy = beam[0][2] or ""
+                        query = f"{goal}  {state_proxy}".strip()
+                        picks_lazy = prem_idx.select(
+                            query,
+                            k_select=max(64, min(1024, CFG.PREMISES_K_SELECT)),
+                            k_rerank=max(16, min(256, CFG.PREMISES_K_RERANK)),
+                            boost_ids=(ctx_win.facts_for(CFG.PROVER_CONTEXT_FILES[0], 10**9)
+                                       if (ctx_win and CFG.PROVER_CONTEXT_FILES) else None),
+                        )
+                        pool_feats = selection_features(picks_lazy)
+                        premise_scores = build_score_map(picks_lazy)
+                        picks_ids_compact = [fid for fid, _s, _r in picks_lazy[:128]]
+                    except Exception:
+                        pass
                 # per-candidate metrics (real if names match; else zeros)
-                cf = cand_features(extract_candidate_facts(fin), premise_scores) if premise_scores else {
+                fin_facts = extract_candidate_facts(fin)
+                cf = cand_features(fin_facts, premise_scores) if premise_scores else {
                     "cand_cos_mean": 0.0, "cand_cos_max": 0.0, "cand_rerank_mean": 0.0, "cand_hit_topk": 0.0, "cand_n_facts": 0.0
                 }
                 logger.log_attempt("finish", steps, fin, ok, 0 if ok else None, False, elapsed_ms, depth_reached,
                     extra={
                         "origin": origin,
+                        # supervision for premise training
+                        "retrieval_picks": picks_ids_compact,
+                        "cand_facts": fin_facts,                        
                         # Pool metrics (real numbers if PREMISES_ENABLE)
                         "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
                         "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
@@ -401,6 +433,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                            "proposal_id": proposal_id, "proposal_k": int(k),
                            "state_fp_before": state_fp_before,
                            "origin": origin,
+                           # supervision for premise training
+                           "retrieval_picks": picks_ids_compact,
+                           "cand_facts": extract_candidate_facts(c),                           
                            # real pool metrics from retrieval picks
                            "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
                            "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
@@ -428,6 +463,9 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                         "state_fp_before": state_fp_before,
                         "state_fp_after": state_fingerprint(hint or "") if ok else None,
                         "origin": origin,
+                        # supervision for premise training
+                        "retrieval_picks": picks_ids_compact,
+                        "cand_facts": extract_candidate_facts(c),                        
                         # real pool metrics from retrieval picks
                         "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
                         "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),

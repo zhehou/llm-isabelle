@@ -180,6 +180,8 @@ def cmd_bench(args: argparse.Namespace) -> None:
     if getattr(args, "__set_context_files", False) and args.context_files:
         parts = [p for p in re.split(r"[,\s]+", args.context_files.strip()) if p]
         CFG.PROVER_CONTEXT_FILES = [os.path.expanduser(p) for p in parts]  
+    if getattr(args, "__set_premises_model_dir", False) and args.premises_model_dir:
+        os.environ["PREMISES_MODEL_DIR"] = os.path.expanduser(args.premises_model_dir)        
     # Resolve suites
     if args.file:
         suites: List[Tuple[str, Path]] = [(Path(args.file).stem, Path(args.file))]
@@ -358,6 +360,8 @@ def cmd_regress(args: argparse.Namespace) -> None:
     if getattr(args, "__set_context_files", False) and args.context_files:
         parts = [p for p in re.split(r"[,\s]+", args.context_files.strip()) if p]
         CFG.PROVER_CONTEXT_FILES = [os.path.expanduser(p) for p in parts]
+    if getattr(args, "__set_premises_model_dir", False) and args.premises_model_dir:
+        os.environ["PREMISES_MODEL_DIR"] = os.path.expanduser(args.premises_model_dir)        
 
     if args.file:
         suite_name = Path(args.file).stem
@@ -619,6 +623,8 @@ def main():
                     help="Space/comma-separated .thy files to seed context.")
     pb.add_argument("--context-window", type=int, default=CFG.PROVER_CONTEXT_WINDOW,
                     action=_StoreSetFlag, help="Context window size (implementation-defined).")
+    pb.add_argument("--premises-model-dir", type=str, default=os.environ.get("PREMISES_MODEL_DIR",""),
+                    action=_StoreSetFlag, help="Path to a trained premises encoder (models/premises).")    
     pb.set_defaults(func=cmd_bench)
 
     pr = sub.add_parser("regress", help="Run and compare to baseline")
@@ -660,6 +666,8 @@ def main():
                     help="Space/comma-separated .thy files to seed context.")
     pr.add_argument("--context-window", type=int, default=CFG.PROVER_CONTEXT_WINDOW,
                     action=_StoreSetFlag, help="Context window size (implementation-defined).")
+    pr.add_argument("--premises-model-dir", type=str, default=os.environ.get("PREMISES_MODEL_DIR",""),
+                    action=_StoreSetFlag, help="Path to a trained premises encoder (models/premises).")    
     pr.set_defaults(func=cmd_regress)
 
     pa = sub.add_parser("aggregate", help="Summarize CSVs")

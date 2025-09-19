@@ -11,6 +11,15 @@ from typing import List, Tuple, Dict, Optional
 import math
 import threading
 import re
+import os, json
+from pathlib import Path
+from typing import Any
+
+try:
+    import numpy as _np
+    _NP_OK = True
+except Exception:
+    _NP_OK = False
 
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
@@ -50,7 +59,13 @@ class PremisesIndex:
         self._lock = threading.RLock()
         self._store = store  # optional external KV for texts/meta
         self._select_model = select_model  # reserved for custom encoders
-        self._rerank_model = rerank_model  # reserved for cross-encoders
+        # cross-encoder reranker: callable score_pairs([(goal, text), ...]) -> List[float]
+        self._rerank_model = rerank_model        
+        # Optional learned encoder (bi-encoder) state
+        self._enc_type: Optional[str] = None     # e.g., "sbert"
+        self._enc_norm: bool = True
+        self._encoder: Any = None               # callable encode(list[str]) -> np.array [n,d]
+        self._embs = None                       # np.array [N, d] premise embeddings        
 
     # ---- building ----
     def add(self, fact_id: str, text: str, meta: Dict | None = None) -> None:
@@ -65,7 +80,17 @@ class PremisesIndex:
         with self._lock:
             self._ids = list(self._items.keys())
             corpus = [self._items[i].text for i in self._ids]
-            if _SK_OK and len(corpus) > 0:
+            if self._encoder is not None and _NP_OK and len(corpus) > 0:
+                # encode all premise texts once
+                try:
+                    embs = self._encoder(corpus)  # [N, d]
+                    if self._enc_norm:
+                        n = _np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
+                        embs = embs / n
+                    self._embs = embs
+                except Exception:
+                    self._embs = None
+            elif _SK_OK and len(corpus) > 0:
                 self._vec = TfidfVectorizer(min_df=1, max_features=200000)
                 self._mat = self._vec.fit_transform(corpus)
             else:
@@ -74,6 +99,14 @@ class PremisesIndex:
 
     # ---- selection ----
     def _select_scores(self, goal_text: str) -> List[Tuple[str, float]]:
+        # Learned encoder path (cosine in embedding space)
+        if self._embs is not None and self._encoder is not None and _NP_OK:
+            q = self._encoder([goal_text])
+            if self._enc_norm:
+                q = q / (_np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
+            sim = (q @ self._embs.T).ravel()  # cosine if normalized
+            return list(zip(self._ids, sim.astype(float).tolist()))
+        # TF-IDF cosine path
         if self._vec is not None and self._mat is not None and _SK_OK:
             q = self._vec.transform([goal_text])
             sim = cosine_similarity(q, self._mat).ravel()
@@ -105,20 +138,27 @@ class PremisesIndex:
             boosted.append((fid, s))
         boosted.sort(key=lambda x: x[1], reverse=True)
         top = boosted[:max(1, k_select)]
-
-        # Optional re-rank: apply a stronger model if provided; else mirror select score
-        if self._rerank_model is None:
-            reranked = [(fid, s, s) for fid, s in top[:k_rerank]]
-            return reranked
-
-        # Placeholder hook: custom cross-encoder scorer(goal, fact_text) -> float
-        def _score_pair(g: str, fid: str) -> float:
+        
+        # RE-RANK: apply cross-encoder in batch if present; else mirror SELECT
+        reranked: List[Tuple[str, float, float]] = []
+        if self._rerank_model is not None:
+            # batch score for efficiency
+            pairs = [(goal_text, self._items[fid].text) for fid, _ in top]
             try:
-                return float(self._rerank_model.score_pair(g, self._items[fid].text))
+                rs = list(self._rerank_model(pairs))
             except Exception:
-                return 0.0
-
-        reranked = [(fid, s, _score_pair(goal_text, fid)) for fid, s in top[:k_rerank]]
+                rs = [s for _, s in top]
+            for (fid, s), r in zip(top, rs):
+                if fid in boost:
+                    # s already boosted upstream; only boost r here
+                    r *= 1.15
+                reranked.append((fid, s, float(r)))
+        else:
+            for fid, s in top:
+                r = s
+                if fid in boost:
+                    s *= 1.15; r *= 1.15
+                reranked.append((fid, s, r))
         reranked.sort(key=lambda x: x[2], reverse=True)
         return reranked
 
@@ -126,6 +166,68 @@ class PremisesIndex:
     def texts_for(self, ids: List[str]) -> List[str]:
         return [self._items[i].text for i in ids if i in self._items]
 
+    # ---- model loading: bi-encoder (SELECT) ----
+    def try_load_encoder_from_env(self) -> None:
+        """Load a trained bi-encoder from PREMises model dir or models/premises/ if present."""
+        model_dir = os.environ.get("PREMISES_MODEL_DIR", "")
+        if not model_dir:
+            p = Path("models") / "premises"
+            if p.exists():
+                model_dir = str(p)
+        if model_dir:
+            try:
+                self.load_encoder(model_dir)
+            except Exception:
+                pass
+
+    def load_encoder(self, model_dir: str) -> None:
+        """Load a trained encoder from <dir>/premises.json (type='sbert')."""
+        meta_p = Path(model_dir) / "premises.json"
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        typ = str(meta.get("type", ""))
+        self._enc_type = typ
+        self._enc_norm = bool(meta.get("normalize", True))
+        if typ == "sbert":
+            rel = meta.get("model_relpath", "encoder")
+            mdir = str(Path(model_dir) / rel)
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            model = SentenceTransformer(mdir)
+            def _enc_fn(texts: List[str]):
+                arr = model.encode(texts, convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=False)
+                return arr
+            self._encoder = _enc_fn
+        else:
+            raise RuntimeError(f"Unsupported premises encoder type: {typ}")
+
+    # ---- model loading: cross-encoder (RE-RANK) ----
+    def try_load_reranker_from_env(self) -> None:
+        """Load a trained cross-encoder reranker from PREMises model dir or models/premises/ if present."""
+        model_dir = os.environ.get("PREMISES_MODEL_DIR", "")
+        if not model_dir:
+            p = Path("models") / "premises"
+            if p.exists():
+                model_dir = str(p)
+        if model_dir:
+            try:
+                self.load_reranker(model_dir)
+            except Exception:
+                pass
+
+    def load_reranker(self, model_dir: str) -> None:
+        """Load a trained cross-encoder from <dir>/premises_reranker.json (type='sbert-cross')."""
+        meta_p = Path(model_dir) / "premises_reranker.json"
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        typ = str(meta.get("type", ""))
+        if typ != "sbert-cross":
+            raise RuntimeError(f"Unsupported premises reranker type: {typ}")
+        rel = meta.get("model_relpath", "rerank")
+        mdir = str(Path(model_dir) / rel)
+        from sentence_transformers import CrossEncoder  # type: ignore
+        model = CrossEncoder(mdir)
+        # store a batch function: List[(goal, fact)] -> List[float]
+        def _score_pairs(pairs: List[Tuple[str, str]]):
+            return model.predict(pairs).tolist()
+        self._rerank_model = _score_pairs
 
 # --------- Tiny utility for turning selected premises into features ---------
 

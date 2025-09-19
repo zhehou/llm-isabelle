@@ -7,7 +7,8 @@ Key features:
   - LLM guesses tactics
   - Combined with nitpick, quickcheck, and sledgehammer
   - Beam search for suitable tactics
-  - ML reranker for tactics trained by proof logs
+  - ML reranker for tactics
+  - Premise selection using encoders and transformers
 - Isar-style proof outline generator (in the planner folder)
   - LLM guesses outline
   - Calls the stepwise prover to fill the details
@@ -26,11 +27,12 @@ Key features:
 - [3. Usage](#3-usage)
   - [3.1 Quick demo](#31-quick-demo)
   - [3.2 Stepwise prover](#32-stepwise-prover)
-  - [3.3 Training a reranker for the prover](#33-training-a-reranker-for-the-prover)
-  - [3.4 Isar-style proof outline sketching](#34-isar-style-proof-outline-sketching)
-  - [3.5 Planner data corpus and micro RAG](#35-planner-data-corpus-and-micro-rag)
-  - [3.6 Isabelle/jEdit GUI integration](#36-isabellejedit-gui-integration)
-  - [3.6 Evaluation using mini-F2F](#37-evaluation-using-mini-f2f)
+  - [3.3 Tactics reranker for the prover](#33-tactics-reranker-for-the-prover)
+  - [3.4 Premise selection for the prover](#34-premise-selection-for-the-prover)
+  - [3.5 Isar-style proof outline sketching](#35-isar-style-proof-outline-sketching)
+  - [3.6 Planner data corpus and micro RAG](#36-planner-data-corpus-and-micro-rag)
+  - [3.7 Isabelle/jEdit GUI integration](#37-isabellejedit-gui-integration)
+  - [3.8 Evaluation using mini-F2F](#38-evaluation-using-mini-f2f)
 - [4. Project Structure](#5-project-structure)
 - [5. Notes & Tips](#6-notes--tips)
 - [6. License](#7-license)
@@ -40,7 +42,7 @@ Key features:
 ## 1. Installation
 
 ### 1.1 Core prerequisites
-- **Python** 3.10+
+- **Python** 3.10 - 3.12 (3.13 won't work with some of the pytorch packages)
 - **Isabelle/HOL** (tested with Isabelle2025). Ensure `isabelle` is on your `$PATH`.
 - **System packages**: GNU Make, `g++`, etc. (used by Isabelle and some Python libs).
 
@@ -52,7 +54,10 @@ pip install -U pip
 pip install -r requirements.txt
 # If you plan to use CPU-only PyTorch wheels:
 pip install torch --index-url https://download.pytorch.org/whl/cpu
+# For premise selection training
+pip install -U sentence-transformers
 ```
+If have problems, ChatGPT can usually solve it.
 
 ### 1.3 Ollama (local LLMs)
 Install and run Ollama: https://ollama.ai
@@ -210,8 +215,8 @@ Aggregating results
 python -m prover.experiments aggregate --best-only --top-k 2
 ```
 
-### 3.3 Training a reranker for the prover
-Supervised (sklearn / XGBoost):
+### 3.3 Tactics reranker for the prover
+Train a tactics reranker Supervised (sklearn / XGBoost):
 ```bash
 python -m prover.train_reranker --algo sklearn-logreg --target bandit
 python -m prover.train_reranker --algo xgb-classifier --target bandit
@@ -260,7 +265,83 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 # See which reranker works better.
 ```
 
-### 3.4 Isar-style proof outline sketching
+### 3.4 Premise selection for the prover
+Enable premises + provide context files using the options --premises --context --context-files like below
+```bash
+python -m prover.cli \
+  --goal 'map f (xs @ ys) = map f xs @ map f ys' \
+  --premises --context --context-files "tmp/ContextDemo.thy" \
+  --trace
+```
+
+Advanced controls --premises-k-select --premises-k-rerank --context-window (defaults come from config/env):
+```bash
+python -m prover.cli \
+  --goal 'rev (rev xs) = xs' \
+  --premises --premises-k-select 1024 --premises-k-rerank 64 \
+  --context --context-files "tmp/ContextDemo.thy /path/to/More_List.thy" \
+  --context-window 400 --trace
+```
+
+Benchmarking and regression testing options are similar
+```bash
+python -m prover.experiments bench --file datasets/lists.txt \
+  --premises --context --context-files "tmp/ContextDemo.thy"
+```
+
+Train only the bi‑encoder (SELECT) for premise selection:
+```bash
+python -m prover.train_premises \
+  --logs logs/attempts.log.jsonl \
+  --out models \
+  --train-bi \
+  --base-model sentence-transformers/all-MiniLM-L6-v2 \
+  --epochs 2 --batch-size 64 \
+  --dump-pairs
+```
+
+Train only the cross‑encoder (RE‑RANK) for premise selection:
+```bash
+# Note: current script runs bi‑encoder by default.
+# To effectively skip bi training time, set --epochs 0 for the bi stage.
+python -m prover.train_premises \
+  --logs logs/attempts.log.jsonl \
+  --out models \
+  --train-cross \
+  --epochs 0 \
+  --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
+  --epochs-cross 2 --batch-size-cross 32 \
+  --dump-pairs
+```
+
+Train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK)
+```bash
+# Note: current script runs bi‑encoder by default.
+# To effectively skip bi training time, set --epochs 0 for the bi stage.
+python -m prover.train_premises \
+  --logs logs/attempts.log.jsonl \
+  --out models \
+  --train-bi \
+  --train-cross \
+  --base-model sentence-transformers/all-MiniLM-L6-v2 \
+  --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
+  --epochs 2 --batch-size 64 \
+  --epochs-cross 2 --batch-size-cross 32 \
+  --dump-pairs
+```
+
+To use the trained models for premise selection, simply use the --premises option, and it will automatically load the model from the folder \models\premises if it exists. 
+
+Or, specify the model directory as below.
+```bash
+python -m prover.cli \
+  --goal 'map (f ∘ g) xs = map f (map g xs)' \
+  --premises --context --context-files "tmp/ContextDemo.thy" \
+  --premises-model-dir models/premises \
+  --trace
+```
+
+### 3.5 Isar-style proof outline sketching
 Run the planner to sketch a proof (fill the proof if possible). Internally, it proposes multiple outlines and picks the most suitable one to output.
 ```bash
 python -m planner.cli --timeout 60 --mode auto "rev (rev xs) = xs"
@@ -311,7 +392,7 @@ python -m planner.experiments regress \
   --tol-rate 0.00 --tol-time 2.0
 ```
 
-### 3.5 Planner data corpus and micro RAG
+### 3.6 Planner data corpus and micro RAG
 
 Extract a data corpus for the planner from AFP (replace the path to afp thys with a valid path)
 ```bash
@@ -370,7 +451,7 @@ python -m planner.priors \
   --min-count 3 --topk 8
 ```
 
-### 3.6 Isabelle/jEdit GUI integration
+### 3.7 Isabelle/jEdit GUI integration
 Run the HTTP server:
 ```bash
 python3 -m isabelle_ui.server
@@ -381,7 +462,7 @@ Copy the `.bsh` macros from `isabelle_ui/` to your jEdit macros folder, e.g.
 
 Then in jEdit, use **Macros → LLM Prover** at a proof state.
 
-### 3.7 Evaluation using external datasets
+### 3.8 Evaluation using external datasets
 
 **Mini-F2F**
 
