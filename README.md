@@ -335,8 +335,7 @@ python -m prover.train_premises \
   --train-cross --epochs 0 \
   --cross-base-model cross-encoder/ms-marco-MiniLM-L-2-v2 \
   --epochs-cross 1 --batch-size-cross 4 \
-  --cross-max-length 160 --cross-grad-accum 4 \
-  --max-shards 1
+  --cross-max-length 160 --max-shards 1  
 ```
 
 Later if want to train more, just pick the next shards and use the --resume-bi and --resume-cross options
@@ -358,7 +357,7 @@ python -m prover.train_premises \
   --train-cross --epochs 0 \
   --resume-cross models/premises/rerank \
   --epochs-cross 1 --batch-size-cross 4 \
-  --cross-max-length 160 --cross-grad-accum 4
+  --cross-max-length 160
 ```
 
 Practical example: On a workstation with RTX 5090, train 2 epochs with batch size 256 and 64 for bi-encoder and cross-encoder, respectively. If time allows, just train on all shards. This way, we can train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK) in one go. 
@@ -371,8 +370,7 @@ CUDA_VISIBLE_DEVICES=0 python -m prover.train_premises \
   --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
   --epochs 2 --batch-size 256 \
   --epochs-cross 2 --batch-size-cross 64 \
-  --cross-device cuda --cross-max-length 256 --cross-grad-accum 1 \
-  --shuffle-shards
+  --cross-device cuda --cross-max-length 256 --shuffle-shards  
 ```
 
 To use the trained models for premise selection, simply use the --premises option, and it will automatically load the model from the folder \models\premises if it exists. 

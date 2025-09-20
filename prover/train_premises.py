@@ -10,7 +10,7 @@
 from __future__ import annotations
 import argparse, json, os, random, sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Any
 import glob, random
 
 def _iter_attempts(paths: List[str]):
@@ -171,15 +171,40 @@ def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, ou
     # regression w/ BCEWithLogits; use shorter sequences & a chosen device to save memory
     model = CrossEncoder(base_model, num_labels=1, device=device, max_length=max_length)
     warmup_steps = max(10, int(0.1 * max(1, epochs) * max(1, len(train_loader))))
-    model.fit(
-        train_dataloader=train_loader,
-        epochs=epochs,
-        warmup_steps=warmup_steps,
-        output_path=None,
-        show_progress_bar=True,
-        gradient_accumulation_steps=grad_accum,
-        use_amp=False,  # AMP not useful on MPS; keep off        
-    )
+    # Fit with robust fallbacks for older sentence-transformers versions
+    try:
+        model.fit(
+            train_dataloader=train_loader,
+            epochs=epochs,
+            warmup_steps=warmup_steps,
+            output_path=None,
+            show_progress_bar=True,
+            gradient_accumulation_steps=grad_accum,
+            use_amp=False,  # AMP not useful on MPS; keep off
+        )
+    except TypeError:
+        # Some versions don’t support gradient_accumulation_steps; try without it.
+        try:
+            if grad_accum and grad_accum > 1:
+                print("[train_premises] CrossEncoder.fit() lacks gradient_accumulation_steps; "
+                      "falling back to physical batch only.", file=sys.stderr)
+            model.fit(
+                train_dataloader=train_loader,
+                epochs=epochs,
+                warmup_steps=warmup_steps,
+                output_path=None,
+                show_progress_bar=True,
+                use_amp=False,
+            )
+        except TypeError:
+            # Very old versions may also lack use_amp
+            model.fit(
+                train_dataloader=train_loader,
+                epochs=epochs,
+                warmup_steps=warmup_steps,
+                output_path=None,
+                show_progress_bar=True,
+            )
 
     rr_dir = out_dir / "premises" / "rerank"
     rr_dir.mkdir(parents=True, exist_ok=True)
