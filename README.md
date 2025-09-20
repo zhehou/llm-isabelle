@@ -316,7 +316,7 @@ python logs/split_json.py \
   --target-size-mb 200
 ```
 
-Practical considerations: On a Macbook Pro with M1 Pro, train 1 epoch with batch size 32 using about 6 shards for the bi-encoder,  and batch siez 16 using 1 shard for the cross-encoder, as the latter is much slower. This is a good starter, and can train more when have time.
+Practical example: On a Macbook Pro with M1 Pro, train 1 epoch with batch size 32 using about 6 shards for the bi-encoder,  and batch siez 16 using 1 shard for the cross-encoder, as the latter is much slower. This is a good starter, and can train more when have time.
 ```bash
 # Train the bi-encoder first
 python -m prover.train_premises \
@@ -336,7 +336,28 @@ python -m prover.train_premises \
   --epochs-cross 1 --batch-size-cross 16 --max-shards 1
 ```
 
-Practical considerations: On a workstation with RTX 5090, train 2 epochs with batch size 256 and 64 for bi-encoder and cross-encoder, respectively. If time allows, just train on all shards. This way, we can train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK) in one go. 
+Later if want to train more, just pick the next shards and use the --resume-bi and --resume-cross options
+```bash
+# pick your next shards; e.g., shards 006..011
+python -m prover.train_premises \
+  --logs logs/magnus_shards/shard_006 logs/magnus_shards/shard_007 \
+         logs/magnus_shards/shard_008 logs/magnus_shards/shard_009 \
+         logs/magnus_shards/shard_010 logs/magnus_shards/shard_011 \
+  --out models \
+  --train-bi \
+  --resume-bi models/premises/encoder \
+  --epochs 1 --batch-size 32
+
+# Then train the cross-encoder with the next shard
+python -m prover.train_premises \
+  --logs logs/magnus_shards/shard_001 \
+  --out models \
+  --train-cross --epochs 0 \
+  --resume-cross models/premises/rerank \
+  --epochs-cross 1 --batch-size-cross 16
+```
+
+Practical example: On a workstation with RTX 5090, train 2 epochs with batch size 256 and 64 for bi-encoder and cross-encoder, respectively. If time allows, just train on all shards. This way, we can train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK) in one go. 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m prover.train_premises \
   --logs-glob 'logs/magnus_shards/shard_*' \
