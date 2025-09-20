@@ -85,9 +85,9 @@ def train_bi_encoder(pairs, base_model: str, epochs: int, batch_size: int, out_d
         return None
 
     model = SentenceTransformer(base_model)
-    train_loader = DataLoader(examples, shuffle=True, batch_size=batch_size, drop_last=True)
+    train_loader = DataLoader(examples, shuffle=True, batch_size=batch_size, drop_last=False)
     loss = losses.MultipleNegativesRankingLoss(model)
-    warmup_steps = max(10, int(0.1 * epochs * len(train_loader)))
+    warmup_steps = max(10, int(0.1 * max(1, epochs) * max(1, len(train_loader))))
     model.fit(
         train_objectives=[(train_loader, loss)],
         epochs=epochs,
@@ -139,10 +139,10 @@ def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, ou
 
     random.shuffle(triples)
     examples = [InputExample(texts=[g, p], label=float(y)) for (g, p, y) in triples]
-    train_loader = DataLoader(examples, shuffle=True, batch_size=batch_size, drop_last=True)
+    train_loader = DataLoader(examples, shuffle=True, batch_size=batch_size, drop_last=False)
 
     model = CrossEncoder(base_model, num_labels=1)  # regression w/ BCEWithLogits
-    warmup_steps = max(10, int(0.1 * epochs * len(train_loader)))
+    warmup_steps = max(10, int(0.1 * max(1, epochs) * max(1, len(train_loader))))
     model.fit(
         train_dataloader=train_loader,
         epochs=epochs,
@@ -206,12 +206,13 @@ def main():
 
     args = ap.parse_args()
 
-    # Expand logs: explicit list + glob
+    # Expand logs: prefer globbed shards; ignore the default file when a glob is given
+    default_logs = ["logs/attempts.log.jsonl"]
     shard_paths = []
-    if args.logs:
-        shard_paths.extend(args.logs)
     if args.logs_glob:
         shard_paths.extend(sorted(glob.glob(args.logs_glob)))
+    if args.logs and (args.logs != default_logs or not args.logs_glob):
+        shard_paths.extend(args.logs)
     # Dedup while preserving order
     seen = set(); shards = []
     for p in shard_paths:
@@ -223,6 +224,19 @@ def main():
         shards = shards[:args.max_shards]
     if not shards:
         shards = ["logs/attempts.log.jsonl"]
+
+    # Drop missing or empty files up front
+    filtered = []
+    for p in shards:
+        try:
+            st = Path(p).stat()
+            if st.st_size > 0:
+                filtered.append(p)
+            else:
+                print(f"[train_premises] Skip {p}: empty file.")
+        except FileNotFoundError:
+            print(f"[train_premises] Skip {p}: not found.")
+    shards = filtered or shards
 
     out_dir = Path(args.out)
     enc_ckpt = args.resume_bi.strip()
@@ -237,6 +251,9 @@ def main():
         base = enc_ckpt or args.base_model
         print(f"[train_premises] BI on {shard} (base={base})")
         pairs = build_pairs([shard], min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
+        if not pairs:
+            print(f"[train_premises] SKIP BI on {shard}: no mined pairs.")
+            return
         res = train_bi_encoder(pairs, base_model=base, epochs=args.epochs, batch_size=args.batch_size, out_dir=out_dir)
         if res is not None:
             enc_ckpt = str(out_dir / "premises" / "encoder")
@@ -250,6 +267,9 @@ def main():
         base = rr_ckpt or args.cross_base_model
         print(f"[train_premises] CROSS on {shard} (base={base})")
         pairs = build_pairs([shard], min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
+        if not pairs:
+            print(f"[train_premises] SKIP CROSS on {shard}: no mined pairs.")
+            return
         res = train_cross_encoder(pairs, base_model=base, epochs=args.epochs_cross,
                                   batch_size=args.batch_size_cross, out_dir=out_dir,
                                   max_negs_per_pos=args.negs_per_pos_cross)
