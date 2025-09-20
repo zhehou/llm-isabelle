@@ -148,7 +148,7 @@ def plan_outline(
     """
     Generate an Isar outline with 'sorry' placeholders and return it. No filling.
     """
-    server_info, proc = start_isabelle_server(name="planner", log_file="planner_ui.log")
+    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
     isa = get_isabelle_client(server_info)
     session = isa.session_start(session=ISABELLE_SESSION)
     try:
@@ -227,7 +227,7 @@ def plan_and_fill(
     """
     force_outline = (mode == "outline")
 
-    server_info, proc = start_isabelle_server(name="planner", log_file="planner_ui.log")
+    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
     isa = get_isabelle_client(server_info)
     session = isa.session_start(session=ISABELLE_SESSION)
 

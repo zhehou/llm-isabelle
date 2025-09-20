@@ -548,7 +548,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
         suites = [(args.suite, SUITE_MAP[args.suite])]
 
     # Start Isabelle once (we also optionally use it to verify proofs)
-    server_info, proc = start_isabelle_server(name="planner", log_file="planner_bench.log")
+    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_bench.log")
     print(server_info.strip())
     isabelle = get_isabelle_client(server_info)
     session_id, used_session = _session_start_with_fallback(isabelle)

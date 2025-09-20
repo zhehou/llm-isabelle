@@ -181,7 +181,7 @@ def main():
                     help="Shuffle shard order before training.")    
     # model dir default is 'models/' (the script will save under models/premises/…)
     ap.add_argument("--out", type=str, default="models", help="Model root directory (default: models/).")
-    ap.add_argument("--dump-pairs", action="store_true", help="Write mined pairs to data/premise_pairs.jsonl for inspection.")
+    ap.add_argument("--dump-pairs", action="store_true", help="Write mined pairs to logs/premise_pairs.jsonl for inspection.")
     ap.add_argument("--min-pos-per-goal", type=int, default=1)
     ap.add_argument("--max-negs-per-pos", type=int, default=8)
 

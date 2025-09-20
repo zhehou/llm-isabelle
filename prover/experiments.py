@@ -195,7 +195,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
     models_ensemble = [m.strip() for m in args.models.split(",")] if args.models else None
 
     # Start Isabelle once
-    server_info, proc = start_isabelle_server(name="isabelle", log_file="bench_server.log")
+    server_info, proc = start_isabelle_server(name="isabelle", log_file="logs/bench_server.log")
     print(server_info.strip())
     isabelle = get_isabelle_client(server_info)
     session_id = isabelle.session_start(session="HOL")
@@ -372,7 +372,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
 
     models_list = [m.strip() for m in args.models.split(",")] if args.models else None
 
-    server_info, proc = start_isabelle_server(name="isabelle", log_file="regress_server.log")
+    server_info, proc = start_isabelle_server(name="isabelle", log_file="logs/regress_server.log")
     print(server_info.strip())
     isabelle = get_isabelle_client(server_info)
     session_id = isabelle.session_start(session="HOL")
