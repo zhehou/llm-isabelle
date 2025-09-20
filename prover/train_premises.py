@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse, json, os, random, sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
+import glob, random
 
 def _iter_attempts(paths: List[str]):
     for p in paths:
@@ -172,6 +173,12 @@ def main():
     )
     ap.add_argument("--logs", type=str, nargs="+", default=["logs/attempts.log.jsonl"],
                     help="Paths to attempts log files (JSONL).")
+    ap.add_argument("--logs-glob", type=str, default="",
+                    help="Glob for many shards, e.g., 'logs/magnus_shards/shard_*'.")
+    ap.add_argument("--max-shards", type=int, default=0,
+                    help="Limit number of shards processed from --logs / --logs-glob (0 = no limit).")
+    ap.add_argument("--shuffle-shards", action="store_true",
+                    help="Shuffle shard order before training.")    
     # model dir default is 'models/' (the script will save under models/premises/…)
     ap.add_argument("--out", type=str, default="models", help="Model root directory (default: models/).")
     ap.add_argument("--dump-pairs", action="store_true", help="Write mined pairs to data/premise_pairs.jsonl for inspection.")
@@ -182,6 +189,8 @@ def main():
     ap.add_argument("--train-bi", action="store_true", default=True, help="Train bi-encoder (SELECT).")
     ap.add_argument("--base-model", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
                     help="Sentence-Transformers base model for the bi-encoder.")
+    ap.add_argument("--resume-bi", type=str, default="",
+                    help="Resume bi-encoder from this model dir (overrides base-model for first shard if set).")    
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=64)
 
@@ -189,40 +198,79 @@ def main():
     ap.add_argument("--train-cross", action="store_true", help="Also train cross-encoder (RE-RANK).")
     ap.add_argument("--cross-base-model", type=str, default="cross-encoder/ms-marco-MiniLM-L-6-v2",
                     help="Sentence-Transformers CrossEncoder base model.")
+    ap.add_argument("--resume-cross", type=str, default="",
+                    help="Resume cross-encoder from this model dir (overrides cross-base-model for first shard if set).")    
     ap.add_argument("--epochs-cross", type=int, default=2)
     ap.add_argument("--batch-size-cross", type=int, default=32)
     ap.add_argument("--negs-per-pos-cross", type=int, default=4)
 
     args = ap.parse_args()
 
-    pairs = build_pairs(args.logs, min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
-    if args.dump_pairs:
-        outp = Path("data"); outp.mkdir(parents=True, exist_ok=True)
-        with (outp / "premise_pairs.jsonl").open("w", encoding="utf-8") as f:
-            for r in pairs:
-                f.write(json.dumps(r) + "\n")
-        print(f"[train_premises] Wrote mined pairs: {outp/'premise_pairs.jsonl'}  (n={len(pairs)})")
+    # Expand logs: explicit list + glob
+    shard_paths = []
+    if args.logs:
+        shard_paths.extend(args.logs)
+    if args.logs_glob:
+        shard_paths.extend(sorted(glob.glob(args.logs_glob)))
+    # Dedup while preserving order
+    seen = set(); shards = []
+    for p in shard_paths:
+        if p not in seen:
+            seen.add(p); shards.append(p)
+    if args.shuffle_shards:
+        random.shuffle(shards)
+    if args.max_shards and args.max_shards > 0:
+        shards = shards[:args.max_shards]
+    if not shards:
+        shards = ["logs/attempts.log.jsonl"]
 
     out_dir = Path(args.out)
+    enc_ckpt = args.resume_bi.strip()
+    rr_ckpt  = args.resume_cross.strip()
 
-    if args.train_bi if hasattr(args, "train_bi") else True:
-        train_bi_encoder(
-            pairs,
-            base_model=args.base_model,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            out_dir=out_dir,
-        )
+    def _train_bi_on(shard: str):
+        nonlocal enc_ckpt
+        if not (args.train_bi if hasattr(args, "train_bi") else True):
+            return
+        if args.epochs <= 0:
+            return
+        base = enc_ckpt or args.base_model
+        print(f"[train_premises] BI on {shard} (base={base})")
+        pairs = build_pairs([shard], min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
+        res = train_bi_encoder(pairs, base_model=base, epochs=args.epochs, batch_size=args.batch_size, out_dir=out_dir)
+        if res is not None:
+            enc_ckpt = str(out_dir / "premises" / "encoder")
 
-    if args.train_cross:
-        train_cross_encoder(
-            pairs,
-            base_model=args.cross_base_model,
-            epochs=args.epochs_cross,
-            batch_size=args.batch_size_cross,
-            out_dir=out_dir,
-            max_negs_per_pos=args.negs_per_pos_cross,
-        )
+    def _train_cross_on(shard: str):
+        nonlocal rr_ckpt
+        if not args.train_cross:
+            return
+        if args.epochs_cross <= 0:
+            return
+        base = rr_ckpt or args.cross_base_model
+        print(f"[train_premises] CROSS on {shard} (base={base})")
+        pairs = build_pairs([shard], min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
+        res = train_cross_encoder(pairs, base_model=base, epochs=args.epochs_cross,
+                                  batch_size=args.batch_size_cross, out_dir=out_dir,
+                                  max_negs_per_pos=args.negs_per_pos_cross)
+        if res is not None:
+            rr_ckpt = str(out_dir / "premises" / "rerank")
+
+    # Optional one-shot dump from the first shard
+    if args.dump_pairs:
+        first = shards[0]
+        pairs0 = build_pairs([first], min_pos_per_goal=args.min_pos_per_goal, max_negs_per_pos=args.max_negs_per_pos)
+        outp = Path("data"); outp.mkdir(parents=True, exist_ok=True)
+        with (outp / "premise_pairs.jsonl").open("w", encoding="utf-8") as f:
+            for r in pairs0:
+                f.write(json.dumps(r) + "\n")
+        print(f"[train_premises] Wrote mined pairs from {first}: {outp/'premise_pairs.jsonl'}  (n={len(pairs0)})")
+
+    # Shard loop: resume from last saved checkpoint automatically
+    for i, shard in enumerate(shards):
+        print(f"[train_premises] ===== Shard {i+1}/{len(shards)}: {shard} =====")
+        _train_bi_on(shard)
+        _train_cross_on(shard)
 
     print("[train_premises] Done.")
 

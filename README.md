@@ -266,7 +266,8 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 ```
 
 ### 3.4 Premise selection for the prover
-Enable premises + provide context files using the options --premises --context --context-files like below
+Main options
+Enable premise selection + provide context files using the options --premises --context --context-files like below
 ```bash
 python -m prover.cli \
   --goal 'map f (xs @ ys) = map f xs @ map f ys' \
@@ -274,7 +275,7 @@ python -m prover.cli \
   --trace
 ```
 
-Advanced controls --premises-k-select --premises-k-rerank --context-window (defaults come from config/env):
+More options --premises-k-select --premises-k-rerank --context-window (defaults come from config/env):
 ```bash
 python -m prover.cli \
   --goal 'rev (rev xs) = xs' \
@@ -289,45 +290,63 @@ python -m prover.experiments bench --file datasets/lists.txt \
   --premises --context --context-files "tmp/ContextDemo.thy"
 ```
 
-Train only the bi‑encoder (SELECT) for premise selection:
+Download the MagnusData dataset (full_dataset.json) from Hugging Face (needs an account)
+https://huggingface.co/datasets/Simontwice/premise_selection_in_isabelle/tree/main
+And put the downloaded file in datasets/magnusdata.
+
+Also install the small dep used for streaming
 ```bash
+pip install -U datasets
+```
+
+Convert MagnusData to attempts log used for our training (this may take a while, output file ~7.3GB)
+```bash
+python datasets/magnus2attempts.py \                                            
+  --input datasets/magnusdata/full_dataset.json \
+  --out logs/attempts.magnus.jsonl \
+  --pool-size 64 \                   
+  --names-cache tmp/magnus_names.json
+```
+
+Split attempts.magnus.jsonl into multiple shards as it's too large. Practical considerations: On a Macbook Pro with M1 Pro, shard size can be 200MB. On a server with RTX 5090, shard size can be 500MB or more.
+```bash
+python logs/split_json.py \
+  --input logs/attempts.magnus.jsonl \
+  --outdir logs/magnus_shards \
+  --target-size-mb 200
+```
+
+Practical considerations: On a Macbook Pro with M1 Pro, train 1 epoch with batch size 32 using about 6 shards for the bi-encoder,  and batch siez 16 using 1 shard for the cross-encoder, as the latter is much slower. This is a good starter, and can train more when have time.
+```bash
+# Train the bi-encoder first
 python -m prover.train_premises \
-  --logs logs/attempts.log.jsonl \
+  --logs-glob 'logs/magnus_shards/shard_*' \
   --out models \
   --train-bi \
   --base-model sentence-transformers/all-MiniLM-L6-v2 \
-  --epochs 2 --batch-size 64 \
-  --dump-pairs
-```
+  --epochs 1 --batch-size 32 \
+  --max-shards 6
 
-Train only the cross‑encoder (RE‑RANK) for premise selection:
-```bash
-# Note: current script runs bi‑encoder by default.
-# To effectively skip bi training time, set --epochs 0 for the bi stage.
+# Then train the cross-encoder
 python -m prover.train_premises \
-  --logs logs/attempts.log.jsonl \
+  --logs-glob 'logs/magnus_shards/shard_*' \
   --out models \
-  --train-cross \
-  --epochs 0 \
+  --train-cross --epochs 0 \  # skip bi stage entirely
   --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
-  --epochs-cross 2 --batch-size-cross 32 \
-  --dump-pairs
+  --epochs-cross 1 --batch-size-cross 16 --max-shards 1
 ```
 
-Train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK)
+Practical considerations: On a workstation with RTX 5090, train 2 epochs with batch size 256 and 64 for bi-encoder and cross-encoder, respectively. If time allows, just train on all shards. This way, we can train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK) in one go. 
 ```bash
-# Note: current script runs bi‑encoder by default.
-# To effectively skip bi training time, set --epochs 0 for the bi stage.
-python -m prover.train_premises \
-  --logs logs/attempts.log.jsonl \
+CUDA_VISIBLE_DEVICES=0 python -m prover.train_premises \
+  --logs-glob 'logs/magnus_shards/shard_*' \
   --out models \
-  --train-bi \
-  --train-cross \
+  --train-bi --train-cross \
   --base-model sentence-transformers/all-MiniLM-L6-v2 \
   --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
-  --epochs 2 --batch-size 64 \
-  --epochs-cross 2 --batch-size-cross 32 \
-  --dump-pairs
+  --epochs 2 --batch-size 256 \
+  --epochs-cross 2 --batch-size-cross 64 \
+  --shuffle-shards
 ```
 
 To use the trained models for premise selection, simply use the --premises option, and it will automatically load the model from the folder \models\premises if it exists. 
