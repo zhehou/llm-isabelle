@@ -216,6 +216,7 @@ python -m prover.experiments aggregate --best-only --top-k 2
 ```
 
 ### 3.3 Tactics reranker for the prover
+
 Train a tactics reranker Supervised (sklearn / XGBoost):
 ```bash
 python -m prover.train_reranker --algo sklearn-logreg --target bandit
@@ -301,11 +302,10 @@ pip install -U datasets
 
 Convert MagnusData to attempts log used for our training (this may take a while, output file ~7.3GB)
 ```bash
-python datasets/magnus2attempts.py \                                            
+python datasets/magnus2attempts.py \
   --input datasets/magnusdata/full_dataset.json \
   --out logs/attempts.magnus.jsonl \
-  --pool-size 64 \                   
-  --names-cache tmp/magnus_names.json
+  --k-pool 64
 ```
 
 Split attempts.magnus.jsonl into multiple shards as it's too large. Practical considerations: On a Macbook Pro with M1 Pro, shard size can be 200MB. On a server with RTX 5090, shard size can be 500MB or more.
@@ -316,7 +316,7 @@ python logs/split_json.py \
   --target-size-mb 200
 ```
 
-Practical example: On a Macbook Pro with M1 Pro, train 1 epoch with batch size 32 using about 6 shards for the bi-encoder,  and batch siez 16 using 1 shard for the cross-encoder, as the latter is much slower. This is a good starter, and can train more when have time.
+Practical example: On a Macbook Pro with M1 Pro, train 1 epoch with batch size 32 using about 6 shards for the bi-encoder,  and batch siez 4 using 1 shard for the cross-encoder, as the latter is much slower. This is a good starter, and can train more when have time.
 ```bash
 # Train the bi-encoder first
 python -m prover.train_premises \
@@ -331,9 +331,11 @@ python -m prover.train_premises \
 python -m prover.train_premises \
   --logs-glob 'logs/magnus_shards/shard_*' \
   --out models \
-  --train-cross --epochs 0 \  # skip bi stage entirely
-  --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
-  --epochs-cross 1 --batch-size-cross 16 --max-shards 1
+  --train-cross --epochs 0 \
+  --cross-base-model cross-encoder/ms-marco-MiniLM-L-2-v2 \
+  --epochs-cross 1 --batch-size-cross 4 \
+  --cross-max-length 160 --cross-grad-accum 4 \
+  --max-shards 1
 ```
 
 Later if want to train more, just pick the next shards and use the --resume-bi and --resume-cross options
@@ -354,7 +356,8 @@ python -m prover.train_premises \
   --out models \
   --train-cross --epochs 0 \
   --resume-cross models/premises/rerank \
-  --epochs-cross 1 --batch-size-cross 16
+  --epochs-cross 1 --batch-size-cross 4 \
+  --cross-max-length 160 --cross-grad-accum 4
 ```
 
 Practical example: On a workstation with RTX 5090, train 2 epochs with batch size 256 and 64 for bi-encoder and cross-encoder, respectively. If time allows, just train on all shards. This way, we can train both the bi‑encoder (SELECT) and the cross‑encoder (RE‑RANK) in one go. 
@@ -367,6 +370,7 @@ CUDA_VISIBLE_DEVICES=0 python -m prover.train_premises \
   --cross-base-model cross-encoder/ms-marco-MiniLM-L-6-v2 \
   --epochs 2 --batch-size 256 \
   --epochs-cross 2 --batch-size-cross 64 \
+  --cross-device cuda --cross-max-length 256 --cross-grad-accum 1 \
   --shuffle-shards
 ```
 

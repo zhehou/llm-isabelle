@@ -27,8 +27,10 @@ def _iter_attempts(paths: List[str]):
                 yield rec
 
 def build_pairs(log_paths: List[str], min_pos_per_goal: int = 1, max_negs_per_pos: int = 8):
-    """Return a list of dict records: {'goal', 'pos', 'negs'} with hard negatives from retrieval pool."""
-    bag: Dict[str, Dict[str, Set[str]]] = {}
+    """Return list of dicts per goal:
+       {'goal', 'pos', 'negs'}  (IDs / lemma names, for backward-compat)
+       and, when available,     {'pos_text', 'negs_text'} (resolved via facts_map)."""
+    bag: Dict[str, Dict[str, Set[str] | Dict[str, str]]] = {}
     for rec in _iter_attempts(log_paths):
         t = rec.get("type")
         if t not in ("expand", "finish"):
@@ -38,20 +40,25 @@ def build_pairs(log_paths: List[str], min_pos_per_goal: int = 1, max_negs_per_po
             continue
         pool = rec.get("retrieval_picks") or []
         facts = rec.get("cand_facts") or []
+        fmap: Dict[str, str] = rec.get("facts_map") or {}
         ok = bool(rec.get("ok", False))
 
-        info = bag.setdefault(g, {"pos": set(), "pool": set()})
+        info = bag.setdefault(g, {"pos": set(), "pool": set(), "fmap": {}})
         for fid in pool:
             info["pool"].add(str(fid))
         if ok:
             for name in facts:
                 if name:
                     info["pos"].add(str(name))
-
+        # Merge any available text map (name -> statement text)
+        if fmap:
+            # keep last-wins merge per goal
+            info["fmap"] = {**(info.get("fmap") or {}), **{str(k): str(v) for k, v in fmap.items()}}
     out = []
     for g, info in bag.items():
         pos = list(info["pos"])
         pool = list(info["pool"])
+        fmap: Dict[str, str] = info.get("fmap") or {}
         if len(pos) < min_pos_per_goal:
             continue
         # negatives: from pool, excluding positive lemma names
@@ -62,7 +69,16 @@ def build_pairs(log_paths: List[str], min_pos_per_goal: int = 1, max_negs_per_po
         neg = [nm for nm in set(pool_names) if nm not in set(pos)]
         for p in pos:
             nns = random.sample(neg, k=min(max_negs_per_pos, len(neg))) if neg else []
-            out.append({"goal": g, "pos": p, "negs": nns})
+            # Resolve to text when facts_map is available; fall back to names
+            p_txt = fmap.get(p, p)
+            nns_txt = [fmap.get(nm, nm) for nm in nns]
+            out.append({
+                "goal": g,
+                "pos": p,
+                "negs": nns,
+                "pos_text": p_txt,
+                "negs_text": nns_txt,
+            })
     return out
 
 # ---------- Training: Bi-encoder (SELECT) ----------
@@ -77,7 +93,8 @@ def train_bi_encoder(pairs, base_model: str, epochs: int, batch_size: int, out_d
 
     examples: List["InputExample"] = []
     for rec in pairs:
-        g = rec["goal"]; p = rec["pos"]
+        g = rec["goal"]
+        p = rec.get("pos_text") or rec["pos"]
         examples.append(InputExample(texts=[g, p]))
 
     if not examples:
@@ -113,18 +130,26 @@ def train_bi_encoder(pairs, base_model: str, epochs: int, batch_size: int, out_d
     return enc_dir
 
 # ---------- Training: Cross-encoder (RE-RANK) ----------
-def build_cross_examples(pairs, max_negs_per_pos: int = 4):
-    """Expand pairs into labeled (goal, premise, y) tuples."""
-    pos = [(r["goal"], r["pos"], 1.0) for r in pairs]
-    neg = []
-    for r in pairs:
-        g = r["goal"]
-        for n in (r.get("negs") or [])[:max_negs_per_pos]:
-            neg.append((g, n, 0.0))
-    return pos + neg
+def build_cross_examples(pairs: List[Dict[str, Any]], max_negs_per_pos: int = 4):
+    """Return list of (goal, premise_text, label) triples for cross-encoder training,
+    preferring 'pos_text' / 'negs_text' when present (fallback = names)."""
+    triples: List[Tuple[str, str, float]] = []
+    for rec in pairs:
+        g = rec["goal"]
+        # positives
+        p_txt = rec.get("pos_text") or rec.get("pos")  # text → name fallback
+        if p_txt:
+            triples.append((g, p_txt, 1.0))
+        # negatives
+        neg_txts: List[str] = rec.get("negs_text") or rec.get("negs", [])
+        for n in neg_txts[:max_negs_per_pos]:
+            n_txt = n  # either already text, or a name if no text was provided
+            triples.append((g, n_txt, 0.0))
+    return triples
 
 def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, out_dir: Path,
-                        max_negs_per_pos: int = 4):
+                        max_negs_per_pos: int = 4, device: str = "cpu",
+                        max_length: int = 256, grad_accum: int = 1):
     try:
         from sentence_transformers import CrossEncoder, InputExample
         from torch.utils.data import DataLoader
@@ -132,6 +157,8 @@ def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, ou
         print("[train_premises] ERROR: sentence-transformers (and torch) are required to train a cross-encoder.", file=sys.stderr)
         sys.exit(2)
 
+    # build_cross_examples prefers 'pos_text'/'negs_text' when present,
+    # so the cross-encoder learns on (goal_text, premise_text).
     triples = build_cross_examples(pairs, max_negs_per_pos=max_negs_per_pos)
     if not triples:
         print("[train_premises] No cross-encoder examples mined; skipping.", file=sys.stderr)
@@ -141,7 +168,8 @@ def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, ou
     examples = [InputExample(texts=[g, p], label=float(y)) for (g, p, y) in triples]
     train_loader = DataLoader(examples, shuffle=True, batch_size=batch_size, drop_last=False)
 
-    model = CrossEncoder(base_model, num_labels=1)  # regression w/ BCEWithLogits
+    # regression w/ BCEWithLogits; use shorter sequences & a chosen device to save memory
+    model = CrossEncoder(base_model, num_labels=1, device=device, max_length=max_length)
     warmup_steps = max(10, int(0.1 * max(1, epochs) * max(1, len(train_loader))))
     model.fit(
         train_dataloader=train_loader,
@@ -149,6 +177,8 @@ def train_cross_encoder(pairs, base_model: str, epochs: int, batch_size: int, ou
         warmup_steps=warmup_steps,
         output_path=None,
         show_progress_bar=True,
+        gradient_accumulation_steps=grad_accum,
+        use_amp=False,  # AMP not useful on MPS; keep off        
     )
 
     rr_dir = out_dir / "premises" / "rerank"
@@ -203,6 +233,13 @@ def main():
     ap.add_argument("--epochs-cross", type=int, default=2)
     ap.add_argument("--batch-size-cross", type=int, default=32)
     ap.add_argument("--negs-per-pos-cross", type=int, default=4)
+    ap.add_argument("--cross-device", type=str, default="cpu",
+                    choices=["cpu","mps","cuda"],
+                    help="Device for cross-encoder (cpu recommended on M1 to avoid MPS OOM).")
+    ap.add_argument("--cross-max-length", type=int, default=256,
+                    help="Tokenizer max_length for cross-encoder (reduce to lower memory; e.g., 160).")
+    ap.add_argument("--cross-grad-accum", type=int, default=1,
+                    help="Gradient accumulation steps for cross-encoder (simulate larger batch).")    
 
     args = ap.parse_args()
 
@@ -270,9 +307,17 @@ def main():
         if not pairs:
             print(f"[train_premises] SKIP CROSS on {shard}: no mined pairs.")
             return
-        res = train_cross_encoder(pairs, base_model=base, epochs=args.epochs_cross,
-                                  batch_size=args.batch_size_cross, out_dir=out_dir,
-                                  max_negs_per_pos=args.negs_per_pos_cross)
+        res = train_cross_encoder(
+            pairs,
+            base_model=base,
+            epochs=args.epochs_cross,
+            batch_size=args.batch_size_cross,
+            out_dir=out_dir,
+            max_negs_per_pos=args.negs_per_pos_cross,
+            device=args.cross_device,
+            max_length=args.cross_max_length,
+            grad_accum=args.cross_grad_accum,
+        )
         if res is not None:
             rr_ckpt = str(out_dir / "premises" / "rerank")
 
