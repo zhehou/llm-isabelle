@@ -42,6 +42,7 @@ from prover.isabelle_api import (
     run_theory,
     finished_ok,
 )
+from prover import config as CFG  # NEW: live switches for premise/context
 
 def _drain_and_close_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     if not loop or loop.is_closed():
@@ -348,6 +349,12 @@ def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Option
     Returns (res, err_text). When res is None, the caller should mark failure but continue the run.
     """
     try:
+        # Apply NEW premise/context flags to prover config for this run (read inside prove_goal) :contentReference[oaicite:5]{index=5}
+        CFG.PREMISES_ENABLE = bool(getattr(args, "premises", True))
+        CFG.PROVER_CONTEXT_ENABLE = bool(getattr(args, "context", True))
+        if getattr(args, "context_files", ""):
+            raw = args.context_files.replace(",", " ").split()
+            CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]        
         res = plan_and_fill(
             goal,
             model=model,
@@ -611,6 +618,9 @@ def cmd_bench(args: argparse.Namespace) -> None:
                         {
                             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "cmd": "bench",
+                            "planner_variant": "cegis-v1",
+                            "repair_beam_k": 2,
+                            "whole_fallback": True,                            
                             "suite": suite_name,
                             "config": cfg_name,
                             "run_index": r,
@@ -889,6 +899,9 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 {
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "cmd": "regress",
+                    "planner_variant": "cegis-v1",
+                    "repair_beam_k": 2,
+                    "whole_fallback": True,                    
                     "suite": suite_name,
                     "config": config_name,
                     "goal_index": i - 1,
@@ -1109,6 +1122,19 @@ def main():
     pb.add_argument("--seed", type=int, default=0)
     # override planner proof log path
     pb.add_argument("--log-path", type=str, default=str(DEFAULT_LOG_PATH))
+    # NEW: premise selection & file-aware context (default ON, like planner CLI)
+    pb.add_argument("--premises", dest="premises", action="store_true",
+                     help="Enable premise retrieval (default).")
+    pb.add_argument("--no-premises", dest="premises", action="store_false",
+                     help="Disable premise retrieval.")
+    pb.set_defaults(premises=True)
+    pb.add_argument("--context", dest="context", action="store_true",
+                     help="Enable file-aware context window (default).")
+    pb.add_argument("--no-context", dest="context", action="store_false",
+                     help="Disable file-aware context window.")
+    pb.set_defaults(context=True)
+    pb.add_argument("--context-files", type=str, default="",
+                     help="Space/comma-separated .thy files to seed context.")    
     pb.set_defaults(func=cmd_bench)
 
     # Regress
@@ -1143,6 +1169,19 @@ def main():
     pr.add_argument("--tol-time", type=float, default=2.0)
     # override planner proof log path
     pr.add_argument("--log-path", type=str, default=str(DEFAULT_LOG_PATH))
+    # NEW: premise selection & file-aware context (default ON, like planner CLI)
+    pr.add_argument("--premises", dest="premises", action="store_true",
+                     help="Enable premise retrieval (default).")
+    pr.add_argument("--no-premises", dest="premises", action="store_false",
+                     help="Disable premise retrieval.")
+    pr.set_defaults(premises=True)
+    pr.add_argument("--context", dest="context", action="store_true",
+                     help="Enable file-aware context window (default).")
+    pr.add_argument("--no-context", dest="context", action="store_false",
+                     help="Disable file-aware context window.")
+    pr.set_defaults(context=True)
+    pr.add_argument("--context-files", type=str, default="",
+                     help="Space/comma-separated .thy files to seed context.")      
     pr.set_defaults(func=cmd_regress)
 
     # Aggregate

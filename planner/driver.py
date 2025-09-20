@@ -10,7 +10,7 @@ from planner.skeleton import (
     propose_isar_skeleton,               # legacy single-outline path
     propose_isar_skeleton_diverse_best,  # diverse outlines + quick sketch check (+ scoring)
 )
-from planner.repair import try_local_repairs  # LLM-guided local repair
+from planner.repair import try_cegis_repairs  # CEGIS (errors + counterexamples + region growth)
 
 from prover.config import ISABELLE_SESSION
 from prover.isabelle_api import (
@@ -79,27 +79,27 @@ def _fill_one_hole(
         session,
         goal_text,
         model_name_or_ensemble=model,
-        beam_w=2,
-        max_depth=8,
+        beam_w=3,
+        max_depth=6,
         hint_lemmas=6,
         timeout=per_hole_timeout,
         models=None,
         save_dir=None,
         use_sledge=True,
         sledge_timeout=10,  # keep your current default
-        sledge_every=2,
-        trace=False,
+        sledge_every=1,
+        trace=True,
         use_color=False,
-        use_qc=True,
+        use_qc=False,
         qc_timeout=2,
         qc_every=1,
-        use_np=True,
+        use_np=False,
         np_timeout=5,
         np_every=2,
-        facts_limit=6,
-        do_minimize=True,
+        facts_limit=8,
+        do_minimize=False,
         minimize_timeout=8,
-        do_variants=True,
+        do_variants=False,
         variant_timeout=6,
         variant_tries=24,
         enable_reranker=True,
@@ -305,17 +305,19 @@ def plan_and_fill(
                 hole_idx += 1
                 continue
 
-            # Local repair on failure
+            # CEGIS-style iterative repair on failure (local → block → subproof → whole)
             if repairs and left_s() > 6:
-                patched, applied, _reason = try_local_repairs(
+                patched, applied, _reason = try_cegis_repairs(
                     full_text=full,
                     hole_span=span,
                     goal_text=goal_text,
                     model=model,
                     isabelle=isa,
                     session=session,
-                    repair_budget_s=min(8.0, max(4.0, left_s() * 0.25)),
+                    repair_budget_s=min(10.0, max(5.0, left_s() * 0.33)),
                     max_ops_to_try=max_repairs_per_hole,
+                    beam_k=2,                         # NEW: tiny beam for local repairs
+                    allow_whole_fallback=True,        # NEW: enable whole-proof fallback
                     trace=repair_trace,
                 )
                 if applied and patched != full:

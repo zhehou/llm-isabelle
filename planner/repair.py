@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
+import time
 
 import requests
 
@@ -377,6 +378,12 @@ _REPAIR_USER = """GOAL:
 STATE_BEFORE_HOLE:
 {state_block}
 
+ISABELLE_ERRORS (recent):
+{errors}
+
+COUNTEREXAMPLE/MODEL HINTS:
+{ce_hints}
+
 FACTS/DEFS CANDIDATES:
 {facts_list}
 
@@ -398,6 +405,8 @@ def propose_local_repairs(
     *,
     goal: str,
     state_block: str,
+    errors: List[str],
+    ce_hints: Dict[str, List[str]],
     block_snippet: str,
     nearest_header: str,
     recent_steps: List[str],
@@ -405,9 +414,18 @@ def propose_local_repairs(
     model: Optional[str],
     timeout_s: int,
 ) -> List[RepairOp]:
+    # Flatten CE hints for readability
+    ce_list: List[str] = []
+    if ce_hints.get("bindings"):
+        ce_list += ce_hints["bindings"]
+    if ce_hints.get("def_hints"):
+        ce_list += ce_hints["def_hints"]
+
     prompt = _REPAIR_SYSTEM + "\n\n" + _REPAIR_USER.format(
         goal=goal,
-        state_block=state_block.strip(),
+        state_block=(state_block or "").strip(),
+        errors="\n".join(f"- {e}" for e in (errors or [])) or "(none)",
+        ce_hints="\n".join(ce_list) or "(none)",
         block_snippet=block_snippet.rstrip(),
         nearest_header=nearest_header.strip(),
         recent_steps="\n".join(recent_steps),
@@ -447,7 +465,238 @@ def _heuristic_fallback_ops(goal_text: str, state_block: str, header: str, facts
     return ops[:3]
 
 # =========================
-# Quick check & orchestrator
+# Isabelle error harvesting (for CEGIS feedback)
+# =========================
+def _collect_isabelle_errors(resps) -> List[str]:
+    errs: List[str] = []
+    for r in (resps or []):
+        body = getattr(r, "response_body", None)
+        if isinstance(body, bytes):
+            body = body.decode(errors="replace")
+        if not isinstance(body, str):
+            continue
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and data.get("kind") == "error" and "message" in data:
+                errs.append(str(data["message"]))
+        except json.JSONDecodeError:
+            if "*** Error:" in body or "*** Outer syntax error" in body or "*** Failed" in body:
+                errs.append(body.strip().splitlines()[-1])
+    # Stable de-dup, keep short
+    out: List[str] = []
+    seen = set()
+    for e in errs:
+        if e not in seen:
+            seen.add(e); out.append(e)
+    return out[:3]
+
+def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[str]]:
+    try:
+        thy = build_theory(full_text.splitlines(), add_print_state=True, end_with="sorry")
+        resps = run_theory(isabelle, session, thy)
+        return (last_print_state_block(resps) or ""), _collect_isabelle_errors(resps)
+    except Exception:
+        return "", ["transport_or_build_error"]
+
+# =========================
+# Nitpick counterexample harvesting (CE hints)
+# =========================
+_CE_BINDING_RE = re.compile(r"\b([a-z][A-Za-z0-9_']*)\s*=\s*([^,\s][^,\n]*)")
+_DEF_HINT_RE   = re.compile(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b")
+
+def _nitpick_state_hints_from_text(text: str) -> Dict[str, List[str]]:
+    """
+    Extracts lightweight CE hints from Nitpick/print_state output:
+      - variable bindings x = …
+      - *_def occurrences → suggest unfolding/simp only
+    """
+    binds: List[str] = []
+    for m in _CE_BINDING_RE.finditer(text or ""):
+        v, val = m.group(1), m.group(2)
+        if v and val:
+            binds.append(f"{v} = {val.strip()}")
+    defs = list(dict.fromkeys(_DEF_HINT_RE.findall(text or "")))
+    ce_facts: List[str] = []
+    if defs:
+        ce_facts += [f"{d}_def" for d in defs]
+        ce_facts += [f"unfolding {d}_def" for d in defs]
+        ce_facts += [f"simp only: {d}_def" for d in defs]
+    return {"bindings": binds[:8], "def_hints": ce_facts[:12]}
+
+def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,int], timeout_s: int = 3) -> str:
+    """
+    Build a minimal variant that invokes Nitpick at the hole subgoal.
+    We insert a tiny command sequence right at the hole:
+      prefer 1; nitpick [timeout=…]; (* marker *); sorry
+    Return the concatenated Isabelle responses as text (for regex mining).
+    """
+    s, e = hole_span
+    prefix = full_text[:s]
+    suffix = full_text[e:]
+    injected = (
+        "  prefer 1\n"
+        f"  nitpick [timeout={max(1,int(timeout_s))}]\n"
+        "  (* CEGIS-NITPICK-MARK *)\n"
+        "  sorry\n"
+    )
+    variant = prefix + injected + suffix
+    try:
+        thy = build_theory(variant.splitlines(), add_print_state=True, end_with="sorry")
+        resps = run_theory(isabelle, session, thy)
+        chunks: List[str] = []
+        for r in (resps or []):
+            body = getattr(r, "response_body", None)
+            if isinstance(body, bytes):
+                chunks.append(body.decode(errors="replace"))
+            elif isinstance(body, str):
+                chunks.append(body)
+        return "\n".join(chunks)
+    except Exception:
+        return ""
+
+def _counterexample_hints(isabelle, session: str, full_text: str, hole_span: Tuple[int,int]) -> Dict[str, List[str]]:
+    """
+    Prefer Nitpick-derived hints; fall back to print_state-derived ones.
+    """
+    nit = _run_nitpick_at_hole(isabelle, session, full_text, hole_span, timeout_s=3)
+    hints = _nitpick_state_hints_from_text(nit)
+    if hints.get("bindings") or hints.get("def_hints"):
+        return hints
+    # Fallback 1: Quickcheck (new)
+    qc_text = _run_quickcheck_at_hole(isabelle, session, full_text, hole_span, timeout_s=3)
+    qc_hints = _quickcheck_state_hints_from_text(qc_text)
+    if qc_hints.get("bindings") or qc_hints.get("def_hints"):
+        return qc_hints
+    # Fallback 2: reuse last print_state if both Nitpick and Quickcheck gave nothing usable
+    state_only, _errs = _quick_state_and_errors(isabelle, session, full_text)
+    return _nitpick_state_hints_from_text(state_only)
+
+# -------- NEW: Quickcheck CE fallback ----------
+_QC_BINDING_RE = re.compile(r"\b([a-z][A-Za-z0-9_']*)\s*=\s*([^,\s][^,\n]*)")
+_QC_FOUND_RE   = re.compile(r"Quickcheck found a counterexample", re.IGNORECASE)
+
+def _run_quickcheck_at_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,int], timeout_s: int = 3) -> str:
+    """
+    Insert a lightweight quickcheck at the current subgoal.
+      prefer 1; quickcheck[timeout=…]; (* mark *); sorry
+    """
+    s, e = hole_span
+    prefix = full_text[:s]
+    suffix = full_text[e:]
+    injected = (
+        "  prefer 1\n"
+        f"  quickcheck[timeout={max(1,int(timeout_s))}]\n"
+        "  (* CEGIS-QUICKCHECK-MARK *)\n"
+        "  sorry\n"
+    )
+    variant = prefix + injected + suffix
+    try:
+        thy = build_theory(variant.splitlines(), add_print_state=True, end_with="sorry")
+        resps = run_theory(isabelle, session, thy)
+        chunks: List[str] = []
+        for r in (resps or []):
+            body = getattr(r, "response_body", None)
+            if isinstance(body, bytes):
+                chunks.append(body.decode(errors="replace"))
+            elif isinstance(body, str):
+                chunks.append(body)
+        return "\n".join(chunks)
+    except Exception:
+        return ""
+
+def _quickcheck_state_hints_from_text(text: str) -> Dict[str, List[str]]:
+    """
+    Very lightweight parsing of Quickcheck output into bindings and *_def nudges.
+    If QC didn't run or found nothing, returns empty hints.
+    """
+    if not text or not _QC_FOUND_RE.search(text):
+        return {"bindings": [], "def_hints": []}
+    binds: List[str] = []
+    for m in _QC_BINDING_RE.finditer(text):
+        v, val = m.group(1), m.group(2)
+        if v and val:
+            binds.append(f"{v} = {val.strip()}")
+    # Reuse _DEF_HINT_RE to nudge unfolding when QC prints defs in context.
+    defs = list(dict.fromkeys(_DEF_HINT_RE.findall(text)))
+    ce_facts: List[str] = []
+    if defs:
+        ce_facts += [f"{d}_def" for d in defs]
+        ce_facts += [f"unfolding {d}_def" for d in defs]
+        ce_facts += [f"simp only: {d}_def" for d in defs]
+    return {"bindings": binds[:8], "def_hints": ce_facts[:12]}
+
+# =========================
+# Region growth helpers (case block / subproof)
+# =========================
+_CASE_RE  = re.compile(r"(?m)^\s*case\b")
+_NEXT_RE  = re.compile(r"(?m)^\s*next\b")
+_PROOF_RE = re.compile(r"(?m)^\s*proof\b")
+_QED_RE   = re.compile(r"(?m)^\s*qed\b")
+
+def _enclosing_case_block(lines: List[str], hole_line: int) -> Tuple[int, int]:
+    i = hole_line
+    while i >= 0 and not _CASE_RE.match(lines[i]): i -= 1
+    if i < 0: return (-1, -1)
+    j = hole_line
+    while j < len(lines) and not (_NEXT_RE.match(lines[j]) or _QED_RE.match(lines[j])): j += 1
+    return (i, j)
+
+def _enclosing_subproof(lines: List[str], hole_line: int) -> Tuple[int, int]:
+    i = hole_line
+    while i >= 0 and not _PROOF_RE.match(lines[i]): i -= 1
+    if i < 0: return (-1, -1)
+    depth, j = 1, i + 1
+    while j < len(lines) and depth > 0:
+        if _PROOF_RE.match(lines[j]): depth += 1
+        elif _QED_RE.match(lines[j]): depth -= 1
+        j += 1
+    return (i, j if j > i else -1)
+
+# =========================
+# Block repair (LLM rewrites just the selected region)
+# =========================
+_BLOCK_SYSTEM = """You repair an Isabelle/Isar PROOF BLOCK.
+Edit ONLY the given BLOCK (between <<<BLOCK … BLOCK).
+Preserve the rest of the proof verbatim.
+The repaired block MUST compile in context, be as small as possible, and keep the intended strategy if reasonable.
+Output ONLY the new block (no fences, no comments)."""
+
+_BLOCK_USER = """GOAL:
+{goal}
+
+ISABELLE_ERRORS (recent):
+{errors}
+
+COUNTEREXAMPLE/MODEL HINTS:
+{ce_hints}
+
+LOCAL CONTEXT (print_state excerpt):
+{state_block}
+
+ORIGINAL BLOCK (edit-only region):
+<<<BLOCK
+{block_text}
+BLOCK
+"""
+
+def _propose_block_repair(
+    *, goal: str, errors: List[str], ce_hints: Dict[str,List[str]],
+    state_block: str, block_text: str, model: Optional[str], timeout_s: int
+) -> str:
+    ce = []
+    if ce_hints.get("bindings"): ce += ce_hints["bindings"]
+    if ce_hints.get("def_hints"): ce += ce_hints["def_hints"]
+    prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
+        goal=goal,
+        errors="\n".join(f"- {e}" for e in (errors or [])) or "(none)",
+        ce_hints="\n".join(ce) or "(none)",
+        state_block=(state_block or "").strip(),
+        block_text=block_text.rstrip(),
+    )
+    return _generate_simple(prompt, model=model, timeout_s=timeout_s).strip()
+
+# =========================
+# Quick check & orchestrators (local + CEGIS wrapper)
 # =========================
 
 def _quick_state_subgoals(isabelle, session: str, text: str) -> int:
@@ -482,6 +731,7 @@ def try_local_repairs(
     session: str,
     repair_budget_s: float = 8.0,
     max_ops_to_try: int = 2,
+    beam_k: int = 1,
     trace: bool = False,
 ) -> Tuple[str, bool, str]:
     start = time.monotonic()
@@ -491,22 +741,29 @@ def try_local_repairs(
     # Split budget: reserve ~half for applying/quick-checking
     propose_timeout = int(min(6, max(3, repair_budget_s * 0.5)))
 
-    # Baseline state on current text
+    # Baseline state/errors on current text
     s0 = _quick_state_subgoals(isabelle, session, full_text)
+    state0, errs0 = _quick_state_and_errors(isabelle, session, full_text)
 
     # Local context (computed once for the prompt)
     hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
     snippet = "\n".join(lines[s:e])
-    state_block = _quick_state_text(isabelle, session, full_text)
-    facts = _facts_from_state(state_block)
+    state_block = state0 or _quick_state_text(isabelle, session, full_text)
+    facts = _facts_from_state(state_block, limit=12)
+    # Augment with Nitpick-derived CE hints
+    ce = _counterexample_hints(isabelle, session, full_text, hole_span)
+    if ce.get("def_hints"):
+        facts = list(dict.fromkeys(ce["def_hints"] + facts))[:16]
     header = _nearest_header(lines, hole_line)
     rsteps = _recent_steps(lines, hole_line)
 
-    # Ask LLM for repair ops with bounded time
+    # Ask LLM for repair ops with bounded time (now passing Isabelle errors + CE hints)
     ops = propose_local_repairs(
         goal=goal_text,
         state_block=state_block,
+        errors=errs0,
+        ce_hints=ce,
         block_snippet=snippet,
         nearest_header=header,
         recent_steps=rsteps,
@@ -541,31 +798,175 @@ def try_local_repairs(
         # otherwise, fall through and just give up
         return full_text, False, "no-time"
 
+    # Tiny beam over ops (configurable via beam_k; default=1 preserves old behavior)
+    # Score = resulting subgoal count (lower is better); tie-break by preferring simpler edits.
     tried = 0
-    current = full_text
+    best_text = None
+    best_score = 9999
+    best_kind = ""
+    scored: List[Tuple[int, str, str]] = []  # (s1, kind, summary)
     for (kind, payload) in ops:
         if _left() <= 0 or tried >= max_ops_to_try:
             break
         tried += 1
 
         if kind == "insert_before_hole":
-            current2 = _apply_insert_before_hole(current, hole_span, payload.line)
+            cand = _apply_insert_before_hole(full_text, hole_span, payload.line)
         elif kind == "replace_in_snippet":
-            current2 = _apply_replace_in_snippet(current, hole_span, payload.find, payload.replace)
+            cand = _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace)
         elif kind == "insert_have_block":
-            current2 = _apply_insert_have_block(current, hole_span, payload.label, payload.statement, payload.after_line_matching, payload.body_hint)
+            cand = _apply_insert_have_block(full_text, hole_span, payload.label, payload.statement, payload.after_line_matching, payload.body_hint)
         else:
             continue
 
-        if current2 == current:
+        if cand == full_text:
             continue
+        s1 = _quick_state_subgoals(isabelle, session, cand)
+        scored.append((s1, kind, getattr(payload, "label", "") or getattr(payload, "line", "") or getattr(payload, "find", "")))
+        if s1 != 9999 and s1 < best_score:
+            best_score, best_text, best_kind = s1, cand, kind
 
-        s1 = _quick_state_subgoals(isabelle, session, current2)
-        accept = (s1 != 9999) and (s1 <= s0 or kind in ("insert_before_hole", "replace_in_snippet"))
+    # Greedy accept any non-regressive candidate; otherwise keep best if beam_k>1
+    if best_text is not None:
         if trace:
-            print(f"[repair] trying {kind} → subgoals {s0} → {s1} | {'ACCEPT' if accept else 'reject'}")
-
-        if accept:
-            return current2, True, kind
+            scored_str = ", ".join([f"{k}:{s}" for (s, k, _) in scored[:max(1, beam_k)]])
+            print(f"[repair] scored candidates (top~{beam_k}): {scored_str} | base {s0} → best {best_score}")
+        non_regressive = (best_score != 9999) and (best_score <= s0 or best_kind in ("insert_before_hole", "replace_in_snippet"))
+        if non_regressive:
+            return best_text, True, f"beam:{best_kind}"
 
     return full_text, False, "repairs-did-not-help"
+
+# =========================
+# CEGIS wrapper: iterate + region growth
+# =========================
+def try_cegis_repairs(
+    *,
+    full_text: str,
+    hole_span: Tuple[int, int],
+    goal_text: str,
+    model: Optional[str],
+    isabelle,
+    session: str,
+    repair_budget_s: float = 10.0,
+    max_ops_to_try: int = 2,
+    beam_k: int = 1,
+    allow_whole_fallback: bool = False,    
+    trace: bool = False,
+) -> Tuple[str, bool, str]:
+    t0 = time.monotonic()
+    def left() -> float: return max(0.0, repair_budget_s - (time.monotonic() - t0))
+
+    # ---- Stage 1: local (iterate a few rounds with fresh feedback) ----
+    base_s = _quick_state_subgoals(isabelle, session, full_text)
+    for round_i in range(3):
+        if left() <= 0: break
+        # Adaptive tiny-beam: when low on time, drop to beam_k=1; else use requested beam_k.
+        eff_k = 1 if left() < 10.0 else max(1, beam_k)
+        patched, ok, tag = try_local_repairs(
+            full_text=full_text, hole_span=hole_span, goal_text=goal_text,
+            model=model, isabelle=isabelle, session=session,
+            repair_budget_s=min(5.0, max(3.0, left()*0.5)),
+            max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,            
+        )
+        if ok and patched != full_text:
+            s1 = _quick_state_subgoals(isabelle, session, patched)
+            if trace: print(f"[cegis] local round {round_i}: {base_s} → {s1} (beam_k={eff_k})")
+            if s1 != 9999 and s1 <= base_s:
+                return patched, True, f"local:{tag}"
+        # refresh signals for next round
+        _ = _quick_state_and_errors(isabelle, session, full_text)
+
+    # ---- Stage 2: case-block rewrite ----
+    hole_line, _indent, lines = _hole_line_bounds(full_text, hole_span)
+    cs, ce = _enclosing_case_block(lines, hole_line)
+    if cs >= 0 and left() > 0:
+        state_block, errs = _quick_state_and_errors(isabelle, session, full_text)
+        ceh = _counterexample_hints(isabelle, session, full_text, hole_span)
+        block = "\n".join(lines[cs:ce])
+        blk = _propose_block_repair(
+            goal=goal_text, errors=errs, ce_hints=ceh,
+            state_block=state_block, block_text=block,
+            model=model, timeout_s=int(min(8, max(4, left())))
+        )
+        if blk and blk.strip() and blk.strip() != block.strip():
+            patched = "\n".join(lines[:cs] + [blk] + lines[ce:])
+            s1 = _quick_state_subgoals(isabelle, session, patched)
+            if trace: print(f"[cegis] case-block: {base_s} → {s1}")
+            if s1 != 9999 and s1 <= base_s:
+                return patched, True, "block:case"
+
+    # ---- Stage 3: subproof rewrite ----
+    ps, pe = _enclosing_subproof(lines, hole_line)
+    if ps >= 0 and left() > 0:
+        state_block, errs = _quick_state_and_errors(isabelle, session, full_text)
+        ceh = _counterexample_hints(isabelle, session, full_text, hole_span)
+        block = "\n".join(lines[ps:pe])
+        blk = _propose_block_repair(
+            goal=goal_text, errors=errs, ce_hints=ceh,
+            state_block=state_block, block_text=block,
+            model=model, timeout_s=int(min(8, max(4, left())))
+        )
+        if blk and blk.strip() and blk.strip() != block.strip():
+            patched = "\n".join(lines[:ps] + [blk] + lines[pe:])
+            s1 = _quick_state_subgoals(isabelle, session, patched)
+            if trace: print(f"[cegis] subproof-block: {base_s} → {s1}")
+            if s1 != 9999 and s1 <= base_s:
+                return patched, True, "block:subproof"
+
+    # ---- Stage 4: whole-proof fallback (optional) ----
+    if allow_whole_fallback and left() > 0:
+        state_block, errs = _quick_state_and_errors(isabelle, session, full_text)
+        ceh = _counterexample_hints(isabelle, session, full_text, hole_span)
+        whole = _propose_whole_repair(
+            goal=goal_text, errors=errs, ce_hints=ceh,
+            state_block=state_block, full_text=full_text,
+            model=model, timeout_s=int(min(12, max(6, left())))
+        )
+        whole = whole.strip()
+        if whole and whole != full_text:
+            s1 = _quick_state_subgoals(isabelle, session, whole)
+            if trace: print(f"[cegis] whole-proof: {base_s} → {s1}")
+            if s1 != 9999 and s1 <= base_s:
+                return whole, True, "whole"
+
+    return full_text, False, "cegis-nohelp"
+
+# -------- NEW: whole-proof fallback proposer ----------
+_WHOLE_SYSTEM = """You repair an Isabelle/Isar PROOF.
+You may rewrite the entire proof but keep the lemma statement and imports intact.
+Prefer minimal edits; ensure the result compiles. Output ONLY the full repaired proof."""
+
+_WHOLE_USER = """GOAL:
+{goal}
+
+ISABELLE_ERRORS (recent):
+{errors}
+
+COUNTEREXAMPLE/MODEL HINTS:
+{ce_hints}
+
+LOCAL CONTEXT (print_state excerpt):
+{state_block}
+
+ORIGINAL PROOF:
+<<<PROOF
+{full_text}
+PROOF
+"""
+
+def _propose_whole_repair(
+    *, goal: str, errors: List[str], ce_hints: Dict[str,List[str]],
+    state_block: str, full_text: str, model: Optional[str], timeout_s: int
+) -> str:
+    ce = []
+    if ce_hints.get("bindings"): ce += ce_hints["bindings"]
+    if ce_hints.get("def_hints"): ce += ce_hints["def_hints"]
+    prompt = _WHOLE_SYSTEM + "\n\n" + _WHOLE_USER.format(
+        goal=goal,
+        errors="\n".join(f"- {e}" for e in (errors or [])) or "(none)",
+        ce_hints="\n".join(ce) or "(none)",
+        state_block=(state_block or "").strip(),
+        full_text=full_text.rstrip(),
+    )
+    return _generate_simple(prompt, model=model, timeout_s=timeout_s)

@@ -5,6 +5,7 @@ import sys
 from typing import List, Optional
 
 from planner.driver import plan_and_fill
+from prover import config as CFG  # NEW: live switches for premise/context
 
 
 def _parse_temps(s: Optional[str]) -> Optional[List[float]]:
@@ -78,11 +79,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--gamma", type=float, default=0.2,
                     help="Weight on hint bonus.")
 
-    # NEW: micro-RAG hint lexicon (optional)
+    # micro-RAG hint lexicon (optional)
     ap.add_argument("--hintlex", default=None,
                     help="Path to token→hints JSON (from planner.priors aggregate).")
     ap.add_argument("--hintlex-top", type=int, default=8,
                     help="Max hints to take per token from the lexicon.")
+
+    # === New flags for CEGIS enhancements ===
+    # Tiny beam over local repairs (adaptive inside the CEGIS loop).
+    ap.add_argument("--beam-k", type=int, default=2,
+                    help="Tiny beam size for local repairs (default: 2). Actual beam adapts down to 1 when time is low.")
+    # Whole-proof fallback toggle.
+    ap.add_argument("--whole-fallback", dest="whole_fallback", action="store_true",
+                    help="Allow whole-proof repair as a final fallback when time remains (default: on).")
+    ap.add_argument("--no-whole-fallback", dest="whole_fallback", action="store_false",
+                    help="Disable whole-proof fallback (skip Baldur-like stage).")
+    ap.set_defaults(whole_fallback=True)
+
+    # --- NEW: premise selection & file-aware context controls (default ON) ---
+    ap.add_argument("--premises", dest="premises", action="store_true",
+                    help="Enable premise retrieval (default).")
+    ap.add_argument("--no-premises", dest="premises", action="store_false",
+                    help="Disable premise retrieval.")
+    ap.set_defaults(premises=True)
+
+    ap.add_argument("--context", dest="context", action="store_true",
+                    help="Enable file-aware context window (default).")
+    ap.add_argument("--no-context", dest="context", action="store_false",
+                    help="Disable file-aware context window.")
+    ap.set_defaults(context=True)
+
+    ap.add_argument("--context-files", type=str, default="",
+                    help="Space/comma-separated .thy files to seed context (e.g., 'A.thy B.thy' or 'A.thy,B.thy').")    
 
     args = ap.parse_args(argv)
 
@@ -97,6 +125,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not goal:
         print("No goal provided. Use --goal '…', a positional goal, or pipe via stdin.", file=sys.stderr)
         return 2
+    
+    # Apply NEW premise/context flags to the prover's live config (read inside prove_goal).
+    # The prover checks: CFG.PROVER_CONTEXT_ENABLE / CFG.PROVER_CONTEXT_FILES / CFG.PREMISES_ENABLE :contentReference[oaicite:2]{index=2}
+    CFG.PREMISES_ENABLE = bool(args.premises)
+    CFG.PROVER_CONTEXT_ENABLE = bool(args.context)
+    if args.context_files:
+        # split on commas and/or whitespace, keep order & drop empties
+        raw = args.context_files.replace(",", " ").split()
+        CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]
+
+    # NOTE: Current driver hard-codes beam_k=2 and whole_fallback=True when calling CEGIS.
+    # We keep the flags here for forward compatibility; warn if users deviate from the current defaults.
+    if args.beam_k != 2 or (args.whole_fallback is False):
+        print(
+            "[cli] Note: driver currently uses beam_k=2 and whole_fallback=True. "
+            "These flags are accepted for forward compatibility and will take effect once driver wiring is updated.",
+            file=sys.stderr,
+        )
 
     res = plan_and_fill(
         goal,
@@ -116,7 +162,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         alpha=args.alpha,
         beta=args.beta,
         gamma=args.gamma,
-        # NEW: hintlex
+        # hintlex
         hintlex_path=args.hintlex,
         hintlex_top=args.hintlex_top,
     )

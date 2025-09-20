@@ -13,6 +13,7 @@ Key features:
   - LLM guesses outline
   - Calls the stepwise prover to fill the details
   - Micro RAG extracted from AFP
+  - CEGIS style iterative proof repair
 ---
 
 ## Table of Contents
@@ -305,7 +306,7 @@ Convert MagnusData to attempts log used for our training (this may take a while,
 python datasets/magnus2attempts.py \
   --input datasets/magnusdata/full_dataset.json \
   --out logs/attempts.magnus.jsonl \
-  --k-pool 64
+  --k-pool 64 --max-rows 500000
 ```
 
 Split attempts.magnus.jsonl into multiple shards as it's too large. Practical considerations: On a Macbook Pro with M1 Pro, shard size can be 200MB. On a server with RTX 5090, shard size can be 500MB or more.
@@ -401,10 +402,10 @@ Controlling the divserity of multiple outlines
 python -m planner.cli --timeout 60 --diverse-outlines --k 3 --temps "0.35,0.55,0.85" --mode auto "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
-Enable proof outline repair (by LLM)
+Proof repair is on by default, but can be turned off
 ```bash
 python -m planner.cli --model "gemini:gemini-2.5-flash" \                   
-  --timeout 120 --mode outline --repairs --repair-trace \
+  --timeout 120 --no-repair \
   "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
@@ -462,7 +463,16 @@ python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
   --priors datasets/isar_priors.json \
   --hintlex datasets/isar_hintlex.json \
   --alpha 1.0 --beta 0.6 --gamma 0.25 \
-  --lib-templates
+```
+
+Also enable context extraction for prover call in planner
+```bash
+python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
+  --context-hints \
+  --priors datasets/isar_priors.json \
+  --hintlex datasets/isar_hintlex.json \
+  --alpha 1.0 --beta 0.6 --gamma 0.25 \
+  --context-files "A.thy"
 ```
 
 Benchmarking a file of lemmas/proof goals with the micro RAG
