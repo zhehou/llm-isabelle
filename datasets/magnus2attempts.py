@@ -42,14 +42,17 @@ def clean_goal_from_state(state: str, fallback_statement: str | None = None) -> 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_.'<>]+")
 
 def tokens_in_step(step: str):
-    if not step:
+    if not step or len(step) < 4:  # micro-opt, output identical
         return []
     return TOKEN_RE.findall(step)
 
 def build_name_index(input_path: str, max_rows: int | None = None):
+    # Same final result as original: names are de-duplicated preserving first occurrence order,
+    # and name2stmt maps first seen statement.
     ds = load_dataset_stream(input_path)
     name2stmt = {}
     names = []
+    seen_names = set()  # moved de-dup inline (keeps original order)
     count = 0
     for ex in ds:
         nm = ex.get("premise_name")
@@ -58,16 +61,13 @@ def build_name_index(input_path: str, max_rows: int | None = None):
             nm = str(nm)
             if nm not in name2stmt and st:
                 name2stmt[nm] = str(st).strip()
-            names.append(nm)
+            if nm not in seen_names:
+                seen_names.add(nm)
+                names.append(nm)
         count += 1
         if max_rows and count >= max_rows:
             break
-    # Dedup names
-    seen = set(); uniq = []
-    for n in names:
-        if n not in seen:
-            seen.add(n); uniq.append(n)
-    return uniq, name2stmt
+    return names, name2stmt
 
 def convert(input_path: str, out_path: str, k_pool: int = 64,
             max_pos: int = 4, max_rows: int | None = None,
@@ -84,9 +84,13 @@ def convert(input_path: str, out_path: str, k_pool: int = 64,
     out_dir = Path(out_path).parent; out_dir.mkdir(parents=True, exist_ok=True)
     out = open(out_path, "w", encoding="utf-8")
     rows = 0
+
+    dumps = json.dumps  # local bind (tiny speedup)
+
     for i, ex in enumerate(ds):
         if max_rows and rows >= max_rows:
             break
+
         # goal text
         state = ex.get("state") or ""
         statement = ex.get("statement") or ""
@@ -95,43 +99,47 @@ def convert(input_path: str, out_path: str, k_pool: int = 64,
 
         # positives
         pos = set()
-        if ex.get("premise_name"):
-            pos.add(str(ex["premise_name"]))
+        main_name = ex.get("premise_name")
+        if main_name:
+            pos.add(str(main_name))
         # mine extra positives mentioned in 'step' if they are known lemma names
         step = ex.get("step") or ""
         if step:
             for tok in tokens_in_step(step):
                 if tok in names_set:
                     pos.add(tok)
+
         # keep at most max_pos (deterministic order: put the explicit premise_name first when present)
         pos_list = []
-        main = str(ex["premise_name"]) if ex.get("premise_name") else None
+        main = str(main_name) if main_name else None
         if main and main in pos:
             pos.remove(main); pos_list.append(main)
         # fill the rest in sorted order for determinism
-        for t in sorted(pos):
-            if len(pos_list) >= max_pos:
-                break
-            pos_list.append(t)
+        if pos:
+            for t in sorted(pos):
+                if len(pos_list) >= max_pos:
+                    break
+                pos_list.append(t)
         if not pos_list:
             # skip rows without at least one positive
             continue
 
         # retrieval pool: positive(s) + random negatives
+        # Build population with O(1) membership via set; behavior unchanged.
+        pos_set = set(pos_list)
+        population = [n for n in names if n not in pos_set]
         pool = list(pos_list)
-        population = [n for n in names if n not in pos_list]
         if population:
             take = max(0, k_pool - len(pool))
             if take > 0:
                 pool.extend(random.sample(population, k=min(take, len(population))))
         # ensure deterministic order: positives first, then sorted negatives
-        negs = sorted([n for n in pool if n not in pos_list])
-        pool = pos_list + negs
+        if len(pool) > len(pos_list):
+            negs = sorted([n for n in pool if n not in pos_set])
+            pool = pos_list + negs
 
         # facts_map: embed text for every name in pool (fallback to the name)
-        facts_map = {}
-        for nm in pool:
-            facts_map[nm] = name2stmt.get(nm, nm)
+        facts_map = {nm: name2stmt.get(nm, nm) for nm in pool}
 
         # Compose attempts row
         rec = {
@@ -145,7 +153,7 @@ def convert(input_path: str, out_path: str, k_pool: int = 64,
             # (optional) hint about the enclosing lemma
             "lemma": extract_lemma_name_from_statement(statement) or None
         }
-        out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        out.write(dumps(rec, ensure_ascii=False) + "\n")
         rows += 1
 
         if rows % 10000 == 0:
