@@ -330,6 +330,7 @@ def propose_finishers(
     hint_lemmas_limit: int,
     facts: List[str] | None = None,
     *,
+    allow_done: bool = True,
     temp: float | None = None,
     reranker=None,
     premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
@@ -342,18 +343,19 @@ def propose_finishers(
         facts=("\n".join(facts) if facts else "(none)")
     )
     base_lists: List[List[str]] = []
+    prefixes = ["done", "by "] if allow_done else ["by "]
     for m in models:
         raw = _generate_for_model(m, SYSTEM_FINISH, user, temperature=temp)
         if _VERBOSE and isinstance(raw, str) and raw.startswith("__ERROR__"):
             _log(f"warn: LLM call failed for model={m}; using heuristic fallbacks. detail={raw}")
-        base = parse_ollama_lines(raw, ["done", "by "], max(3, min(NUM_CANDIDATES, 8)))
+        base = parse_ollama_lines(raw, prefixes, max(3, min(NUM_CANDIDATES, 8)))
         base_lists.append(base)
 
-    base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or [
-        "done", "by simp", "by auto", "by clarsimp",        
-        "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"
-    ]
-
+    base_default = ["by simp", "by auto", "by clarsimp",
+                    "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"]
+    if allow_done:
+        base_default = ["done"] + base_default
+    base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or base_default
     from .heuristics import (
         suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers,
         live_features_for, extract_candidate_facts

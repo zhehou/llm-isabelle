@@ -279,9 +279,12 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):
             mined = mine_lemmas_from_state(isabelle, session_id, state_hint, max_lemmas=hint_lemmas) if state_hint else []
+            # allow 'done' only when there are zero subgoals
+            _n_now = parse_subgoals(state_hint) if state_hint else None
+            _allow_done = bool(_n_now == 0)            
             finishers_llm = propose_finishers(
                 model_list, goal, steps, state_hint, mined, hint_lemmas,
-                facts=facts_for_depth, temp=finish_temp, reranker=reranker,
+                facts=facts_for_depth, temp=finish_temp, reranker=reranker, allow_done=_allow_done,
                 premise_scores=premise_scores, premise_pool=pool_feats
             )
 

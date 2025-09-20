@@ -58,6 +58,7 @@ Given:
 propose 3–8 SHORT finishing commands that can close the current proof.
 Rules:
 - Output only one command per line, starting with `by ` or the single word `done`.
+- Only use `done` when there are **no subgoals remaining** in the latest state.
 - Use available facts/lemmas when helpful (e.g., `by (simp add: <facts>)`, `by (metis <facts>)`, `by (rule <thm>)`).
 - Prefer simple finishers first (`done`, `by simp`, `by auto`) before heavier tactics (`by blast`, `by fastforce`, `by (metis ...)`, `by linarith`).
 - No comments or code fences.
