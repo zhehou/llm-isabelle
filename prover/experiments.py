@@ -36,6 +36,26 @@ from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .prover import prove_goal
 from . import config as CFG
 
+def _silence_asyncio_transport_del():
+    """Mute benign 'Event loop is closed' from BaseSubprocessTransport.__del__ at teardown."""
+    try:
+        import asyncio.base_subprocess as _bs  # stdlib
+        _orig = getattr(_bs.BaseSubprocessTransport, "__del__", None)
+        if _orig is None:
+            return
+        def _quiet(self, _o=_orig):
+            try:
+                _o(self)
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e):
+                    return
+                raise
+        _bs.BaseSubprocessTransport.__del__ = _quiet
+    except Exception:
+        pass
+
+_silence_asyncio_transport_del()
+
 class _StoreSetFlag(argparse.Action):
     """Like 'store', but also marks that the user explicitly provided this flag."""
     def __call__(self, parser, namespace, values, option_string=None):

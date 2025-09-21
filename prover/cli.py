@@ -24,15 +24,35 @@ from .prover import prove_goal
 from .isabelle_api import start_isabelle_server, get_isabelle_client
 from .tactics import mine_two_step_macros
 
+# --- add near top of prover/cli.py (after imports) ---
+def _silence_asyncio_transport_del():
+    """
+    Mute the benign 'Event loop is closed' from BaseSubprocessTransport.__del__()
+    that can fire at interpreter shutdown when a dependency used asyncio subprocesses.
+    """
+    try:
+        import asyncio.base_subprocess as _bs  # stdlib module
+        _orig = getattr(_bs.BaseSubprocessTransport, "__del__", None)
+        if _orig is None:
+            return
+        def _quiet(self, _o=_orig):
+            try:
+                _o(self)
+            except RuntimeError as e:
+                # Exactly the noisy teardown path on macOS/Python 3.11–3.12
+                if "Event loop is closed" in str(e):
+                    return
+                raise
+        _bs.BaseSubprocessTransport.__del__ = _quiet
+    except Exception:
+        # Never fail shutdown due to a patching issue
+        pass
+
 class _StoreSetFlag(argparse.Action):
     """Like 'store', but also marks that the user explicitly provided this flag."""
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, values)
         setattr(namespace, f"__set_{self.dest}", True)
-
-# Avoid importing asyncio on Windows (perf + compatibility)
-if sys.platform != "win32":
-    import asyncio
 
 # Pre-compile once (used by read_goals)
 _LEMMA_RE = None
@@ -65,38 +85,14 @@ def read_goals(path: str) -> list[str]:
                 goals.append(line.strip('"'))
     return goals
 
-
 def _setup_loop():
-    """Create an event loop + child watcher (POSIX only)."""
-    if sys.platform == "win32":
-        return None, None
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    watcher = None
-    try:
-        watcher = asyncio.SafeChildWatcher()  # type: ignore[attr-defined]
-        asyncio.get_event_loop_policy().set_child_watcher(watcher)
-        watcher.attach_loop(loop)
-    except Exception:
-        watcher = None  # Some platforms may not support child watcher
-    return loop, watcher
+    """No-op: this CLI doesn't use asyncio; avoid creating/closing loops to prevent teardown races."""
+    return None, None
 
 
 def _teardown_loop(loop, watcher):
-    if sys.platform == "win32":
-        return
-    try:
-        if watcher is not None:
-            # Best-effort: detach to avoid warnings on some Python builds
-            try:
-                watcher.close()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        if loop is not None:
-            loop.close()
-    except Exception:
-        pass
-
+    """No-op: leave any global/default loop alone so transports can finalize cleanly at interpreter exit."""
+    return
 
 def _prove_one(isabelle, session_id: str, goal: str, CFG, args, macro_map=None):
     """Thin wrapper to avoid duplicating the long prove_goal(...) call."""
@@ -134,6 +130,7 @@ def _prove_one(isabelle, session_id: str, goal: str, CFG, args, macro_map=None):
 
 
 def main():
+    _silence_asyncio_transport_del()
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--goal", type=str)
     parser.add_argument("--goals-file", type=str)
