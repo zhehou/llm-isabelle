@@ -42,7 +42,7 @@ OUTPUT REQUIREMENTS
   lemma "{goal}"
 - Choose proof strategies appropriate to the problem:
   • Induction: use `proof (induction <var>)` with clear case splits (`case 0`/`case (Suc n)`, `case Nil`/`case Cons`, etc.), and in each branch end with `show ?case …`.
-  • Exhaustive case analysis: `proof (cases <expr>)` or `proof (cases rule: <type>.exhaust)` with `show ?case …`.
+  • Exhaustive case analysis: `proof (cases <expr>)` or `proof (cases rule: <type>.exhaust)`, and in each branch end with `show ?thesis …`.
   • Calculational reasoning: use `proof -`, chain `have …`, `also`, `moreover`, and `finally show ?thesis …`.
   • Advanced methods: when suitable, use structured subproofs with `from … have …`, `ultimately show …`, `thus`, or `hence`.
 - **Intermediate facts should be named** and reused:
@@ -70,7 +70,7 @@ Top-level:
   | fix <vars>
   | assume <name>: "<prop>"
   | have "<prop>" <proof>
-  | show ?case <proof>          # use inside cases/induction branches
+  | show ?case <proof>          # use inside induction branches
   | show ?thesis <proof>        # otherwise at the end
   | then <goal_stmt>
   | from <thms> <goal_stmt>
@@ -123,14 +123,14 @@ proof (cases b)
   case True
   have f1: "…"
     sorry
-  show ?case
+  show ?thesis
     using f1
     sorry
 next
   case False
   have f2: "…"
     sorry
-  show ?case
+  show ?thesis
     using f2
     sorry
 qed
@@ -711,11 +711,11 @@ qed
 f'''lemma "{goal}"
 proof (cases b)
   case True
-  show ?case
+  show ?thesis
     sorry
 next
   case False
-  show ?case
+  show ?thesis
     sorry
 qed
 ''')
