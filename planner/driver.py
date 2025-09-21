@@ -71,6 +71,8 @@ def _fill_one_hole(
     goal_text: str,
     model: Optional[str],
     per_hole_timeout: int,
+    *,
+    trace: bool = False,    
 ) -> Tuple[str, bool, str]:
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span)
 
@@ -88,7 +90,7 @@ def _fill_one_hole(
         use_sledge=True,
         sledge_timeout=10,  # keep your current default
         sledge_every=1,
-        trace=True,
+        trace=trace,
         use_color=False,
         use_qc=False,
         qc_timeout=2,
@@ -209,7 +211,7 @@ def plan_and_fill(
     # Local repair controls
     repairs: bool = True,
     max_repairs_per_hole: int = 2,
-    repair_trace: bool = False,
+    trace: bool = False,
     # planner scoring/context flags
     priors_path: Optional[str] = None,
     context_hints: bool = False,
@@ -228,8 +230,13 @@ def plan_and_fill(
     force_outline = (mode == "outline")
 
     server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
-    isa = get_isabelle_client(server_info)
+    if trace:
+        print("[planner] starting Isabelle server…", flush=True)
+    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")    
+    isa = get_isabelle_client(server_info)    
     session = isa.session_start(session=ISABELLE_SESSION)
+    if trace:
+        print(f"[planner] session started: {session}", flush=True)
 
     t0 = time.monotonic()
     def left_s() -> float:
@@ -238,11 +245,15 @@ def plan_and_fill(
     try:
         # 1) Outline
         if legacy_single_outline:
+            if trace:
+                print("[planner] outline: single low-temp", flush=True)            
             skel = propose_isar_skeleton(goal, model=model, temp=0.35, force_outline=force_outline)
             full = skel.text
         else:
             temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
             k = int(outline_k) if outline_k is not None else 3
+            if trace:
+                print(f"[planner] outline: diverse k={k} temps={temps}", flush=True)            
             best, _diag = propose_isar_skeleton_diverse_best(
                 goal,
                 isabelle=isa,
@@ -263,7 +274,9 @@ def plan_and_fill(
                 hintlex_top=hintlex_top,
             )
             full = best.text
-
+        if trace:
+            holes_now = find_sorry_spans(full)
+            print(f"[planner] outline ready: {len(full)} chars; holes={len(holes_now)}", flush=True)
         # NEW: If the caller asked for 'outline', stop here and return the outline.
         if mode == "outline":
             return PlanAndFillResult(
@@ -276,6 +289,8 @@ def plan_and_fill(
         # 2) Early exit in 'auto' if the model already produced a complete proof
         spans = find_sorry_spans(full)
         if not spans:
+            if trace:
+                print("[planner] no holes detected — returning complete proof", flush=True)            
             return PlanAndFillResult(True, full, [], [])
 
         # 3) Fill holes with shared time + local repair
@@ -297,16 +312,25 @@ def plan_and_fill(
             span = spans[0]
             remaining = max(1, len(spans))
             per_hole_budget = int(max(5, left_s() / remaining))
+            if trace:
+                s, e = span
+                print(f"[planner] fill hole #{hole_idx} span=({s},{e}) "
+                      f"budget={per_hole_budget}s remaining_holes≈{remaining}", flush=True)            
 
-            full2, ok, script = _fill_one_hole(isa, session, full, span, goal_text, model, per_hole_timeout=per_hole_budget)
+            full2, ok, script = _fill_one_hole(isa, session, full, span, goal_text, model, per_hole_timeout=per_hole_budget, trace=trace)
             if ok:
                 full = full2
                 fills.append(script)
+                if trace:
+                    n_steps = script.count("\n") + 1
+                    print(f"[planner]   ✓ filled with {n_steps} step(s)", flush=True)                
                 hole_idx += 1
                 continue
 
             # CEGIS-style iterative repair on failure (local → block → subproof → whole)
             if repairs and left_s() > 6:
+                if trace:
+                    print("[planner]   → trying local repairs (CEGIS)…", flush=True)                
                 patched, applied, _reason = try_cegis_repairs(
                     full_text=full,
                     hole_span=span,
@@ -318,17 +342,23 @@ def plan_and_fill(
                     max_ops_to_try=max_repairs_per_hole,
                     beam_k=2,                         # NEW: tiny beam for local repairs
                     allow_whole_fallback=True,        # NEW: enable whole-proof fallback
-                    trace=repair_trace,
+                    trace=trace,
                 )
                 if applied and patched != full:
                     full = patched
                     # retry same hole (spans recomputed)
+                    if trace:
+                        print("[planner]   ✓ repair patched snippet — retrying hole", flush=True)                    
                     continue
 
             failed.append(hole_idx)
+            if trace:
+                print("[planner]   ✗ hole still failing", flush=True)            
             hole_idx += 1
 
         success = ("sorry" not in full)
+        if trace:
+            print(f"[planner] finished: success={success}", flush=True)        
         return PlanAndFillResult(success, full, fills, failed)
 
     finally:

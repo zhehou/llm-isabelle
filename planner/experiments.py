@@ -43,6 +43,7 @@ from prover.isabelle_api import (
     finished_ok,
 )
 from prover import config as CFG  # NEW: live switches for premise/context
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 def _drain_and_close_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     if not loop or loop.is_closed():
@@ -348,13 +349,7 @@ def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Option
     Run planner.plan_and_fill and trap any provider/network exceptions.
     Returns (res, err_text). When res is None, the caller should mark failure but continue the run.
     """
-    try:
-        # Apply NEW premise/context flags to prover config for this run (read inside prove_goal) :contentReference[oaicite:5]{index=5}
-        CFG.PREMISES_ENABLE = bool(getattr(args, "premises", True))
-        CFG.PROVER_CONTEXT_ENABLE = bool(getattr(args, "context", True))
-        if getattr(args, "context_files", ""):
-            raw = args.context_files.replace(",", " ").split()
-            CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]        
+    try:             
         res = plan_and_fill(
             goal,
             model=model,
@@ -365,7 +360,7 @@ def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Option
             legacy_single_outline=(cfg.k == 1),
             repairs=cfg.repairs,
             max_repairs_per_hole=cfg.max_repairs_per_hole,
-            repair_trace=cfg.repair_trace,
+            trace=cfg.trace,
             priors_path=cfg.priors,
             context_hints=cfg.context_hints,
             lib_templates=cfg.lib_templates,
@@ -388,7 +383,7 @@ class BenchConfig:
     temps: Optional[List[float]]
     repairs: bool
     max_repairs_per_hole: int
-    repair_trace: bool
+    trace: bool
     priors: Optional[str]
     context_hints: bool
     lib_templates: bool
@@ -399,6 +394,7 @@ class BenchConfig:
     hintlex_top: int
     strict_no_sorry: bool
     verify: bool
+    trace: bool
 
 @dataclass(slots=True)
 class BenchRow:
@@ -429,11 +425,16 @@ def _bench_run_one(
     # call through safety wrapper (prevents run-wide crashes on provider timeouts)
     call_cfg = BenchConfig(**{k: getattr(cfg, k) for k in cfg.__dataclass_fields__.keys()})
     call_cfg.k = (cfg.k if diverse else 1)
+    if cfg.trace:
+        print(f"[planner] ▶ goal: {goal}", flush=True)
+        print(f"[planner]   mode={cfg.mode} k={call_cfg.k} timeout={cfg.timeout}s repairs={cfg.repairs}", flush=True)
     res, plan_err = _safe_plan_and_fill(goal=goal, model=model, cfg=call_cfg)
 
     dt = time.time() - t0
 
     if res is None:
+        if cfg.trace:
+            print(f"[planner]   ❌ planner error: {plan_err}", flush=True)        
         # Planner crashed for this goal: mark as failure, log error, skip verify
         outline_text = ""
         had_sorry = False
@@ -455,6 +456,10 @@ def _bench_run_one(
         return row, outline_text, verify_details
 
     outline_text = res.outline or ""
+    if cfg.trace:
+        fills_cnt = len(res.fills or [])
+        failed_cnt = len(res.failed_holes or [])
+        print(f"[planner]   outline chars={len(outline_text)} fills={fills_cnt} failed_holes={failed_cnt}", flush=True)    
     had_sorry = bool(find_sorry_spans(outline_text))
 
     # Decide success from *artifact* first, not from res.success
@@ -471,8 +476,10 @@ def _bench_run_one(
     verify_details = ""
     verify_status = "skipped"  # skipped | ok | fail | transport_error
 
-    if cfg.verify and not had_sorry:
-        verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)        
+    if cfg.verify and not had_sorry:           
+        if cfg.trace:
+            print("[planner]   verifying with Isabelle…", flush=True)
+        verified_ok, verify_details = _verify_with_auto_restart(isabelle, session_id, outline_text)            
         if verified_ok:
             verify_status = "ok"
             success = True  # verification is authoritative
@@ -483,6 +490,8 @@ def _bench_run_one(
             else:
                 verify_status = "fail"
                 success = False
+        if cfg.trace:
+            print(f"[planner]   verify={verify_status}", flush=True)                
 
     row = BenchRow(
         goal=goal,
@@ -496,6 +505,8 @@ def _bench_run_one(
         had_sorry=had_sorry,
         verified_ok=bool(verified_ok),
     )
+    if cfg.trace:
+        print(f"[planner]   done in {dt:.2f}s | success={row.success} had_sorry={row.had_sorry} verified_ok={row.verified_ok}", flush=True)    
     # Return verify_status via the third string so callers can log it
     return row, outline_text, (f"[{verify_status}] {verify_details}" if verify_details or verify_status != "skipped" else "")
 
@@ -565,6 +576,13 @@ def cmd_bench(args: argparse.Namespace) -> None:
         import random
         base_seed = args.seed or int(time.time())
 
+        # Apply premise/context flags once for this run (read by prover inside prove_goal)
+        CFG.PREMISES_ENABLE = bool(args.premises)
+        CFG.PROVER_CONTEXT_ENABLE = bool(args.context)
+        if args.context_files:
+            raw = args.context_files.replace(",", " ").split()
+            CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]        
+
         for suite_name, goals_path in suites:
             goals = _read_goals_file(goals_path)
             if not goals:
@@ -576,15 +594,14 @@ def cmd_bench(args: argparse.Namespace) -> None:
                 mode=args.mode, timeout=args.timeout,
                 k=args.k, temps=([float(x) for x in args.temps.split(",")] if args.temps else None),
                 repairs=(not args.no_repairs),
-                max_repairs_per_hole=args.max_repairs_per_hole,
-                repair_trace=args.repair_trace,
+                max_repairs_per_hole=args.max_repairs_per_hole,                
                 priors=args.priors,
                 context_hints=args.context_hints,
                 lib_templates=args.lib_templates,
                 alpha=args.alpha, beta=args.beta, gamma=args.gamma,
                 hintlex=args.hintlex, hintlex_top=args.hintlex_top,
                 strict_no_sorry=args.strict_no_sorry,
-                verify=args.verify,
+                verify=args.verify, trace=args.trace
             )
 
             model_tag = args.model or os.environ.get("OLLAMA_MODEL", "env_default")
@@ -795,7 +812,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
             "k": (args.k if diverse else 1), "temps": args.temps,
             "repairs": (not args.no_repairs),
             "max_repairs_per_hole": args.max_repairs_per_hole,
-            "repair_trace": args.repair_trace,
+            "trace": args.trace,
             "priors": args.priors, "context_hints": args.context_hints,
             "lib_templates": args.lib_templates,
             "alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
@@ -824,6 +841,13 @@ def cmd_regress(args: argparse.Namespace) -> None:
             rnd = random.Random(args.seed or int(time.time()))
             rnd.shuffle(gs)
 
+        # Apply premise/context flags once for this run (read by prover inside prove_goal)
+        CFG.PREMISES_ENABLE = bool(args.premises)
+        CFG.PROVER_CONTEXT_ENABLE = bool(args.context)
+        if args.context_files:
+            raw = args.context_files.replace(",", " ").split()
+            CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]
+
         # Run
         for i, g in enumerate(gs, 1):
             print(f"[{suite_name}] [{i}/{len(gs)}] {g}")
@@ -839,7 +863,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
             _c.temps = ([float(x) for x in args.temps.split(",")] if args.temps else None)
             _c.repairs = (not args.no_repairs)
             _c.max_repairs_per_hole = args.max_repairs_per_hole
-            _c.repair_trace = args.repair_trace
+            _c.trace = args.trace
             _c.priors = args.priors
             _c.context_hints = args.context_hints
             _c.lib_templates = args.lib_templates
@@ -857,6 +881,8 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 verify_details = f"[planner_error] {plan_err}"
             else:
                 text = res.outline or ""
+                if args.trace and text.strip():
+                    print("Current proof outline:\n" + text.strip() + "\n", flush=True)
                 had_sorry = bool(find_sorry_spans(text))
 
                 if args.mode == "auto":
@@ -1105,7 +1131,6 @@ def main():
     pb.add_argument("--temps", type=str, default=None, help="Comma-separated temps, e.g., '0.35,0.55,0.85'")
     pb.add_argument("--no-repairs", action="store_true")
     pb.add_argument("--max-repairs-per-hole", type=int, default=2)
-    pb.add_argument("--repair-trace", action="store_true")
     pb.add_argument("--context-hints", action="store_true")
     pb.add_argument("--lib-templates", action="store_true")
     pb.add_argument("--priors", type=str, default=None)
@@ -1117,6 +1142,11 @@ def main():
     pb.add_argument("--model", type=str, default=None)
     pb.add_argument("--strict-no-sorry", action="store_true", help="Count success only when no 'sorry' is present")
     pb.add_argument("--verify", action="store_true", help="Compile outline with Isabelle if no 'sorry'")
+    pb.add_argument("--trace", action="store_true", help="Print planner progress AND repair details.")
+    pb.add_argument("--verbose", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
+    pb.add_argument("--repair-trace", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
     pb.add_argument("--repeats", type=int, default=1)
     pb.add_argument("--shuffle", action="store_true")
     pb.add_argument("--seed", type=int, default=0)
@@ -1148,7 +1178,6 @@ def main():
     pr.add_argument("--temps", type=str, default=None)
     pr.add_argument("--no-repairs", action="store_true")
     pr.add_argument("--max-repairs-per-hole", type=int, default=2)
-    pr.add_argument("--repair-trace", action="store_true")
     pr.add_argument("--context-hints", action="store_true")
     pr.add_argument("--lib_templates", action="store_true")
     pr.add_argument("--priors", type=str, default=None)
@@ -1160,6 +1189,11 @@ def main():
     pr.add_argument("--model", type=str, default=None)
     pr.add_argument("--strict-no-sorry", action="store_true")
     pr.add_argument("--verify", action="store_true")
+    pr.add_argument("--trace", action="store_true", help="Print planner progress AND repair details.")
+    pr.add_argument("--verbose", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
+    pr.add_argument("--repair-trace", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
     pr.add_argument("--shuffle", action="store_true")
     pr.add_argument("--seed", type=int, default=0)
     pr.add_argument("--baseline", type=str)

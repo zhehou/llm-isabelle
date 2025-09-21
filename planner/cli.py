@@ -6,7 +6,8 @@ from typing import List, Optional
 
 from planner.driver import plan_and_fill
 from prover import config as CFG  # NEW: live switches for premise/context
-
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 def _parse_temps(s: Optional[str]) -> Optional[List[float]]:
     if not s:
@@ -56,8 +57,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.set_defaults(repairs=True)
     ap.add_argument("--max-repairs-per-hole", type=int, default=2,
                     help="Max repair ops to try for each failing hole (default: 2).")
-    ap.add_argument("--repair-trace", action="store_true",
-                    help="Print repair proposals and decisions for debugging.")
+    # Unified tracing: --trace (preferred)
+    ap.add_argument("--trace", dest="trace", action="store_true",
+                    help="Print planner progress AND repair details.")
+    ap.add_argument("--repair-trace", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
+    ap.add_argument("--verbose", dest="trace", action="store_true",
+                    help="(deprecated) Same as --trace.")
 
     # Context hints & priors / scoring knobs (all optional; defaults keep old behavior)
     ap.add_argument("--context-hints", dest="context_hints", action="store_true",
@@ -110,8 +116,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.set_defaults(context=True)
 
     ap.add_argument("--context-files", type=str, default="",
-                    help="Space/comma-separated .thy files to seed context (e.g., 'A.thy B.thy' or 'A.thy,B.thy').")    
-
+                    help="Space/comma-separated .thy files to seed context (e.g., 'A.thy B.thy' or 'A.thy,B.thy').")        
     args = ap.parse_args(argv)
 
     # Resolve goal: flag > positional > stdin
@@ -154,7 +159,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         legacy_single_outline=(not args.diverse),
         repairs=args.repairs,
         max_repairs_per_hole=args.max_repairs_per_hole,
-        repair_trace=args.repair_trace,
+        trace=args.trace,
         # planner scoring/context
         priors_path=args.priors,
         context_hints=args.context_hints,
@@ -166,7 +171,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         hintlex_path=args.hintlex,
         hintlex_top=args.hintlex_top,
     )
-
+    if args.trace and ("--verbose" in (argv or sys.argv) or "--repair-trace" in (argv or sys.argv)):
+        print("[planner] Note: --verbose/--repair-trace are deprecated; use --trace.", flush=True)
     print(res.outline, end="" if res.outline.endswith("\n") else "\n")
     return 0 if res.success else 1
 
