@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -21,6 +22,9 @@ from prover.isabelle_api import (
     start_isabelle_server,
 )
 from prover.prover import prove_goal
+from planner.repair import _APPLY_OR_BY as _TACTIC_LINE_RE
+_INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
+_BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
 
 
 @dataclass(slots=True)
@@ -126,6 +130,54 @@ def _fill_one_hole(
     new_text = full_text[:s] + insert + full_text[e:]
     return new_text, True, "\n".join(script_lines)
 
+# ----------------------------
+# Verification helpers (open minimal holes on failure)
+# ----------------------------
+def _verify_full_proof(isabelle, session: str, text: str) -> bool:
+    try:
+        thy = build_theory(text.splitlines(), add_print_state=False, end_with=None)
+        run_theory(isabelle, session, thy)
+        return True
+    except Exception:
+        return False
+
+def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]:
+    """
+    Localize a failing finisher with *one* minimal opening:
+      (1) whole-line 'apply|by|done|.'; else
+      (2) inline ' … by …' tails on a header line.
+    Returns once an opening compiles under 'end_with="sorry"'.
+    """
+    def _runs(ts: List[str]) -> bool:
+        try:
+            thy = build_theory(ts, add_print_state=True, end_with="sorry")
+            run_theory(isabelle, session, thy)
+            return True
+        except Exception:
+            return False
+    lines = text.splitlines()
+    # (1) whole-line candidates
+    for i, L in enumerate(lines):
+        if not (_TACTIC_LINE_RE.match(L) or L.strip() == "done" or _BARE_DOT.match(L)):
+            continue
+        indent = L[: len(L) - len(L.lstrip(" "))]
+        trial = lines[:i] + [f"{indent}sorry"] + lines[i + 1 :]
+        if _runs(trial):
+            lines[i] = f"{indent}sorry"
+            return ("\n".join(lines) + ("" if text.endswith("\n") else "\n")), True
+    # (2) inline ' … by …' on the same line (e.g., 'show "…"' header)
+    for i, L in enumerate(lines):
+        m = _INLINE_BY_TAIL.search(L)
+        if not m:
+            continue
+        indent = L[: len(L) - len(L.lstrip(" "))]
+        header = L[: m.start()].rstrip()
+        trial = lines[:i] + [header, f"{indent}sorry"] + lines[i + 1 :]
+        if _runs(trial):
+            lines[i] = header
+            lines.insert(i + 1, f"{indent}sorry")
+            return ("\n".join(lines) + ("" if text.endswith("\n") else "\n")), True
+    return (text if text.endswith("\n") else text + "\n"), False
 
 # ----------------------------
 # Public API
@@ -231,8 +283,7 @@ def plan_and_fill(
 
     server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
     if trace:
-        print("[planner] starting Isabelle server…", flush=True)
-    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")    
+        print("[planner] starting Isabelle server…", flush=True)  
     isa = get_isabelle_client(server_info)    
     session = isa.session_start(session=ISABELLE_SESSION)
     if trace:
@@ -286,12 +337,21 @@ def plan_and_fill(
                 failed_holes=[],
             )
 
-        # 2) Early exit in 'auto' if the model already produced a complete proof
+        # 2) If the model already produced a complete proof, VERIFY it first.
         spans = find_sorry_spans(full)
         if not spans:
             if trace:
-                print("[planner] no holes detected — returning complete proof", flush=True)            
-            return PlanAndFillResult(True, full, [], [])
+                print("[planner] no holes detected — verifying complete proof", flush=True)
+            if _verify_full_proof(isa, session, full):
+                return PlanAndFillResult(True, full, [], [])
+            if trace:
+                print("[planner] complete proof did not verify — opening minimal holes", flush=True)
+            full2, opened = _open_minimal_sorries(isa, session, full)
+            if opened:
+                full = full2
+            else:
+                # Could not localize; surface the non-verifying proof to caller
+                return PlanAndFillResult(False, full, [], [0])
 
         # 3) Fill holes with shared time + local repair
         lemma_line = _first_lemma_line(full)

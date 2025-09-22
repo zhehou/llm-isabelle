@@ -161,10 +161,24 @@ PROOF_RE = re.compile(r"(?m)^\s*proof(?:\b|\s|\()", re.UNICODE)
 QED_RE   = re.compile(r"(?m)^\s*qed\b", re.UNICODE)
 BY_INLINE_RE = re.compile(r"\s+by\s+.*$")
 # New regex helpers for sanitization
-CASE_START_RE = re.compile(r"(?m)^\s*case\b")
-NEXT_OR_QED_RE = re.compile(r"(?m)^\s*(next|qed)\b")
+CASE_START_RE   = re.compile(r"(?m)^\s*case\b")
+NEXT_OR_QED_RE  = re.compile(r"(?m)^\s*(next|qed)\b")
 SHOW_THESIS_RE = re.compile(r"(?m)^\s*(?:then\s+)?show\s+\?thesis\b")
-BARE_PROOF_RE = re.compile(r"(?m)^\s*proof\s*$")
+# Match the meta-variable immediately after 'show', capturing the 'show ' prefix so we can preserve any
+# leading tokens like 'then', 'from ...', 'with ...', 'finally', etc. We only rewrite the '?thesis|?case' token.
+SHOW_META_AT_SHOW = re.compile(r"(?m)(?P<prefix>\bshow\s+)\?(?P<meta>thesis|case)\b")
+BARE_PROOF_RE  = re.compile(r"(?m)^\s*proof\s*$")
+# General proof-mode detectors (for ?case/?thesis normalization)
+_PROOF_OPEN_RE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]+)\))?\s*$")
+_QED_LINE_RE     = re.compile(r"(?m)^\s*qed\b")
+_MODE_CASES_RE   = re.compile(r"^\s*cases\b")
+_MODE_CASES_RULE = re.compile(r"^\s*cases\s+rule:")
+_MODE_INDUCT_RE  = re.compile(r"^\s*(?:induction|induct|coinduction|coinduct)\b")
+_HAS_TACTIC_NEXT = re.compile(r"(?m)^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
+_HAVE_OR_SHOW    = re.compile(r"(?m)^\s*(have|show)\b")
+_INLINE_BY       = re.compile(r"\s+by\s+.+$")
+_CONTINUATION_HEAD = re.compile(r"(?m)^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
+_STMT_OR_BOUNDARY = re.compile(r"(?m)^\s*(?:have|show|assume|case|next|qed)\b")
 
 # =============================================================================
 # Provider shims: Ollama (default), Hugging Face ("hf:"), Gemini ("gemini:")
@@ -419,21 +433,94 @@ def _crop_to_first_proof_block(text: str) -> str:
 
     return tail[:end_idx] + "\n"
 
-def _fix_case_show_thesis(text: str) -> str:
+def _normalize_show_kinds(text: str) -> str:
     """
-    Inside case blocks, rewrite '[then ]show ?thesis' -> 'show ?case'.
+    Flip ONLY the '?thesis'/'?case' meta after 'show', preserving any prefix (e.g., 'then', 'from', 'with', 'using', 'finally').
+    Policy (line-local, nesting-aware):
+      • Inside branches of (co)induction → 'show ?case'
+      • Inside branches of 'proof (cases …)' (incl. 'cases rule: …') → 'show ?thesis'
+      • Outside any explicit case branch → default to 'show ?thesis'
     """
     lines = text.splitlines()
-    in_case = False
+    # Track current proof mode for the *innermost* open proof
+    stack: list[str] = []  # values: "induct" | "cases" | "plain"
+    in_case_branch = False
     for i, L in enumerate(lines):
+        m_open = _PROOF_OPEN_RE.match(L)
+        if m_open:
+            mode = (m_open.group(1) or "").strip()
+            if not mode:
+                stack.append("plain")
+            elif _MODE_INDUCT_RE.match(mode):
+                stack.append("induct")
+            elif _MODE_CASES_RULE.match(mode) or _MODE_CASES_RE.match(mode):
+                stack.append("cases")
+            else:
+                stack.append("plain")
+            continue
+        if _QED_LINE_RE.match(L):
+            if stack:
+                stack.pop()
+            continue
         if CASE_START_RE.match(L):
-            in_case = True
-        elif NEXT_OR_QED_RE.match(L):
-            in_case = False
-        if in_case and SHOW_THESIS_RE.search(L):
-            # Drop optional 'then ' as well
-            lines[i] = SHOW_THESIS_RE.sub("show ?case", L, count=1)
+            in_case_branch = True
+            continue
+        if NEXT_OR_QED_RE.match(L):
+            in_case_branch = False
+            continue
+
+        def _repl(m: "re.Match[str]") -> str:
+            current = stack[-1] if stack else "plain"
+            want = "case" if (in_case_branch and current == "induct") else "thesis"
+            # If already correct, return unchanged
+            if m.group("meta") == want:
+                return m.group(0)
+            return f'{m.group("prefix")}?{want}'
+
+        # Rewrite at most once per line; this keeps everything except the meta token intact.
+        lines[i] = SHOW_META_AT_SHOW.sub(_repl, L, count=1)
     return "\n".join(lines)
+
+def _ensure_have_show_bodies(text: str) -> str:
+    """
+    Ensure every 'have …' / 'show …' has a body, but *preserve* local continuations:
+    scan forward across lines starting with using/from/with/then/also/moreover/finally,
+    and only insert 'sorry' at the *end* of that block if no tactic/proof body occurs
+    before the next statement/boundary (have/show/assume/case/next/qed).
+    """
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    out: List[str] = []
+    while i < n:
+        L = lines[i]
+        out.append(L)
+        if _HAVE_OR_SHOW.match(L) and not _INLINE_BY.search(L):
+            j = i + 1
+            # skip blank lines
+            while j < n and lines[j].strip() == "":
+                out.append(lines[j]); j += 1
+            # consume a local continuation block
+            saw_body = False
+            k = j
+            while k < n:
+                Nk = lines[k]
+                if _HAS_TACTIC_NEXT.match(Nk):
+                    saw_body = True
+                    break
+                if _STMT_OR_BOUNDARY.match(Nk):
+                    break
+                if _CONTINUATION_HEAD.match(Nk) or Nk.strip() == "":
+                    out.append(Nk); k += 1
+                    continue
+                # unknown line: stop the block here
+                break
+            if not saw_body:
+                indent = L[:len(L) - len(L.lstrip(" "))]
+                out.append(f"{indent}  sorry")
+            i = k
+            continue
+        i += 1
+    return "\n".join(out)
 
 def _maybe_proof_dash(text: str) -> str:
     """
@@ -479,9 +566,13 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
                 insert_at = m_qed.start()
                 text = text[:insert_at] + "  sorry\n" + text[insert_at:]
 
-    # Light Isar fixups
-    text = _fix_case_show_thesis(text)  # ?thesis -> ?case inside case blocks
-    text = _maybe_proof_dash(text)      # bare 'proof' -> 'proof -' if we see calculational cues
+    # Light Isar fixups (order matters)
+    #  1) Flip only the meta after 'show', preserving 'then/using/from/with/finally' etc.
+    #  2) Ensure every 'have/show' has a body; insert 'sorry' if missing to trigger fill/repair.
+    #  3) Prefer 'proof -' when calculational cues are present.
+    text = _normalize_show_kinds(text)
+    text = _ensure_have_show_bodies(text)
+    text = _maybe_proof_dash(text)
 
     # Trim to the first complete lemma..qed block to avoid trailing splices
     text = _crop_to_first_proof_block(text)

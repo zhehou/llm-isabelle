@@ -212,6 +212,9 @@ class InsertHaveBlock:
 
 RepairOp = Tuple[str, object]
 
+_CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
+_HAS_BODY = re.compile(r"^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
+
 def _extract_json_array(text: str) -> Optional[list]:
     """Try to salvage the first JSON array from free-form text."""
     try:
@@ -249,6 +252,43 @@ def _parse_repair_ops(text: str) -> List[RepairOp]:
             if all(isinstance(x, str) for x in (lab, stmt, after, hint)) and stmt.strip() and after.strip():
                 out.append(("insert_have_block", InsertHaveBlock(lab.strip(), stmt.strip(), after.strip(), hint.strip())))
     return out[:3]
+
+# =========================
+# Op application helpers (context-aware and non-destructive)
+# =========================
+
+def _find_first_hole(lines: List[str]) -> Optional[int]:
+    for i, L in enumerate(lines):
+        if "sorry" in L:
+            return i
+    return None
+
+def _insert_before_hole_ctxaware(lines: List[str], payload_line: str) -> List[str]:
+    """Insert *after* any contiguous context lines that immediately precede the hole."""
+    idx = _find_first_hole(lines)
+    if idx is None:
+        return lines
+    # walk upward while previous lines are context heads or blank
+    k = idx - 1
+    while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
+        k -= 1
+    insert_at = k + 1  # right above the hole, after the context block
+    indent = lines[idx][: len(lines[idx]) - len(lines[idx].lstrip(" "))]
+    new = lines[:insert_at] + [f"{indent}{payload_line}"] + lines[insert_at:]
+    return new
+
+def _block_has_body_already(lines: List[str]) -> bool:
+    """Check if the local block right above the hole already has a body tactic."""
+    idx = _find_first_hole(lines)
+    if idx is None:
+        return False
+    k = idx - 1
+    while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
+        k -= 1
+    # next non-blank, non-context line above, if any, is where a body would be
+    if k >= 0 and _HAS_BODY.match(lines[k]):
+        return True
+    return False
 
 # =========================
 # Local context mining
@@ -311,10 +351,27 @@ def _recent_steps(lines: List[str], hole_line: int, max_lines: int = 5) -> List[
 # =========================
 
 def _apply_insert_before_hole(full_text: str, hole_span: Tuple[int, int], line: str) -> str:
-    hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
-    insertion = " " * max(2, indent) + line
-    lines.insert(hole_line, insertion)
-    return "\n".join(lines) + ("\n" if full_text.endswith("\n") else "")
+    """
+    Context-aware insertion that:
+      - respects preceding context heads (using/from/then/also/…),
+      - NO-OPs if the local block already has a body tactic (by/apply/proof/sorry/done),
+      - de-duplicates if the same tactic is already within a small window above the hole.
+    """
+    hole_line, _indent, lines = _hole_line_bounds(full_text, hole_span)
+    # 1) If there is already a body tactic for the local block, don't touch it.
+    if _block_has_body_already(lines):
+        return full_text
+    # 2) De-duplicate if the same line is already present right above the hole.
+    win_s = max(0, hole_line - 4)
+    win_e = hole_line + 1
+    if any(L.strip() == line.strip() for L in lines[win_s:win_e]):
+        return full_text
+    # 3) Insert after contiguous context-heads (then/using/also/…),
+    #    keeping indentation aligned with the hole line.
+    new_lines = _insert_before_hole_ctxaware(lines, line)
+    if new_lines == lines:
+        return full_text
+    return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
 
 def _apply_replace_in_snippet(full_text: str, hole_span: Tuple[int, int], find: str, replace: str) -> str:
     hole_line, _indent, lines = _hole_line_bounds(full_text, hole_span)
@@ -322,6 +379,9 @@ def _apply_replace_in_snippet(full_text: str, hole_span: Tuple[int, int], find: 
     snippet = lines[s:e]
     try:
         idx = snippet.index(find)
+        # Avoid no-op churn; if identical after strip, skip.
+        if snippet[idx].strip() == replace.strip():
+            return full_text
         snippet[idx] = replace
     except ValueError:
         stripped = [L.strip() for L in snippet]
@@ -329,6 +389,9 @@ def _apply_replace_in_snippet(full_text: str, hole_span: Tuple[int, int], find: 
             idx = stripped.index(find.strip())
             orig = snippet[idx]
             leading = orig[: len(orig) - len(orig.lstrip(" "))]
+            # Avoid no-op churn here too.
+            if orig.strip() == replace.strip():
+                return full_text
             snippet[idx] = leading + replace.lstrip(" ")
         except ValueError:
             return full_text
@@ -890,11 +953,19 @@ def try_cegis_repairs(
             model=model, timeout_s=int(min(8, max(4, left())))
         )
         if blk and blk.strip() and blk.strip() != block.strip():
-            patched = "\n".join(lines[:cs] + [blk] + lines[ce:])
+            # Try the LLM suggestion AS-IS first
+            patched_raw = "\n".join(lines[:cs] + [blk] + lines[ce:])
+            s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
+            if trace: print(f"[cegis] case-block (raw): {base_s} → {s1_raw}")
+            if s1_raw != 9999 and s1_raw <= base_s:
+                return patched_raw, True, "block:case(raw)"
+            # Fallback: prevent brittle closes; rewrite lone finalizers to 'sorry' and re-check
+            blk_sanit = re.sub(r"(?m)^\s*(?:by\b.*|done\s*)$", "  sorry", blk)
+            patched = "\n".join(lines[:cs] + [blk_sanit] + lines[ce:])
             s1 = _quick_state_subgoals(isabelle, session, patched)
-            if trace: print(f"[cegis] case-block: {base_s} → {s1}")
+            if trace: print(f"[cegis] case-block (sanit): {base_s} → {s1}")
             if s1 != 9999 and s1 <= base_s:
-                return patched, True, "block:case"
+                return patched, True, "block:case(sanit)"
 
     # ---- Stage 3: subproof rewrite ----
     ps, pe = _enclosing_subproof(lines, hole_line)
@@ -908,11 +979,19 @@ def try_cegis_repairs(
             model=model, timeout_s=int(min(8, max(4, left())))
         )
         if blk and blk.strip() and blk.strip() != block.strip():
-            patched = "\n".join(lines[:ps] + [blk] + lines[pe:])
+            # Try raw first
+            patched_raw = "\n".join(lines[:ps] + [blk] + lines[pe:])
+            s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
+            if trace: print(f"[cegis] subproof-block (raw): {base_s} → {s1_raw}")
+            if s1_raw != 9999 and s1_raw <= base_s:
+                return patched_raw, True, "block:subproof(raw)"
+            # Fallback to conservative sanitization
+            blk_sanit = re.sub(r"(?m)^\s*(?:by\b.*|done\s*)$", "  sorry", blk)
+            patched = "\n".join(lines[:ps] + [blk_sanit] + lines[pe:])
             s1 = _quick_state_subgoals(isabelle, session, patched)
-            if trace: print(f"[cegis] subproof-block: {base_s} → {s1}")
+            if trace: print(f"[cegis] subproof-block (sanit): {base_s} → {s1}")
             if s1 != 9999 and s1 <= base_s:
-                return patched, True, "block:subproof"
+                return patched, True, "block:subproof(sanit)"
 
     # ---- Stage 4: whole-proof fallback (optional) ----
     if allow_whole_fallback and left() > 0:
