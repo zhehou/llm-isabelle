@@ -47,7 +47,12 @@ def _ollama_generate_simple(
         },
         "stream": False,
     }
-    resp = _SESSION.post(url, json=payload, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+    # Separate connect/read timeouts and enforce a sensible read floor for big local models.
+    # If the caller passes a tiny timeout (e.g., 3s), a 30B model will almost always hit a read timeout.
+    # We keep connect timeout modest (5s) but floor read to 20s (or OLLAMA_TIMEOUT_S, whichever is larger).
+    eff_read = max(20.0, float(timeout_s or OLLAMA_TIMEOUT_S))
+    eff_conn = 5.0
+    resp = _SESSION.post(url, json=payload, timeout=(eff_conn, eff_read))
     resp.raise_for_status()
     data = resp.json()
     return (data.get("response") or "").strip()
@@ -286,7 +291,7 @@ def _block_has_body_already(lines: List[str]) -> bool:
     while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
         k -= 1
     # next non-blank, non-context line above, if any, is where a body would be
-    if k >= 0 and _HAS_BODY.match(lines[k]):
+    if k >= 0 and (_HAS_BODY.match(lines[k]) or _INLINE_BY_TAIL.search(lines[k])):
         return True
     return False
 
@@ -298,6 +303,7 @@ _ID = r"[A-Za-z_][A-Za-z0-9_']*"
 _DEF_RE = re.compile(rf"\b({_ID})_def\b")
 _FACT_RE = re.compile(rf"\b({_ID})\b")
 _APPLY_OR_BY = re.compile(r"^\s*(apply\b|by\b)")
+_INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")  # mirror of driver's notion of inline 'by'
 _HEADER_RE = re.compile(r"^\s*(proof\s*\(|proof\b|case\s+|then\s+show\b)")
 
 def _hole_line_bounds(full_text: str, hole_span: Tuple[int, int]) -> Tuple[int, int, List[str]]:
@@ -358,6 +364,12 @@ def _apply_insert_before_hole(full_text: str, hole_span: Tuple[int, int], line: 
       - de-duplicates if the same tactic is already within a small window above the hole.
     """
     hole_line, _indent, lines = _hole_line_bounds(full_text, hole_span)
+    # If payload is a *finalizer* ('by …' / 'done' / '.'), replace the hole instead of inserting above it.
+    if _APPLY_OR_BY.match(line) or line.strip() in ("done", "."):
+        if hole_line is not None:
+            indent = lines[hole_line][: len(lines[hole_line]) - len(lines[hole_line].lstrip(" "))]
+            lines[hole_line] = f"{indent}{line.strip()}"
+            return "\n".join(lines) + ("\n" if full_text.endswith("\n") else "")    
     # 1) If there is already a body tactic for the local block, don't touch it.
     if _block_has_body_already(lines):
         return full_text
@@ -366,6 +378,12 @@ def _apply_insert_before_hole(full_text: str, hole_span: Tuple[int, int], line: 
     win_e = hole_line + 1
     if any(L.strip() == line.strip() for L in lines[win_s:win_e]):
         return full_text
+    # If the immediate previous non-context line already has an inline '... by ...', do nothing.
+    k = hole_line - 1
+    while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
+        k -= 1
+    if k >= 0 and _INLINE_BY_TAIL.search(lines[k] or ""):
+        return full_text    
     # 3) Insert after contiguous context-heads (then/using/also/…),
     #    keeping indentation aligned with the hole line.
     new_lines = _insert_before_hole_ctxaware(lines, line)
@@ -494,7 +512,11 @@ def propose_local_repairs(
         recent_steps="\n".join(recent_steps),
         facts_list=", ".join(facts),
     )
-    raw = _generate_simple(prompt, model=model, timeout_s=timeout_s)
+    try:
+        raw = _generate_simple(prompt, model=model, timeout_s=timeout_s)
+    except requests.exceptions.ReadTimeout:
+        # Treat as "no proposals" instead of crashing the whole planner.
+        return []
     return _parse_repair_ops(raw)
 
 # =========================
@@ -801,8 +823,9 @@ def try_local_repairs(
     def _left() -> float:
         return max(0.0, repair_budget_s - (time.monotonic() - start))
 
-    # Split budget: reserve ~half for applying/quick-checking
-    propose_timeout = int(min(6, max(3, repair_budget_s * 0.5)))
+    # Split budget: reserve ~half for applying/quick-checking.
+    # Keep a higher per-call floor so we don't starve local LLM round-trips.
+    propose_timeout = int(min(12, max(6, repair_budget_s * 0.5)))
 
     # Baseline state/errors on current text
     s0 = _quick_state_subgoals(isabelle, session, full_text)
@@ -929,7 +952,9 @@ def try_cegis_repairs(
         patched, ok, tag = try_local_repairs(
             full_text=full_text, hole_span=hole_span, goal_text=goal_text,
             model=model, isabelle=isabelle, session=session,
-            repair_budget_s=min(5.0, max(3.0, left()*0.5)),
+            # Give local-repair rounds a little more air so downstream LLM calls don't get <5s timeouts.
+            repair_budget_s=min(10.0, max(6.0, left()*0.5)),
+
             max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,            
         )
         if ok and patched != full_text:

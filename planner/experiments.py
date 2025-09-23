@@ -460,6 +460,8 @@ def _bench_run_one(
         fills_cnt = len(res.fills or [])
         failed_cnt = len(res.failed_holes or [])
         print(f"[planner]   outline chars={len(outline_text)} fills={fills_cnt} failed_holes={failed_cnt}", flush=True)    
+        if outline_text.strip():
+            print("Current proof outline:\n" + outline_text.strip() + "\n", flush=True)
     had_sorry = bool(find_sorry_spans(outline_text))
 
     # Decide success from *artifact* first, not from res.success
