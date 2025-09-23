@@ -25,6 +25,9 @@ from prover.isabelle_api import (
 from prover.prover import prove_goal
 from planner.repair import _APPLY_OR_BY as _TACTIC_LINE_RE
 
+# Marker lines emitted by our ML helpers inside print_state capture
+_LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
+
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
 
@@ -91,6 +94,9 @@ def _extract_print_state_from_responses(resps: List) -> str:
     return ""
 
 
+# -----------------------------------------------------------------------------
+# Local proof-state capture with robust pretty-print settings
+# -----------------------------------------------------------------------------
 def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
     """Capture the proof state right before the hole."""
     s, e = hole_span
@@ -120,7 +126,34 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
     #         print(f"[DEBUG]   ... and {len(proof_lines) - 10} more lines")
     
     try:
-        thy = build_theory(proof_lines, add_print_state=True, end_with="sorry")
+        # Help Isabelle show distinctions we need:
+        #  - show_question_marks: prints schematics as ?x
+        prolog = [
+            "declare [[show_question_marks = true]]",
+            "declare [[show_types = false, show_sorts = false]]",
+            # Print an ML-computed, alpha-renamed subgoal with fresh parameter names
+            # that cannot clash with frees. Also set an extremely wide margin to
+            # avoid elision of binders / parentheses.
+            "ML ‹",
+            "  Pretty.setmargin 100000;",
+            "  let",
+            "    val st   = Toplevel.proof_of @{Isar.state};",
+            "    val th   = #goal (Proof.goal st);",
+            "    val sg   = Thm.cprem_of th 1;",
+            "    val t    = Thm.term_of sg;",
+            "    val ctxt = Proof.context_of st;",
+            "    val frees = Term.add_frees t [] |> map #1;",
+            "    val (params, _) = Logic.strip_params t;",
+            "    val pnames = map (fn ((n,_),_) => n) params;",
+            "    val ctx0 = Name.make_context (frees @ pnames);",
+            "    val (new_names, _) = fold_map Name.variant pnames ctx0;",
+            "    val t' = Logic.list_rename_params new_names t;",
+            "    val s  = Syntax.string_of_term ctxt t';",
+            "  in writeln (\"" + _LLM_SUBGOAL_MARK + " \" ^ s) end",
+            "›",
+        ]
+        proof_lines1 = prolog + proof_lines
+        thy = build_theory(proof_lines1, add_print_state=True, end_with="sorry")
         resps = run_theory(isabelle, session, thy)        
         state_block = _extract_print_state_from_responses(resps)
         # Heuristic: Isabelle pretty-printer may truncate with "…" (or cut tokens mid-symbol).
@@ -135,8 +168,10 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
                     return True
             return False
         if _looks_truncated(state_block):
-            # Retry with a very wide margin to avoid elision
-            proof_lines_wide = proof_lines + ["  ML ‹Pretty.setmargin 100000›"]
+            # Retry with a very wide margin to avoid elision (keep the ML printer)
+            proof_lines_wide = prolog + proof_lines + [
+                "  ML ‹Pretty.setmargin 100000›"
+            ]
             thy2 = build_theory(proof_lines_wide, add_print_state=True, end_with="sorry")
             resps2 = run_theory(isabelle, session, thy2)
             state_block2 = _extract_print_state_from_responses(resps2)
@@ -149,11 +184,16 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
         #     print(f"[DEBUG] _print_state_before_hole failed: {e}")
         return ""
 
+# -----------------------------------------------------------------------------
+# Goal synthesis from proof-state with safe parenthesization and binder recovery
+# -----------------------------------------------------------------------------
 def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: str = "", hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
     """Build the goal to send to the prover from the local print_state."""
     if state_block and state_block.strip():
         clean = re.sub(r"\x1b\[[0-9;]*m", "", state_block)
         clean = clean.replace("\u00A0", " ")
+        # Try to grab the ML-rendered, alpha-renamed subgoal first.
+        m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
 
         lines = clean.splitlines()
 
@@ -262,6 +302,7 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
         if start_idx != -1:
             parts = [head_tail]
             j = start_idx + 1
+            # Accumulate wrapped continuation lines of the numbered subgoal
             while j < len(lines):
                 Lj = lines[j]
                 # stop at next numbered goal or a new section header
@@ -282,19 +323,67 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
             if re.search(r"\\\\<[^>]*$", subgoal or ""):
                 subgoal = re.sub(r"\\\\<[^>]*$", "", subgoal or "").rstrip()
 
-        if subgoal:
-            if using_facts:
-                # Ensure each using-fact is wrapped in parentheses to avoid
-                # precedence/association ambiguity when facts contain ⟹.
-                def _paren(s: str) -> str:
-                    t = s.strip()
-                    if t.startswith("(") and t.endswith(")"):
-                        return t
-                    return f"({t})"
+        # If ML provided the authoritative subgoal, prefer it.
+        if m_llm:
+            subgoal = m_llm.group(1).strip()
 
-                chained = " ⟹ ".join([_paren(f) for f in using_facts] + [subgoal])
-                return chained
-            return subgoal
+        if subgoal:
+            # -------------------------------
+            # 1) Parenthesize 'using' facts.
+            # -------------------------------
+            def _paren(s: str) -> str:
+                t = s.strip()
+                return t if (t.startswith("(") and t.endswith(")")) else f"({t})"
+
+            facts = [_paren(f) for f in using_facts] if using_facts else []
+
+            # If ML provided the authoritative subgoal, trust it verbatim:
+            # Just chain facts and the (parenthesized) subgoal. Do NOT run
+            # any binder-recovery or identifier heuristics here.
+            if m_llm:
+                subgoal_fixed = f"({subgoal})"
+                return " ⟹ ".join(facts + [subgoal_fixed]) if facts else subgoal_fixed            
+
+            # ----------------------------------------------------
+            # 2) Binder recovery with HEAD detection (no alpha-rename)
+            #    Goal shape we build is:
+            #      ⋀params. (f1) ⟹ (f2) ⟹ … ⟹ (subgoal_core)
+            #    where params are variable-like identifiers in the subgoal
+            #    that are NOT function heads. This mirrors Isabelle’s local
+            #    meta-quantified parameters without misclassifying constants.
+            # ----------------------------------------------------
+            ID = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b")
+            # token that *appears as a head of application* somewhere in the subgoal
+            HEAD_APP = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b\s*(?=\(|[A-Za-z])")
+
+            def _idents(s: str) -> List[str]:
+                seen, out = set(), []
+                for m in ID.finditer(s):
+                    v = m.group(1)
+                    if v in seen:
+                        continue
+                    seen.add(v)
+                    out.append(v)
+                return out
+
+            # Extract existing binders if present
+            m_bind = re.match(r"\s*⋀\s*([A-Za-z0-9_'\s]+)\.\s*(.*)$", subgoal)
+            if m_bind:
+                params = [v for v in m_bind.group(1).strip().split() if v]
+                sub_core = m_bind.group(2).strip()
+            else:
+                sub_core = subgoal.strip()
+                head_syms = {m.group(1) for m in HEAD_APP.finditer(sub_core)}
+                # params = lower-case identifiers that are not function heads
+                params = [v for v in _idents(sub_core) if v not in head_syms]
+
+            # --------------------------------------------
+            # 3) Parenthesize the final subgoal when chaining facts
+            #    and lift binders to the very front:
+            #      ⋀params. (f1) ⟹ … ⟹ (sub_core)
+            # --------------------------------------------
+            chain = " ⟹ ".join(facts + [f"({sub_core})"]) if facts else f"({sub_core})"
+            return (f"⋀{' '.join(params)}. {chain}") if params else chain
             
     if full_text and hole_span != (0, 0):
         if trace:
@@ -306,7 +395,26 @@ def _fill_one_hole(
     isabelle, session: str, full_text: str, hole_span: Tuple[int, int], goal_text: str,
     model: Optional[str], per_hole_timeout: int, *, trace: bool = False,    
 ) -> Tuple[str, bool, str]:
-    
+    # If this 'sorry' sits immediately after a finisher/tactic, it's a stale hole:
+    # delete it without asking the prover to avoid duplicates like an extra 'by force'.
+    try:
+        s_line_start = full_text.rfind("\n", 0, hole_span[0]) + 1
+        prev_line_end = s_line_start - 1
+        prev_prev_nl = full_text.rfind("\n", 0, prev_line_end) + 1
+        prev_line = full_text[prev_prev_nl:prev_line_end+1]
+    except Exception:
+        prev_line = ""
+    prev_is_finisher = (
+        bool(_INLINE_BY_TAIL.search(prev_line)) or
+        bool(_TACTIC_LINE_RE.match(prev_line)) or
+        prev_line.strip() in {"done", "."}
+    )
+    if prev_is_finisher:
+        s, e = hole_span
+        new_text = full_text[:s] + "\n" + full_text[e:]
+        return new_text, True, "(stale-hole)"
+
+    # Normal hole filling    
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
     eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
     
@@ -368,7 +476,8 @@ def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]
             
     lines = text.splitlines()
     
-    # Try whole-line candidates
+    # IMPORTANT: process TOP-DOWN — Isabelle stops at the first error.
+    # 1) Try whole-line tactic candidates first.
     for i, L in enumerate(lines):
         if not (_TACTIC_LINE_RE.match(L) or L.strip() == "done" or _BARE_DOT.match(L)):
             continue
@@ -378,18 +487,21 @@ def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]
             lines[i] = f"{indent}sorry"
             return ("\n".join(lines) + ("" if text.endswith("\n") else "\n")), True
     
-    # Try inline patterns
+    # 2) Try inline '... by TACTIC' patterns, TOP-DOWN.
     for i, L in enumerate(lines):
+        if not L:
+            continue
         m = _INLINE_BY_TAIL.search(L)
         if not m:
             continue
         indent = L[: len(L) - len(L.lstrip(" "))]
+        # Split the line: keep header (e.g., 'show ?case') and open a 'sorry' line.
         header = L[: m.start()].rstrip()
         trial = lines[:i] + [header, f"{indent}sorry"] + lines[i + 1 :]
         if _runs(trial):
             lines[i] = header
             lines.insert(i + 1, f"{indent}sorry")
-            return ("\n".join(lines) + ("" if text.endswith("\n") else "\n")), True
+            return ("\n".join(lines) + ("" if text.endswith("\n") else "\n")), True         
             
     return (text if text.endswith("\n") else text + "\n"), False
 
