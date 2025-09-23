@@ -157,24 +157,95 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
 
         lines = clean.splitlines()
 
-        # --- Collect "using this:" facts (if any), keep order ---
+        # Extract "using this:" facts - default to MULTIPLE premises,
+        # but MERGE consecutive lines when we have strong wrap signal:
+        #   (a) increased indentation vs the item head,
+        #   (b) unbalanced parentheses/brackets/braces after the head line,
+        #   (c) the head line ends with an infix/connector (e.g., '=', '⟹', '∧', '@', '::', '≤', '≥', '→', '↔', '⟷', ',').
         using_facts: List[str] = []
         i = 0
         while i < len(lines):
-            Ls = lines[i].strip()
-            if Ls == "using this:":
+            if lines[i].strip() != "using this:":
                 i += 1
-                while i < len(lines):
-                    L2 = lines[i]
-                    L2s = L2.strip()
-                    # stop at new section/goal header
-                    if not L2s or L2s.startswith("goal") or L2s.startswith("using this:"):
-                        break
-                    if not re.match(r"\s*\d+\.\s", L2):
-                        using_facts.append(L2s)
-                    i += 1
-            else:
+                continue
+            i += 1
+            raw_block: List[str] = []
+            # 1) Collect raw block until next header/blank
+            while i < len(lines):
+                raw = lines[i]
+                s = raw.strip()
+                if (not s) or s.startswith("goal") or s.startswith("using this:"):
+                    break
+                raw_block.append(raw)
                 i += 1
+
+            # 2) Token helpers
+            def _lead_spaces(s: str) -> int:
+                return len(s) - len(s.lstrip(" "))
+            _INFIX_TAIL = re.compile(r"(=|⟹|⇒|->|→|<->|↔|⟷|∧|∨|@|::|≤|≥|≠|,)\s*$")
+
+            # Parenthesis balance across Isabelle text (no strings expected here)
+            def _delta_parens(s: str) -> int:
+                opens = s.count("(") + s.count("[") + s.count("{")
+                closes = s.count(")") + s.count("]") + s.count("}")
+                return opens - closes
+
+            # 3) Split into items; start new item by default, merge only with strong wrap signals
+            items: List[str] = []
+            cur: List[str] = []
+            head_indent = 0
+            paren_balance = 0
+            head_ended_with_infix = False
+
+            def _flush():
+                nonlocal cur, items
+                if cur:
+                    txt = " ".join(x.strip() for x in cur)
+                    txt = re.sub(r"\s+", " ", txt).strip()
+                    if "…" in txt:
+                        txt = txt.replace("…", "").rstrip()
+                    if re.search(r"\\\\<[^>]*$", txt):
+                        txt = re.sub(r"\\\\<[^>]*$", "", txt).rstrip()
+                    if txt:
+                        items.append(txt)
+                cur = []
+
+            for raw in raw_block:
+                # reliable bullet/enumeration → force a new item
+                if re.match(r"\s*(?:[•∙·\-\*]|\(\d+\))\s+", raw):
+                    _flush()
+                    cur = [raw.split(maxsplit=1)[1].strip()] if raw.split(maxsplit=1)[0] else [raw.strip()]
+                    head_indent = _lead_spaces(raw)
+                    paren_balance = _delta_parens(raw)
+                    head_ended_with_infix = bool(_INFIX_TAIL.search(raw))
+                    continue
+
+                if not cur:
+                    # start a new item
+                    cur = [raw.strip()]
+                    head_indent = _lead_spaces(raw)
+                    paren_balance = _delta_parens(raw)
+                    head_ended_with_infix = bool(_INFIX_TAIL.search(raw))
+                    continue
+
+                ind = _lead_spaces(raw)
+                this_delta = _delta_parens(raw)
+                # Strong wrap signals → merge with current item
+                if ind > head_indent or paren_balance > 0 or head_ended_with_infix:
+                    cur.append(raw.strip())
+                    paren_balance += this_delta
+                    head_ended_with_infix = bool(_INFIX_TAIL.search(raw))
+                else:
+                    # new item boundary
+                    _flush()
+                    cur = [raw.strip()]
+                    head_indent = ind
+                    paren_balance = this_delta
+                    head_ended_with_infix = bool(_INFIX_TAIL.search(raw))
+            _flush()
+
+            using_facts = items
+            break  # only the first "using this:" block is considered
 
         # --- Find first numbered subgoal and accumulate wrapped continuation lines ---
         subgoal: Optional[str] = None
