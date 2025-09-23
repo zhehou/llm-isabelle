@@ -162,6 +162,8 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
         #   (a) increased indentation vs the item head,
         #   (b) unbalanced parentheses/brackets/braces after the head line,
         #   (c) the head line ends with an infix/connector (e.g., '=', '⟹', '∧', '@', '::', '≤', '≥', '→', '↔', '⟷', ',').
+        # NOTE: When converting to a prover goal, each 'using' fact must be parenthesized and chained as "(f1) ⟹ (f2) ⟹ … ⟹ subgoal".
+        # Without parentheses, facts that themselves contain ⟹ can parse incorrectly (e.g., "A ⟹ B ⟹ C" vs "(A ⟹ B) ⟹ C").        
         using_facts: List[str] = []
         i = 0
         while i < len(lines):
@@ -282,7 +284,16 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
 
         if subgoal:
             if using_facts:
-                return " ⟹ ".join(using_facts + [subgoal])
+                # Ensure each using-fact is wrapped in parentheses to avoid
+                # precedence/association ambiguity when facts contain ⟹.
+                def _paren(s: str) -> str:
+                    t = s.strip()
+                    if t.startswith("(") and t.endswith(")"):
+                        return t
+                    return f"({t})"
+
+                chained = " ⟹ ".join([_paren(f) for f in using_facts] + [subgoal])
+                return chained
             return subgoal
             
     if full_text and hole_span != (0, 0):
