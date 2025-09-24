@@ -23,6 +23,7 @@ from prover.isabelle_api import (
     start_isabelle_server,
 )
 from prover.prover import prove_goal
+from prover.utils import parse_subgoals
 from planner.repair import _APPLY_OR_BY as _TACTIC_LINE_RE
 
 # Marker lines emitted by our ML helpers inside print_state capture
@@ -32,6 +33,76 @@ _LLM_VARS_MARK = "[LLM_VARS]"
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
 
+def _proof_bounds_top_level(text: str) -> Optional[Tuple[int, int]]:
+    """Return (start,end) offsets of the last top-level proof..qed block."""
+    m_qed = None
+    for m in re.finditer(r"(?m)^\s*qed\b", text):
+        m_qed = m
+    if not m_qed:
+        return None
+    end = m_qed.end()
+    start = None
+    for m in re.finditer(r"(?m)^\s*proof\b.*$", text[:m_qed.start()]):
+        start = m.start()
+    if start is None:
+        return None
+    return (start, end)
+
+def _tactic_spans_topdown(text: str) -> List[Tuple[int, int]]:
+    """Top-down tactic line spans within the last proof..qed block."""
+    bounds = _proof_bounds_top_level(text)
+    if not bounds:
+        return []
+    b0, b1 = bounds
+    seg = text[b0:b1]
+    lines = seg.splitlines(True)
+    spans: List[Tuple[int, int]] = []
+    off = b0
+    for L in lines:
+        if _TACTIC_LINE_RE.match(L or "") or _INLINE_BY_TAIL.search(L or ""):
+            s = off
+            e = off + len(L.rstrip("\n"))
+            spans.append((s, e))
+        off += len(L)
+    return spans
+
+def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model: str,
+                                 left_s, max_repairs_per_hole: int, trace: bool) -> Tuple[str, bool]:
+    """
+    Walk tactics from the top; CEGIS-repair the first failing one. After each patch, re-verify.
+    Returns (patched_full, verified_ok).
+    """
+    t_spans = _tactic_spans_topdown(full)
+    if not t_spans:
+        if trace:
+            print("[planner]   (failed-tactic) no tactic lines found inside proof", flush=True)
+        return full, False
+    i = 0
+    while i < len(t_spans) and left_s() > 3.0:
+        span = t_spans[i]
+        if trace:
+            print(f"[planner]   (failed-tactic) probing tactic #{i+1}/{len(t_spans)}", flush=True)
+        st = _print_state_before_hole(isa, session, full, span, trace)
+        eff_goal = _effective_goal_from_state(st, goal_text, full, span, trace)
+        per_budget = min(30.0, max(15.0, left_s() * 0.33))
+        patched, applied, _reason = try_cegis_repairs(
+            full_text=full, hole_span=span, goal_text=eff_goal, model=model,
+            isabelle=isa, session=session, repair_budget_s=per_budget,
+            max_ops_to_try=max_repairs_per_hole, beam_k=2, allow_whole_fallback=False, trace=trace,
+        )
+        if applied and patched != full:
+            full = patched
+            if trace:
+                print("[planner]   (failed-tactic) patch applied, re-verifying…", flush=True)
+            if _verify_full_proof(isa, session, full):
+                return full, True
+            # rebuild spans after patch
+            t_spans = _tactic_spans_topdown(full)
+            if i >= len(t_spans):
+                i = max(0, len(t_spans) - 1)
+            continue
+        i += 1
+    return full, False
 
 @dataclass(slots=True)
 class PlanAndFillResult:
@@ -446,6 +517,27 @@ def _fill_one_hole(
     isabelle, session: str, full_text: str, hole_span: Tuple[int, int], goal_text: str,
     model: Optional[str], per_hole_timeout: int, *, trace: bool = False,    
 ) -> Tuple[str, bool, str]:
+    # Count current subgoals quickly on an arbitrary theory text.
+    def _quick_subgoals(text: str) -> int:
+        try:
+            thy = build_theory(text.splitlines(), add_print_state=True, end_with="sorry")
+            resps = run_theory(isabelle, session, thy)
+            block = last_print_state_block(resps) or ""
+            n = parse_subgoals(block)
+            return int(n) if isinstance(n, int) else 9999
+        except Exception:
+            return 9999
+
+    # Insert lines *above* the hole, keeping the 'sorry' so the hole remains open.
+    def _insert_above_hole_keep_sorry(text: str, hole: Tuple[int,int], lines_to_insert: List[str]) -> str:
+        s, _ = hole
+        # indentation from the 'sorry' line
+        ls = text.rfind("\n", 0, s) + 1
+        le = text.find("\n", s)
+        hole_line = text[ls:(le if le != -1 else len(text))]
+        indent = hole_line[: len(hole_line) - len(hole_line.lstrip(" "))]
+        payload = "".join(f"{indent}{ln.strip()}\n" for ln in lines_to_insert if ln.strip())
+        return text[:s] + payload + text[s:]    
     # If this 'sorry' sits immediately after a finisher/tactic, it's a stale hole:
     # delete it without asking the prover to avoid duplicates like an extra 'by force'.
     try:
@@ -501,15 +593,48 @@ def _fill_one_hole(
 
     applies = [s for s in steps if s.startswith("apply")]
     fin = next((s for s in steps if s.startswith("by ") or s.strip() == "done"), "")
-    script_lines: List[str] = applies + ([fin] if fin else [])
-    
-    if not script_lines:
-        return full_text, False, "no-tactics"
+    # Gate acceptance:
+    #  - With a finisher: replace 'sorry' and sanity-check subgoal count.
+    #  - With only 'apply': keep 'sorry', accept only if it reduces subgoals (partial progress).
+    if fin:
+        script_lines: List[str] = applies + [fin]
+        insert = "\n  " + "\n  ".join(script_lines) + "\n"
+        s, e = hole_span
+        new_text = full_text[:s] + insert + full_text[e:]
+        before = _quick_subgoals(full_text)
+        after  = _quick_subgoals(new_text)
+        if trace:
+            print(f"[fill] subgoals: {before} → {after} (finisher present)")
+        # If parser can’t read subgoal count (9999), fall back to a quick full verification.
+        if after == 9999:
+            if trace:
+                print("[fill] subgoal count unknown after finisher → verifying whole proof quickly")
+            if _verify_full_proof(isabelle, session, new_text):
+                return new_text, True, "\n".join(script_lines)
+            return full_text, False, "finisher-ambiguous-noverify"
+        if after > before:
+            return full_text, False, "finisher-regressed"
+        return new_text, True, "\n".join(script_lines)
 
-    insert = "\n  " + "\n  ".join(script_lines) + "\n"
-    s, e = hole_span
-    new_text = full_text[:s] + insert + full_text[e:]
-    return new_text, True, "\n".join(script_lines)
+    if applies:
+        # de-dup within a small window above the hole
+        s, _ = hole_span
+        win_s = max(0, full_text.rfind("\n", 0, max(0, s-256)) + 1)
+        window = full_text[win_s:s]
+        dedup = [a for a in applies if a not in window]
+        if not dedup:
+            return full_text, False, "apply-duplicate"
+        probe_text = _insert_above_hole_keep_sorry(full_text, hole_span, dedup)
+        before = _quick_subgoals(full_text)
+        after  = _quick_subgoals(probe_text)
+        if trace:
+            print(f"[fill] subgoals: {before} → {after} (apply-only)")
+        if after != 9999 and after < before:
+            # partial progress: do NOT mark hole filled
+            return probe_text, False, "\n".join(dedup)
+        return full_text, False, "apply-no-effect"
+
+    return full_text, False, "no-tactics"
 
 
 def _verify_full_proof(isabelle, session: str, text: str) -> bool:
@@ -650,22 +775,31 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
             )
             full = best.text
             
+        # Compute hole spans immediately so 'spans' is bound before first use.
+        spans = find_sorry_spans(full)
         if trace:
-            holes_now = find_sorry_spans(full)
-            print(f"[planner] outline ready: {len(full)} chars; holes={len(holes_now)}", flush=True)
+            print(f"[planner] outline ready: {len(full)} chars; holes={len(spans)}", flush=True)
             
         if mode == "outline":
             return PlanAndFillResult(True, full, [], [])
 
         # 2) Verify if already complete
-        spans = find_sorry_spans(full)
         if not spans:
             if trace:
                 print("[planner] no holes detected – verifying complete proof", flush=True)
             if _verify_full_proof(isa, session, full):
                 return PlanAndFillResult(True, full, [], [])
             if trace:
-                print("[planner] complete proof did not verify – opening minimal holes", flush=True)
+                print("[planner] complete proof did not verify – repairing top-down at first failing tactic", flush=True)
+            if repairs and left_s() > 6.0:
+                # Use original 'goal' here (goal_text is not extracted yet)
+                full, ok = _repair_failed_proof_topdown(
+                    isa, session, full, goal, model, left_s, max_repairs_per_hole, trace
+                )
+                if ok:
+                    return PlanAndFillResult(True, full, [], [])
+            if trace:
+                print("[planner] fallback – opening minimal holes", flush=True)
             full2, opened = _open_minimal_sorries(isa, session, full)
             if opened:
                 full = full2
@@ -713,7 +847,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                     print("[planner]   → trying local repairs (CEGIS)…", flush=True)
                 patched, applied, _reason = try_cegis_repairs(
                     full_text=full, hole_span=span, goal_text=_eff_goal, model=model,
-                    isabelle=isa, session=session, repair_budget_s=min(10.0, max(5.0, left_s() * 0.33)),
+                    isabelle=isa, session=session, repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
                     max_ops_to_try=max_repairs_per_hole, beam_k=2, allow_whole_fallback=True, trace=trace,
                 )
                 if applied and patched != full:
@@ -728,9 +862,28 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
             hole_idx += 1
 
         success = ("sorry" not in full)
+        if success:
+            # Final verification; if it fails, repair top-down at first failing tactic.
+            if _verify_full_proof(isa, session, full):
+                if trace:
+                    print("[planner] finished: success=True", flush=True)
+                return PlanAndFillResult(True, full, fills, failed)
+            if repairs and left_s() > 6.0:
+                if trace:
+                    print("[planner] final verification failed – repairing top-down at first failing tactic", flush=True)
+                full, ok = _repair_failed_proof_topdown(
+                    isa, session, full, goal_text, model, left_s, max_repairs_per_hole, trace
+                )
+                if ok:
+                    if trace:
+                        print("[planner] finished: success=True (after top-down repair)", flush=True)
+                    return PlanAndFillResult(True, full, fills, failed)
+            if trace:
+                print("[planner] finished: success=False", flush=True)
+            return PlanAndFillResult(False, full, fills, failed)
         if trace:
-            print(f"[planner] finished: success={success}", flush=True)        
-        return PlanAndFillResult(success, full, fills, failed)
+            print("[planner] finished: success=False", flush=True)
+        return PlanAndFillResult(False, full, fills, failed)
 
     finally:
         try:

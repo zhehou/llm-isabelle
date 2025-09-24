@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 import time
-
+import concurrent.futures
+from typing import List, Dict, Tuple, Optional
 import requests
 
 from prover.config import (
@@ -21,6 +22,13 @@ from prover.config import (
 )
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block
 from prover.utils import parse_subgoals
+
+# requests is optional; we only reference its exception types if present
+try:
+    import requests  # type: ignore
+    _REQ_TIMEOUTS = (requests.Timeout, requests.ReadTimeout, requests.ConnectionError)
+except Exception:  # pragma: no cover
+    _REQ_TIMEOUTS = tuple()
 
 _SESSION = requests.Session()
 
@@ -50,7 +58,7 @@ def _ollama_generate_simple(
     # Separate connect/read timeouts and enforce a sensible read floor for big local models.
     # If the caller passes a tiny timeout (e.g., 3s), a 30B model will almost always hit a read timeout.
     # We keep connect timeout modest (5s) but floor read to 20s (or OLLAMA_TIMEOUT_S, whichever is larger).
-    eff_read = max(20.0, float(timeout_s or OLLAMA_TIMEOUT_S))
+    eff_read = float(timeout_s or OLLAMA_TIMEOUT_S)
     eff_conn = 5.0
     resp = _SESSION.post(url, json=payload, timeout=(eff_conn, eff_read))
     resp.raise_for_status()
@@ -322,10 +330,9 @@ def _snippet_window(lines: List[str], hole_line: int, radius: int = 12) -> Tuple
 def _facts_from_state(state_block: str, limit: int = 16) -> List[str]:
     defs = _DEF_RE.findall(state_block or "")
     tokens = _FACT_RE.findall(state_block or "")
-    priority = ["algebra_simps", "field_simps", "append_assoc", "map_append", "length_append", "rev_append", "rev_rev_ident"]
     out: List[str] = []
     seen = set()
-    for x in priority + defs + tokens:
+    for x in defs + tokens:
         if not x or x in seen:
             continue
         seen.add(x); out.append(x)
@@ -823,40 +830,73 @@ def try_local_repairs(
     def _left() -> float:
         return max(0.0, repair_budget_s - (time.monotonic() - start))
 
-    # Split budget: reserve ~half for applying/quick-checking.
-    # Keep a higher per-call floor so we don't starve local LLM round-trips.
-    propose_timeout = int(min(12, max(6, repair_budget_s * 0.5)))
-
-    # Baseline state/errors on current text
-    s0 = _quick_state_subgoals(isabelle, session, full_text)
+    # ---- Gather only CHEAP signals first (so we don't burn the budget) ----
+    # One quick run to get state + recent errors; do NOT run Nitpick/Quickcheck yet.
+    s0 = _quick_state_subgoals(isabelle, session, full_text)  # baseline score
     state0, errs0 = _quick_state_and_errors(isabelle, session, full_text)
 
-    # Local context (computed once for the prompt)
     hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
     snippet = "\n".join(lines[s:e])
+
     state_block = state0 or _quick_state_text(isabelle, session, full_text)
-    facts = _facts_from_state(state_block, limit=12)
-    # Augment with Nitpick-derived CE hints
-    ce = _counterexample_hints(isabelle, session, full_text, hole_span)
-    if ce.get("def_hints"):
-        facts = list(dict.fromkeys(ce["def_hints"] + facts))[:16]
     header = _nearest_header(lines, hole_line)
     rsteps = _recent_steps(lines, hole_line)
 
-    # Ask LLM for repair ops with bounded time (now passing Isabelle errors + CE hints)
-    ops = propose_local_repairs(
-        goal=goal_text,
-        state_block=state_block,
-        errors=errs0,
-        ce_hints=ce,
-        block_snippet=snippet,
-        nearest_header=header,
-        recent_steps=rsteps,
-        facts=facts,
-        model=model,
-        timeout_s=propose_timeout,
-    )
+    # Keep 'facts' and 'ce' EMPTY unless we have comfortable time left.
+    # This removes the heavy Nitpick/Quickcheck calls from the hot path.
+    facts: List[str] = []
+    ce: Dict[str, List[str]] = {"bindings": [], "def_hints": []}
+    if _left() >= 6.0:
+        # Very light token harvesting only (no CE tools)
+        facts = _facts_from_state(state_block, limit=8)
+    if _left() >= 8.0:
+        # Only now run Nitpick/Quickcheck (expensive). If they add def_hints, merge them.
+        ce = _counterexample_hints(isabelle, session, full_text, hole_span)
+        if ce.get("def_hints"):
+            facts = list(dict.fromkeys((ce["def_hints"] or []) + facts))[:12]
+
+    # ---- Obtain ops, strictly respecting the remaining budget ----
+    remaining_now = _left()
+    # Always leave hard headroom to TRY at least one op (apply + quick check).
+    # Reserve ~2s for apply/check even on slower boxes.
+    HEADROOM_S = 2
+    ops: List[RepairOp] = []
+    if remaining_now > HEADROOM_S + 1.0:
+        # Split remaining time between proposal and application (~70/30).
+        propose_timeout = int(max(1, min(30, (remaining_now - HEADROOM_S) * 0.7)))
+        if propose_timeout >= 8:
+            # Run the LLM proposal in a separate thread with a hard wall-clock timeout.
+            def _call():
+                return propose_local_repairs(
+                    goal=goal_text,
+                    state_block=state_block,
+                    errors=errs0,
+                    ce_hints=ce,
+                    block_snippet=snippet,
+                    nearest_header=header,
+                    recent_steps=rsteps,
+                    facts=facts,
+                    model=model,
+                    timeout_s=propose_timeout,  # still pass through for backends that honor it
+                )
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(_call)
+                    ops = fut.result(timeout=propose_timeout)
+            except concurrent.futures.TimeoutError:
+                if trace:
+                    print(f"[repair] LLM proposal timed out after {propose_timeout}s → using heuristics")
+                ops = []
+            except _REQ_TIMEOUTS as e:  # requests.* timeouts/connection errors
+                if trace:
+                    print(f"[repair] LLM HTTP error ({e.__class__.__name__}) → using heuristics")
+                ops = []
+            except Exception as e:
+                if trace:
+                    print(f"[repair] LLM proposal failed: {e!r} → using heuristics")
+                ops = []
+
     if not ops:
         ops = _heuristic_fallback_ops(goal_text, state_block, header, facts)
 
@@ -872,17 +912,11 @@ def try_local_repairs(
         if printable:
             print("[repair] proposed:", "; ".join(printable))
 
-    # If almost no time left, blind-apply the first simple op so we at least land a visible hint.
-    if _left() < 0.75:
-        if trace:
-            print("[repair] budget exhausted before trying ops → blind-apply first simple patch")
-        for kind, payload in ops:
-            if kind == "insert_before_hole":
-                return _apply_insert_before_hole(full_text, hole_span, payload.line), True, "blind-insert"
-            if kind == "replace_in_snippet":
-                return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), True, "blind-replace"
-        # otherwise, fall through and just give up
-        return full_text, False, "no-time"
+    # Never bail out BEFORE trying at least one op.
+    # If time is extremely tight, apply the simplest op deterministically and return.
+    if _left() < 0.5:
+        # Fall through to the tiny beam below; it will try one candidate quickly.
+        pass
 
     # Tiny beam over ops (configurable via beam_k; default=1 preserves old behavior)
     # Score = resulting subgoal count (lower is better); tie-break by preferring simpler edits.
@@ -907,6 +941,7 @@ def try_local_repairs(
 
         if cand == full_text:
             continue
+        # Quick score; even if sentinel 9999, we may accept non-regressive simple edits later.
         s1 = _quick_state_subgoals(isabelle, session, cand)
         scored.append((s1, kind, getattr(payload, "label", "") or getattr(payload, "line", "") or getattr(payload, "find", "")))
         if s1 != 9999 and s1 < best_score:
@@ -921,6 +956,15 @@ def try_local_repairs(
         if non_regressive:
             return best_text, True, f"beam:{best_kind}"
 
+    # If we get here without a measurable improvement but we still have
+    # time starvation, accept the FIRST simple candidate to let the outer loop retry.
+    if tried == 0 and ops:
+        # Extremely defensive fallback; shouldn't happen with the guard above.
+        kind, payload = ops[0]
+        if kind == "insert_before_hole":
+            return _apply_insert_before_hole(full_text, hole_span, payload.line), True, "blind-insert0"
+        if kind == "replace_in_snippet":
+            return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), True, "blind-replace0"
     return full_text, False, "repairs-did-not-help"
 
 # =========================
@@ -960,8 +1004,14 @@ def try_cegis_repairs(
         if ok and patched != full_text:
             s1 = _quick_state_subgoals(isabelle, session, patched)
             if trace: print(f"[cegis] local round {round_i}: {base_s} → {s1} (beam_k={eff_k})")
+            # Normal acceptance: measurable, non-regressive improvement
             if s1 != 9999 and s1 <= base_s:
                 return patched, True, f"local:{tag}"
+            # NEW: accept neutral blind patches so outer loop can retry on the patched text.
+            # This avoids discarding useful insertions when print_state parsing yields 9999.
+            if "blind" in (tag or ""):
+                if trace: print("[cegis] accepting neutral blind patch (retry hole on patched text)")
+                return patched, True, f"local:{tag}(neutral)"
         # refresh signals for next round
         _ = _quick_state_and_errors(isabelle, session, full_text)
 
@@ -975,7 +1025,7 @@ def try_cegis_repairs(
         blk = _propose_block_repair(
             goal=goal_text, errors=errs, ce_hints=ceh,
             state_block=state_block, block_text=block,
-            model=model, timeout_s=int(min(8, max(4, left())))
+            model=model, timeout_s=int(min(20, max(15, left())))
         )
         if blk and blk.strip() and blk.strip() != block.strip():
             # Try the LLM suggestion AS-IS first

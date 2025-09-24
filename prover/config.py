@@ -57,7 +57,7 @@ def _load_from_env() -> Dict[str, Any]:
 
     # ---------- Ollama / LLM ----------
     d["OLLAMA_HOST"] = _get("OLLAMA_HOST", "http://127.0.0.1:11434")
-    d["MODEL"] = _get("OLLAMA_MODEL", "gemma3:27b")
+    d["MODEL"] = _get("OLLAMA_MODEL", "qwen3-coder:30b")
 
     # Modern names
     d["OLLAMA_TEMP"] = _clamp(_get("OLLAMA_TEMP", 0.2, _to_float), 0.0, 2.0)
