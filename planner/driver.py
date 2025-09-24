@@ -27,6 +27,7 @@ from planner.repair import _APPLY_OR_BY as _TACTIC_LINE_RE
 
 # Marker lines emitted by our ML helpers inside print_state capture
 _LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
+_LLM_VARS_MARK = "[LLM_VARS]"
 
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
@@ -57,41 +58,42 @@ def _first_lemma_line(full_text: str) -> str:
 
 def _extract_print_state_from_responses(resps: List) -> str:
     """Extract print_state output from Isabelle responses."""
-    # First try the standard approach
-    standard_result = last_print_state_block(resps)
-    if standard_result:
-        return standard_result
-    
-    # Look deeper into FINISHED response structure
+    # Collect the standard print_state block (for numbered goal etc.)
+    standard_result = last_print_state_block(resps) or ""
+
+    # Also collect our ML 'writeln' markers (authoritative subgoal + var classes)
+    llm_lines: List[str] = []
     for resp in (resps or []):
         resp_type = getattr(resp, "response_type", None)
         if str(resp_type).upper() == "FINISHED":
             body = getattr(resp, "response_body", None)
             if isinstance(body, bytes):
                 body = body.decode(errors="replace")
-            
+            data = None
             try:
-                if isinstance(body, str) and body.strip().startswith('{'):
+                if isinstance(body, str) and body.strip().startswith("{"):
                     data = json.loads(body)
                 elif isinstance(body, dict):
                     data = body
-                else:
-                    continue
-                    
-                # Look in nodes[].messages[] for writeln messages with goal content
-                nodes = data.get("nodes", [])
-                for node in nodes:
-                    messages = node.get("messages", [])
-                    for msg in messages:
-                        if (msg.get("kind") == "writeln" and 
-                            "goal" in msg.get("message", "") and 
-                            "subgoal" in msg.get("message", "")):
-                            return msg.get("message", "")
-                            
-            except (json.JSONDecodeError, AttributeError, TypeError):
+            except (json.JSONDecodeError, TypeError):
+                data = None
+            if not data:
                 continue
-    
-    return ""
+            nodes = data.get("nodes", [])
+            for node in nodes:
+                for msg in node.get("messages", []) or []:
+                    if msg.get("kind") != "writeln":
+                        continue
+                    text = msg.get("message", "") or ""
+                    # Keep our markers; keep extra goal text if present
+                    if text.startswith(_LLM_SUBGOAL_MARK) or text.startswith(_LLM_VARS_MARK):
+                        llm_lines.append(text)
+                    elif ("goal" in text and "subgoal" in text and not standard_result):
+                        standard_result = text
+
+    if llm_lines and standard_result:
+        return standard_result + "\n" + "\n".join(llm_lines)
+    return standard_result or ("\n".join(llm_lines) if llm_lines else "")
 
 
 # -----------------------------------------------------------------------------
@@ -142,14 +144,24 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
             "    val sg   = Thm.cprem_of th 1;",
             "    val t    = Thm.term_of sg;",
             "    val ctxt = Proof.context_of st;",
-            "    val frees = Term.add_frees t [] |> map #1;",
+            "    val frees = Term.add_frees t [] |> map #1;",  
             "    val (params, _) = Logic.strip_params t;",
             "    val pnames = map (fn ((n,_),_) => n) params;",
             "    val ctx0 = Name.make_context (frees @ pnames);",
             "    val (new_names, _) = fold_map Name.variant pnames ctx0;",
             "    val t' = Logic.list_rename_params new_names t;",
             "    val s  = Syntax.string_of_term ctxt t';",
-            "  in writeln (\"" + _LLM_SUBGOAL_MARK + " \" ^ s) end",
+            "    (* classify schematic variables as well *)",
+            "    val schem_vnames = Term.add_vars t [] |> map #1;",  
+            "    fun string_of_vname (x, i) =",
+            "      if i = 0 then \"?\" ^ x else \"?\" ^ x ^ Int.toString i;",
+            "    val s_params = String.concatWith \" \" new_names;",
+            "    val s_frees  = String.concatWith \" \" frees;",
+            "    val s_schems = String.concatWith \" \" (map string_of_vname schem_vnames);",
+            "  in",
+            "    writeln (\"" + _LLM_SUBGOAL_MARK + " \" ^ s);",
+            "    writeln (\"" + _LLM_VARS_MARK + " params: \" ^ s_params ^ \" | frees: \" ^ s_frees ^ \" | schematics: \" ^ s_schems)",
+            "  end",
             "›",
         ]
         proof_lines1 = prolog + proof_lines
@@ -194,6 +206,10 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
         clean = clean.replace("\u00A0", " ")
         # Try to grab the ML-rendered, alpha-renamed subgoal first.
         m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
+        # try to fish var classification (for logging/annotation only)
+        m_vars = re.search(
+            rf"^{re.escape(_LLM_VARS_MARK)}\s*params:\s*(.*?)\s*\|\s*frees:\s*(.*?)\s*\|\s*schematics:\s*(.*)$",
+            clean, flags=re.M)
 
         lines = clean.splitlines()
 
@@ -342,7 +358,7 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
             # any binder-recovery or identifier heuristics here.
             if m_llm:
                 subgoal_fixed = f"({subgoal})"
-                return " ⟹ ".join(facts + [subgoal_fixed]) if facts else subgoal_fixed            
+                return " ⟹ ".join(facts + [subgoal_fixed]) if facts else subgoal_fixed          
 
             # ----------------------------------------------------
             # 2) Binder recovery with HEAD detection (no alpha-rename)
@@ -353,8 +369,9 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
             #    meta-quantified parameters without misclassifying constants.
             # ----------------------------------------------------
             ID = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b")
-            # token that *appears as a head of application* somewhere in the subgoal
             HEAD_APP = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b\s*(?=\(|[A-Za-z])")
+            # Minimal keyword guard for the rare case we lack ML markers.
+            KEYWORDS = {"in","if","then","else","let","case","of","where","and","or","not"}
 
             def _idents(s: str) -> List[str]:
                 seen, out = set(), []
@@ -375,7 +392,7 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
                 sub_core = subgoal.strip()
                 head_syms = {m.group(1) for m in HEAD_APP.finditer(sub_core)}
                 # params = lower-case identifiers that are not function heads
-                params = [v for v in _idents(sub_core) if v not in head_syms]
+                params = [v for v in _idents(sub_core) if v not in head_syms and v not in KEYWORDS]
 
             # --------------------------------------------
             # 3) Parenthesize the final subgoal when chaining facts
@@ -390,6 +407,40 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
             print(f"[fill] Failed to extract goal from state")
     return fallback_goal
 
+def _parse_llm_vars(state_block: str) -> Optional[dict]:
+    """Parse [LLM_VARS] classification from a state block."""
+    if not state_block:
+        return None
+    for L in state_block.splitlines():
+        Ls = L.strip()
+        if not Ls.startswith(_LLM_VARS_MARK):
+            continue
+        m = re.match(
+            rf"^{re.escape(_LLM_VARS_MARK)}\s*params:\s*(.*?)\s*\|\s*frees:\s*(.*?)\s*\|\s*schematics:\s*(.*)$",
+            Ls)
+        if not m:
+            continue
+        split_ws = lambda s: [x for x in re.split(r"\s+", s.strip()) if x]
+        return {"params": split_ws(m.group(1)),
+                "frees": split_ws(m.group(2)),
+                "schematics": split_ws(m.group(3))}
+    return None
+
+def _annotate_goal_for_log(goal: str, vars_info: Optional[dict]) -> str:
+    """Purely cosmetic: prefix frees with '?' in logs; never sent to the prover."""
+    if not vars_info:
+        return goal
+    g = goal
+    m = re.match(r"\s*⋀\s*([A-Za-z0-9_'\s]+)\.\s*(.*)$", g)
+    binder, tail = ("", g)
+    if m:
+        binder = f"⋀{m.group(1).strip()}. "
+        tail = m.group(2).strip()
+    def mark(text: str, name: str) -> str:
+        return re.sub(rf"\b{re.escape(name)}\b", f"?{name}", text)
+    for name in vars_info.get("frees", []):
+        tail = mark(tail, name)
+    return binder + tail
 
 def _fill_one_hole(
     isabelle, session: str, full_text: str, hole_span: Tuple[int, int], goal_text: str,
@@ -417,6 +468,8 @@ def _fill_one_hole(
     # Normal hole filling    
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
     eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
+    vars_info = _parse_llm_vars(state_block)
+    eff_goal_log = _annotate_goal_for_log(eff_goal, vars_info)
     
     if trace:
         print(f"[fill] State block (length={len(state_block)}):")
@@ -424,6 +477,10 @@ def _fill_one_hole(
             print(state_block[:200] + ("..." if len(state_block) > 200 else ""))
         else:
             print("  (empty or whitespace only)")
+        if vars_info:
+            print(f"[fill] Vars: params={vars_info.get('params',[])} "
+                  f"frees={vars_info.get('frees',[])} schematics={vars_info.get('schematics',[])}")
+            print(f"[fill] Effective goal (annotated): {eff_goal_log}")
         print(f"[fill] Effective goal: {eff_goal}")
         print(f"[fill] Original goal: {goal_text}")
 
