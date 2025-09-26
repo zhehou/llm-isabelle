@@ -31,11 +31,42 @@ SUBGOALS_PATTERNS = (
     re.compile(r"(?i)\bgoal\s*\(\s*(\d+)\s+subgoals?\s*\)"),
 )
 
+# def parse_subgoals(block: str) -> Optional[int]:
+#     for pat in SUBGOALS_PATTERNS:
+#         m = pat.search(block)
+#         if m:
+#             return int(m.group(1))
+#     return None
+
 def parse_subgoals(block: str) -> Optional[int]:
+    print(f"DEBUG: Parsing block: {repr(block[:200])}")  # First 200 chars
+    if not block:
+        return None
+    
+    # Clean the block
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', block)  # Remove ANSI codes
+    clean = clean.replace('\u00A0', ' ')  # Replace non-breaking spaces
+    
+    # Pattern 1: "goal (N subgoal[s]):" - most common
+    m = re.search(r'goal\s*\(\s*(\d+)\s+subgoals?\s*\)', clean, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    
+    # Pattern 2: Count numbered subgoals "1. ... 2. ..."
+    numbered = re.findall(r'^\s*(\d+)\.\s', clean, re.MULTILINE)
+    if numbered:
+        return len(numbered)
+    
+    # Pattern 3: "No subgoals" or similar
+    if re.search(r'no\s+subgoals?', clean, re.IGNORECASE):
+        return 0
+        
+    # Pattern 4: Legacy patterns (keep originals as fallback)
     for pat in SUBGOALS_PATTERNS:
-        m = pat.search(block)
+        m = pat.search(clean)
         if m:
             return int(m.group(1))
+    
     return None
 
 def state_fingerprint(s: str) -> str:
