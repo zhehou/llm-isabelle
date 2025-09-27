@@ -24,6 +24,17 @@ _LLM_VARS_MARK = "[LLM_VARS]"
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
 
+def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
+    """Pretty-print the exact proof state block we consumed."""
+    if not trace:
+        return
+    b = block or ""
+    print(f"[{prefix}] State block (length={len(b)}):")
+    if b.strip():
+        print(b)
+    else:
+        print("  (empty or whitespace only)")
+
 @dataclass(slots=True)
 class PlanAndFillResult:
     success: bool
@@ -152,6 +163,15 @@ def _extract_print_state_from_responses(resps: List) -> str:
     if llm_lines and standard_result:
         return standard_result + "\n" + "\n".join(llm_lines)
     return standard_result or "\n".join(llm_lines)
+
+def _original_goal_from_state(state_block: str) -> Optional[str]:
+    """Extract the original subgoal exactly as printed under `goal (…):` (or via [LLM_SUBGOAL])."""
+    if not state_block or not state_block.strip():
+        return None
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", state_block).replace("\u00A0", " ")
+    m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
+    lines = clean.splitlines()
+    return _extract_subgoal(lines, m_llm)
 
 def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
     """Capture the proof state right before the hole."""
@@ -442,12 +462,16 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
         s, e = hole_span
         return full_text[:s] + "\n" + full_text[e:], True, "(stale-hole)"
     
-    # Get effective goal and prove
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
-    eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
-    
+    # Show the exact proof state block we will parse
+    _log_state_block("fill", state_block, trace=trace)
+    # Parse and print the original goal straight from the state block
+    orig_goal = _original_goal_from_state(state_block)
+    eff_goal  = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
     if trace:
-        print(f"[fill] Effective goal: {eff_goal}")
+        if orig_goal:
+            print(f"[fill] Original goal: {orig_goal}")
+        print(f"\n[fill] Effective goal: {eff_goal}")
     
     res = prove_goal(
         isabelle, session, eff_goal, model_name_or_ensemble=model,

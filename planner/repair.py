@@ -20,6 +20,28 @@ from prover.utils import parse_subgoals
 # Global session for connection reuse
 _SESSION = requests.Session()
 
+def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
+    """Pretty-print the exact proof state block we consumed."""
+    if not trace:
+        return
+    b = block or ""
+    print(f"[{prefix}] State block (length={len(b)}):")
+    if b.strip():
+        print(b)
+    else:
+        print("  (empty or whitespace only)")
+
+def _log_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
+    """Pretty-print a proposed proof block (case/subproof) before we apply it."""
+    if not trace:
+        return
+    b = block or ""
+    print(f"[{prefix}] Proposed {label} (length={len(b)}):")
+    if b.strip():
+        print(b)
+    else:
+        print("  (empty or whitespace only)")
+
 def _sanitize_llm_block(text: str) -> str:
     """Remove known fence lines, preserving Isabelle content."""
     if not isinstance(text, str) or not text:
@@ -590,6 +612,7 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     # Get baseline and context
     s0 = _quick_state_subgoals(isabelle, session, full_text)
     state0, errs0 = _quick_state_and_errors(isabelle, session, full_text)
+    _log_state_block("repair", state0, trace=trace)
     
     hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
@@ -622,6 +645,13 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                                      ce_hints=ce, block_snippet=snippet, nearest_header=header,
                                      recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout)
                     ops = future.result(timeout=propose_timeout)
+                    # If the proposer returned a whole snippet op, print it.
+                    for op in ops:
+                        if isinstance(op, tuple) and len(op) == 2 and op[0] in ("replace_block", "insert_block"):
+                            block_obj = op[1]
+                            text = getattr(block_obj, "text", None) or getattr(block_obj, "block", None)
+                            if isinstance(text, str):
+                                _log_block("repair", "local-block", text, trace=trace)                    
             except (concurrent.futures.TimeoutError, requests.RequestException):
                 ops = []
     
@@ -843,9 +873,11 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     if cs >= 0 and left() > 5.0:
         state_block, errs = _quick_state_and_errors(isabelle, session, current_text)
+        _log_state_block("repair", state_block, trace=trace)
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[cs:ce])
-        
+        # print the raw case block before we rewrite/sanitize
+        _log_block("repair", "case-block/raw", block, trace=trace)        
         block_timeout = int(min(60, max(20, left() * 0.6)))
         
         try:
@@ -890,9 +922,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     if ps >= 0 and left() > 3.0:
         state_block, errs = _quick_state_and_errors(isabelle, session, current_text)
+        _log_state_block("repair", state_block, trace=trace)
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[ps:pe])
-        
+        _log_block("repair", "subproof-block/raw", block, trace=trace)
         subproof_timeout = int(min(45, max(15, left() * 0.7)))
         
         try:
