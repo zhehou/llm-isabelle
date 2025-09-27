@@ -198,8 +198,15 @@ def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
 
 
 def last_print_state_block(resps: List[IsabelleResponse]) -> str:
-    """Return the text of the last NOTE/writeln message that looks like a goal/subgoal block."""
+    """
+    Return a print_state-like goal block as a plain string.
+    Backwards-compatible:
+      1) Prefer the last NOTE/writeln 'goal' block if present (legacy behaviour).
+      2) Otherwise, fall back to FINISHED JSON 'nodes[*].messages[*]' where many
+         Isabelle client builds now place the pretty-printed goal text.
+    """
     txt = ""
+    # 1) Legacy NOTE/writeln path
     for r in (resps or []):
         if _normalize_type(_get_field(r, ("response_type", "type", "kind", "tag", "name"))) != "NOTE":
             continue
@@ -211,6 +218,24 @@ def last_print_state_block(resps: List[IsabelleResponse]) -> str:
             msg = str(obj.get("message", ""))
             if ("subgoal" in msg) or ("goal (" in msg) or ("goal\n" in msg):
                 txt = msg
+    if txt:
+        return txt
+    # 2) FINISHED JSON fallback (authoritative on some builds)
+    for r in (resps or []):
+        if _normalize_type(_get_field(r, ("response_type", "type", "kind", "tag", "name"))) != "FINISHED":
+            continue
+        obj = _decode_body_to_dict(_get_field(r, ("response_body", "body", "message", "payload")))
+        if not isinstance(obj, dict):
+            continue
+        for node in (obj.get("nodes") or []):
+            for m in (node.get("messages") or []):
+                if str(m.get("kind", "")).lower() != "writeln":
+                    continue
+                msg = str(m.get("message", "") or "")
+                # Prefer explicit goal/subgoal blocks; also accept our ML markers
+                if ("subgoal" in msg) or ("goal (" in msg) or ("goal\n" in msg) \
+                   or msg.startswith("[LLM_SUBGOAL]"):
+                    txt = msg or txt
     return txt
 
 
@@ -240,33 +265,17 @@ def graceful_terminate(proc, timeout_s: int = 3) -> None:
     if proc is None:
         return
     try:
-        if hasattr(proc, "terminate"):
-            proc.terminate()
-    except Exception:
-        pass
-    # Prefer Popen.wait(timeout) if available
-    try:
-        if hasattr(proc, "wait"):
-            try:
-                proc.wait(timeout=timeout_s)  # subprocess.Popen
-                return
-            except TypeError:
-                proc.wait()  # older signature without timeout
-                return
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # multiprocessing.Process
-    try:
-        if hasattr(proc, "join"):
-            proc.join(timeout=timeout_s)
-            return
-    except Exception:
-        pass
-    # Last resort
-    try:
-        if hasattr(proc, "kill"):
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
             proc.kill()
-    except Exception:
-        pass
+            proc.wait(timeout=3)
+    finally:
+        # Make sure transports/pipes are closed before the loop is closed
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(lambda: None)
+        except RuntimeError:
+            pass
