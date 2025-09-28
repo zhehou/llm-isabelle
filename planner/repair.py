@@ -14,7 +14,7 @@ from prover.config import (
     MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S,
     OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P,
 )
-from prover.isabelle_api import build_theory, run_theory, last_print_state_block
+from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
 from prover.utils import parse_subgoals
 
 # Global session for connection reuse
@@ -41,15 +41,6 @@ def _log_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
         print(b)
     else:
         print("  (empty or whitespace only)")
-
-def _hole_line_bounds(full_text: str, hole_span: Tuple[int, int]) -> Tuple[int, int, List[str]]:
-    """Get hole line number, indentation, and text lines."""
-    lines = full_text.splitlines()
-    hole_line = full_text[:hole_span[0]].count("\n")
-    line_text = lines[hole_line] if 0 <= hole_line < len(lines) else ""
-    indent = len(line_text) - len(line_text.lstrip(" "))
-    return hole_line, indent, lines
-
 
 def _sanitize_llm_block(text: str) -> str:
     """Remove known fence lines, preserving Isabelle content."""
@@ -486,32 +477,67 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
     except Exception:
         return ""
 
-def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[str]]:
-    """Get state and errors from Isabelle."""
+def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[dict]]:
+    """Get state and errors from Isabelle (preserve line numbers when available)."""
     try:
         thy = build_theory(full_text.splitlines(), add_print_state=True, end_with="sorry")
         resps = run_theory(isabelle, session, thy)
         state_block = _extract_print_state_from_responses(resps)
         
-        # Extract errors
-        errors = []
+        # Extract errors (structured, with line numbers when possible)
+        errors: List[dict] = []
         for r in resps or []:
-            body = getattr(r, "response_body", None)
-            if isinstance(body, bytes):
-                body = body.decode(errors="replace")
-            if not isinstance(body, str):
-                continue
+            raw = getattr(r, "response_body", None)
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode(errors="replace")
             try:
-                data = json.loads(body)
-                if isinstance(data, dict) and data.get("kind") == "error":
-                    errors.append(str(data.get("message", "")))
-            except json.JSONDecodeError:
-                if any(err in body for err in ["*** Error:", "*** Outer syntax error", "*** Failed"]):
-                    errors.append(body.strip().splitlines()[-1])
-        
-        return state_block, errors[:3]
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                data = None
+
+            # FINISHED JSON with nodes/messages
+            if isinstance(data, dict) and data.get("nodes"):
+                for node in (data.get("nodes") or []):
+                    for msg in (node.get("messages") or []):
+                        if str(msg.get("kind", "")).lower() != "error":
+                            continue
+                        txt = str(msg.get("message", "") or "")
+                        pos = msg.get("pos") or {}
+                        rng = msg.get("range") or {}
+                        line = (
+                            pos.get("line")
+                            or (rng.get("start") or {}).get("line")
+                            or msg.get("line")
+                        )
+                        if not isinstance(line, int):
+                            m = re.search(r"\bline\s+(\d+)\b", txt)
+                            if m:
+                                try:
+                                    line = int(m.group(1))
+                                except Exception:
+                                    line = None
+                        err_obj = {"text": txt}
+                        if isinstance(line, int):
+                            err_obj["line"] = line
+                        errors.append(err_obj)
+                continue
+
+            # Legacy string bodies — try best-effort line recovery
+            if isinstance(raw, str):
+                if any(k in raw for k in ["*** Error:", "*** Outer syntax error", "*** Failed"]):
+                    txt = raw.strip().splitlines()[-1]
+                    err_obj = {"text": txt}
+                    m = re.search(r"\bline\s+(\d+)\b", raw)
+                    if m:
+                        try:
+                            err_obj["line"] = int(m.group(1))
+                        except Exception:
+                            pass
+                    errors.append(err_obj)
+
+        return state_block, errors[:5]
     except Exception:
-        return "", ["transport_or_build_error"]
+        return "", [{"text": "transport_or_build_error"}]
 
 def _quick_state_subgoals(isabelle, session: str, text: str) -> int:
     """Get subgoal count from Isabelle state."""
@@ -672,8 +698,9 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     start = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - start))
     
-    # Get baseline and context
-    s0 = _quick_state_subgoals(isabelle, session, full_text)
+    # # Get baseline and context
+    # s0 = _quick_state_subgoals(isabelle, session, full_text)
+    # (scoring removed) Get context only
     # Get the state *at the hole* (robust even if later text is malformed)
     state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=trace)
     _,  errs0 = _quick_state_and_errors(isabelle, session, full_text)
@@ -704,11 +731,21 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     if remaining > HEADROOM_S + 2.0:
         propose_timeout = int(max(2, min(45, (remaining - HEADROOM_S) * 0.6)))
+        # normalize Isabelle errors to plain strings for the prompt
+        err_texts: List[str] = []
+        for ee in (errs0 or []):
+            if isinstance(ee, dict):
+                t = str(ee.get("text", "")).strip()
+            else:
+                t = str(ee).strip()
+            if t:
+                err_texts.append(t)
+        err_texts = err_texts[:8]        
         if propose_timeout >= 3:
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                     future = ex.submit(propose_local_repairs,
-                                     goal=goal_text, state_block=state0, errors=errs0,
+                                     goal=goal_text, state_block=state0, errors=err_texts,
                                      ce_hints=ce, block_snippet=snippet, nearest_header=header,
                                      recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout)
                     ops = future.result(timeout=propose_timeout)
@@ -725,8 +762,8 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if not ops:
         ops = _heuristic_fallback_ops(goal_text, state0, header, facts)
     
-    # Try operations
-    best_text, best_score, best_kind = None, 9999, ""
+    # Try operations (no scoring): accept the first changed candidate
+    first_text, first_kind = None, ""
     tried, any_changed = 0, False
     
     for kind, payload in ops:
@@ -748,29 +785,25 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if cand == full_text:
             continue
             
-        any_changed = True
-        s1 = _quick_state_subgoals(isabelle, session, cand)
-        
-        if trace:
-            print(f"[repair] {kind} scored: {s0} -> {s1}")
-        
-        if s1 != 9999 and s1 < best_score:
-            best_score, best_text, best_kind = s1, cand, kind
+        # scoring removed; keep the first effective change
+        if first_text is None:
+            first_text, first_kind = cand, kind
     
-    # Accept non-regressive improvements
-    if best_text is not None:
-            return best_text, True, f"beam:{best_kind or 'local'}"
+    # Accept the first changed candidate
+    if first_text is not None:
+            return first_text, True, f"beam:{first_kind or 'local'}"
 
     # Fallback: if we had ops but none scored, apply the first anyway
     if ops:
         kind, payload = ops[0]
         if kind == "insert_before_hole":
-            return _apply_insert_before_hole(full_text, hole_span, payload.line), True, "blind-insert0"
+            return _apply_insert_before_hole(full_text, hole_span, payload.line), False, "blind-insert0"
         elif kind == "replace_in_snippet":
-            return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), True, "blind-replace0"
+            return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), False, "blind-replace0"
         elif kind == "insert_have_block":
-            cand = _apply_insert_have_block(full_text, hole_span, payload.label, payload.statement, payload.after_line_matching, payload.body_hint)
-            return cand, True, "blind-insert-have"
+            cand = _apply_insert_have_block(full_text, hole_span, payload.label,
+                                            payload.statement, payload.after_line_matching, payload.body_hint)
+            return cand, False, "blind-insert-have"
 
     return full_text, False, "repairs-did-not-help"
 
@@ -899,21 +932,43 @@ def _replace_failing_tactics_with_sorry(
     block_lines = block_text.splitlines()
 
     def build_doc(with_block_lines: List[str]) -> str:
-        return "\n".join(
-            full_text_lines[: start_line - 1] + with_block_lines + full_text_lines[end_line - 1 :]
-        )
+        # 1-based half-open [start_line, end_line) → 0-based [s0, e0)
+        s0 = max(0, start_line - 1)
+        e0 = max(s0, end_line - 1)
+        return "\n".join(full_text_lines[:s0] + with_block_lines + full_text_lines[e0:])
 
     # Iterate: each pass replaces the earliest failing tactic line (if any).
     while True:
         doc = build_doc(block_lines)
+        # Get errors (with line numbers, if available)
         _state, errs = _quick_state_and_errors(isabelle, session, doc)
         err_lines = sorted(_extract_error_lines(errs))
         # Restrict to errors inside the block span
-        err_in_block = [ln for ln in err_lines if start_line <= ln < end_line]
+        err_in_block = sorted(set(l for l in err_lines if start_line <= l < end_line))
+
+        # Also compute global "ok" (theory finished without errors), to catch cases
+        # where Isabelle reports errors *without* precise line locations.
+        thy = build_theory(doc.splitlines(), add_print_state=False, end_with=None)
+        ok, _ = finished_ok(run_theory(isabelle, session, thy))
+
         if not err_in_block:
+            if ok:
+                if trace:
+                    print("[repair] Block has no Isabelle errors; no 'sorry' needed.")
+                break
+            # No localized errors, but finished_ok = False → synthesize a target:
+            # Replace the first tactic line in the block and iterate.
+            first_tac = next((i for i, ln in enumerate(block_lines) if _is_tactic_line(ln)), None)
+            if first_tac is None:
+                if trace:
+                    print("[repair] Theory failed but no tactic lines found in block; leaving block as-is.")
+                break
+            indent = block_lines[first_tac][: len(block_lines[first_tac]) - len(block_lines[first_tac].lstrip())]
             if trace:
-                print("[repair] Block has no Isabelle errors; no 'sorry' needed.")
-            break
+                print(f"[repair] No line-localized errors; replacing first tactic in block at doc line "
+                      f"{start_line + first_tac} → 'sorry'.")
+            block_lines[first_tac] = f"{indent}sorry"
+            continue
 
         failing_abs = err_in_block[0]             # earliest failing line in the block (1-based)
         failing_idx = failing_abs - start_line    # 0-based index into block_lines
@@ -964,45 +1019,31 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     t0 = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - t0))
     
-    base_s = _quick_state_subgoals(isabelle, session, full_text)
+    # (scoring removed)
     current_text = full_text
     # compute the state at the hole once; reuse until text actually changes
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     _log_state_block("repair", state0, trace=trace)
     
-    # Stage 0: Local repairs (iterate a few rounds) — only if resume_stage allows
-    if resume_stage <= 0:
-        for round_i in range(3):
-            if left() <= 5.0:
-                break
-            
-            eff_k = 1 if left() < 15.0 else max(1, beam_k)
+    # Stage 0: Local repair — exactly one attempt; if not successful, proceed to later stages.
+    if resume_stage <= 0 and left() > 5.0:
+        eff_k = 1 if left() < 15.0 else max(1, beam_k)
+        if trace:
+            print(f"[repair] Trying local proof step repair…")
+        patched, ok, tag = try_local_repairs(
+            full_text=current_text, hole_span=hole_span, goal_text=goal_text,
+            model=model, isabelle=isabelle, session=session,
+            repair_budget_s=min(12.0, max(8.0, left() * 0.4)),
+            max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,
+        )
+        if ok and patched != current_text:
             if trace:
-                print(f"[repair] Trying local proof step repair…")
-            patched, ok, tag = try_local_repairs(
-                full_text=current_text, hole_span=hole_span, goal_text=goal_text,
-                model=model, isabelle=isabelle, session=session,
-                repair_budget_s=min(12.0, max(8.0, left() * 0.4)),
-                max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,
-            )
-            
-            if ok and patched != current_text:
-                s1 = _quick_state_subgoals(isabelle, session, patched)
-                if trace:
-                    print(f"[cegis] local round {round_i}: {base_s} -> {s1}")
-                
-                if s1 != 9999 and s1 <= base_s:
-                    return patched, True, f"stage=0 local:{tag}"
-                
-                if "blind" in (tag or ""):
-                    return patched, True, f"stage=0 local:{tag}(neutral)"
-                
-                if s1 == 9999 and s1 == base_s:
-                    current_text = patched
-                    if trace:
-                        print(f"[cegis] using changed text for next iteration")
-                    # refresh state0 since text changed
-                    state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+                print(f"[cegis] local repair accepted")
+            return patched, True, f"stage=0 local:{tag}"
+        elif patched != current_text:
+            # carry forward neutral/partial change, but do not claim success
+            current_text = patched
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
     # Stage 1: Case-block rewrite
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
@@ -1011,8 +1052,11 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 1 and cs >= 0 and left() > 5.0:
         # Reuse the same state until text changes
         state_block = state0
-        _, errs = _quick_state_and_errors(isabelle, session, current_text)       
-        _log_state_block("repair", state_block, trace=trace)
+        _, errs = _quick_state_and_errors(isabelle, session, current_text)
+        # Avoid re-printing the exact same state block that was already logged
+        # right before calling try_local_repairs.
+        # (This reduces trace noise; no functional change.)
+        # _log_state_block("repair", state_block, trace=trace)
         if trace and not state_block.strip() and errs:
             print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")        
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
@@ -1034,21 +1078,26 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         
         if _is_effective_block(blk) and blk.strip() != block.strip():
             # Try raw suggestion
-            patched_raw = "\n".join(lines[:cs] + [blk] + lines[ce:])
-            s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
             if trace:
-                print(f"[cegis] case-block (raw): {base_s} -> {s1_raw}")
-            
+                print(f"[cegis] case-block (raw):")
+            # Map 0-based [cs, ce) → 1-based [start_line, end_line) with end exclusive
             blk_with_sorry = _replace_failing_tactics_with_sorry(
                 blk,
                 full_text_lines=lines,
-                start_line=cs,
-                end_line=ce,
+                start_line=cs + 1,
+                end_line=ce + 1,
                 isabelle=isabelle,
                 session=session,
                 trace=trace,
             )
             patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
+            # Final verification gate: only accept if whole document finishes OK.
+            thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
+            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            if not ok:
+                if trace:
+                    print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
+                return patched_sorry, False, "stage=1 block:case(pending-verify)"
             return patched_sorry, True, "stage=1 block:case(accepted)"
     
     # Stage 2: Subproof rewrite
@@ -1077,21 +1126,25 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             blk = ""
         
         if _is_effective_block(blk) and blk.strip() != block.strip():
-            patched_raw = "\n".join(lines[:ps] + [blk] + lines[pe:])
-            s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
             if trace:
-                print(f"[cegis] subproof-block (raw): {base_s} -> {s1_raw}")
+                print(f"[cegis] subproof-block (raw):")
             
             blk_with_sorry = _replace_failing_tactics_with_sorry(
                 blk,
                 full_text_lines=lines,
-                start_line=ps,
-                end_line=pe,
+                start_line=ps + 1,
+                end_line=pe + 1,
                 isabelle=isabelle,
                 session=session,
                 trace=trace,
             )
             patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
+            thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
+            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            if not ok:
+                if trace:
+                    print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
+                return patched_sorry, False, "stage=2 block:subproof(pending-verify)"
             return patched_sorry, True, "stage=2 block:subproof(aggressive)"
             
     # Stage 3: Whole-proof rewrite (fallback)
@@ -1117,16 +1170,14 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 )
             except Exception:
                 blk = ""
-            if _is_effective_block(blk) and blk.strip() != block.strip():
-                patched_raw = "\n".join(lines[:ws] + [blk] + lines[we:])
-                s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
+            if _is_effective_block(blk) and blk.strip() != block.strip():                              
                 if trace:
-                    print(f"[cegis] whole-proof (raw): {base_s} -> {s1_raw}")
+                    print(f"[cegis] whole-proof (raw):")
                 blk_with_sorry = _replace_failing_tactics_with_sorry(
                     blk,
                     full_text_lines=lines,
-                    start_line=ws,
-                    end_line=we,
+                    start_line=ws + 1,
+                    end_line=we + 1,
                     isabelle=isabelle,
                     session=session,
                     trace=trace,
@@ -1134,10 +1185,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 patched_sorry = "\n".join(lines[:ws] + [blk_with_sorry] + lines[we:])
                 return patched_sorry, True, "stage=3 block:whole(aggressive)"            
     
-    # Return modified text even without measurable improvement
+    # Return modified text even without measurable improvement (but NOT as success).
     if current_text != full_text:
         if trace:
             print("[cegis] returning modified text despite no scoring improvement")
-        return current_text, True, f"stage={resume_stage} partial-progress"
+        return current_text, False, f"stage={resume_stage} partial-progress"
     
     return full_text, False, "cegis-nohelp"

@@ -472,7 +472,7 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
     if trace:
         if orig_goal:
             print(f"[fill] Original goal: {orig_goal}")
-        print(f"\n[fill] Effective goal: {eff_goal}")
+        print(f"[fill] Effective goal: {eff_goal}")
     
     res = prove_goal(
         isabelle, session, eff_goal, model_name_or_ensemble=model,
