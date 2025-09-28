@@ -99,6 +99,7 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
             isabelle=isa, session=session, repair_budget_s=per_budget,
             max_ops_to_try=max_repairs_per_hole, beam_k=2, 
             allow_whole_fallback=False, trace=trace,
+            resume_stage=0,
         )
         
         if applied and patched != full:
@@ -712,6 +713,8 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         goal_text = _extract_goal_from_lemma_line(lemma_line)
         fills, failed = [], []
         hole_idx = 0
+        # Per-hole progress memory: 0=local, 1=case-block, 2=subproof, 3=whole-proof (handled elsewhere)
+        repair_progress: dict[int, int] = {}        
         
         while "sorry" in full and left_s() > 0:
             spans = find_sorry_spans(full)
@@ -737,6 +740,8 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                 if trace:
                     n_steps = script.count("\n") + 1
                     print(f"[planner]   ✓ filled with {n_steps} step(s)", flush=True)
+                # reset stage memory for this hole index; holes shift after edits anyway
+                repair_progress.pop(hole_idx, None)                    
                 hole_idx += 1
                 continue
             
@@ -747,20 +752,27 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                 
                 if trace:
                     print("[planner]   → trying local repairs (CEGIS)…", flush=True)
-                
+                # start from remembered stage for this hole
+                start_stage = int(repair_progress.get(hole_idx, 0))                
                 patched, applied, _reason = try_cegis_repairs(
                     full_text=full, hole_span=span, goal_text=_eff_goal, model=model,
                     isabelle=isa, session=session, 
                     repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
                     max_ops_to_try=max_repairs_per_hole, beam_k=2, 
                     allow_whole_fallback=True, trace=trace,
+                    resume_stage=start_stage,
                 )
                 
                 if applied and patched != full:
                     full = patched
                     if trace:
-                        print("[planner]   ✓ repair patched snippet — retrying hole", flush=True)
+                        print("[planner]   ✓ repair patched snippet — retrying hole", flush=True)   
+                    # advance stage for next time we reach this hole
+                    repair_progress[hole_idx] = min(start_stage + 1, 3)                     
                     continue
+                else:
+                    # no patch applied — escalate stage anyway
+                    repair_progress[hole_idx] = min(start_stage + 1, 3)                       
             
             failed.append(hole_idx)
             if trace:

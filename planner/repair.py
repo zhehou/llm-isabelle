@@ -42,6 +42,15 @@ def _log_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
     else:
         print("  (empty or whitespace only)")
 
+def _hole_line_bounds(full_text: str, hole_span: Tuple[int, int]) -> Tuple[int, int, List[str]]:
+    """Get hole line number, indentation, and text lines."""
+    lines = full_text.splitlines()
+    hole_line = full_text[:hole_span[0]].count("\n")
+    line_text = lines[hole_line] if 0 <= hole_line < len(lines) else ""
+    indent = len(line_text) - len(line_text.lstrip(" "))
+    return hole_line, indent, lines
+
+
 def _sanitize_llm_block(text: str) -> str:
     """Remove known fence lines, preserving Isabelle content."""
     if not isinstance(text, str) or not text:
@@ -218,6 +227,32 @@ _HAS_BODY = re.compile(r"^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
 _APPLY_OR_BY = re.compile(r"^\s*(apply\b|by\b)")
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _HEADER_RE = re.compile(r"^\s*(proof\s*\(|proof\b|case\s+|then\s+show\b)")
+
+# Detect lines we should / should not replace with 'sorry'
+_TACTIC_LINE = re.compile(r"^\s*(?:apply|by)\b|(?:\s)by\s+\S")
+_STRUCTURAL_LINE = re.compile(
+    r"^\s*(?:lemma|theorem|qed|next|proof|case|have|show|assume|fix|from|using|"
+    r"thus|hence|ultimately|finally|also|moreover|let|where)\b"
+)
+
+def _is_tactic_line(s: str) -> bool:
+    return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
+
+def _extract_error_lines(errs) -> list[int]:
+    """Best-effort: pull 1-based line numbers from Isabelle errors."""
+    out = []
+    if not errs:
+        return out
+    for e in errs:
+        # Support several possible shapes (dict / obj with .line)
+        ln = None
+        if isinstance(e, dict):
+            ln = e.get("line") or e.get("start_line") or e.get("pos_line")
+        else:
+            ln = getattr(e, "line", None) or getattr(e, "start_line", None)
+        if isinstance(ln, int):
+            out.append(ln)
+    return out
 
 def _extract_json_array(text: str) -> Optional[list]:
     """Extract JSON array from text."""
@@ -423,6 +458,34 @@ def _apply_insert_have_block(full_text: str, hole_span: Tuple[int, int],
 # Isabelle interaction
 # =========================
 
+def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
+    """
+    Compile a variant that prints the goal state *at the hole*.
+    We replace the hole's `sorry` with:
+        prefer 1
+        print_state
+        (* REPAIR-PRINT-STATE *)
+        sorry
+    so Isabelle will always emit a state even if later text is malformed.
+    """
+    s, e = hole_span
+    # Respect indentation of the hole line
+    hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
+    pad = " " * max(0, indent)
+    injected = (
+        f"{pad}prefer 1\n"
+        f"{pad}print_state\n"
+        f"{pad}(* REPAIR-PRINT-STATE *)\n"
+        f"{pad}sorry\n"
+    )
+    variant = full_text[:s] + injected + full_text[e:]
+    try:
+        thy = build_theory(variant.splitlines(), add_print_state=False, end_with="sorry")
+        resps = run_theory(isabelle, session, thy)
+        return _extract_print_state_from_responses(resps)
+    except Exception:
+        return ""
+
 def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[str]]:
     """Get state and errors from Isabelle."""
     try:
@@ -611,8 +674,12 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     # Get baseline and context
     s0 = _quick_state_subgoals(isabelle, session, full_text)
-    state0, errs0 = _quick_state_and_errors(isabelle, session, full_text)
+    # Get the state *at the hole* (robust even if later text is malformed)
+    state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=trace)
+    _,  errs0 = _quick_state_and_errors(isabelle, session, full_text)
     _log_state_block("repair", state0, trace=trace)
+    if trace and not state0.strip() and errs0:
+        print(f"[repair] Isabelle errors (first): {errs0[0][:200]}…")
     
     hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
@@ -692,25 +759,19 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     # Accept non-regressive improvements
     if best_text is not None:
-        non_regressive = (best_score != 9999) and (best_score <= s0 or best_kind in ("insert_before_hole", "replace_in_snippet"))
-        if non_regressive:
-            return best_text, True, f"beam:{best_kind}"
-    
-    # Fallback strategies
-    if tried == 0 and ops:
+            return best_text, True, f"beam:{best_kind or 'local'}"
+
+    # Fallback: if we had ops but none scored, apply the first anyway
+    if ops:
         kind, payload = ops[0]
         if kind == "insert_before_hole":
             return _apply_insert_before_hole(full_text, hole_span, payload.line), True, "blind-insert0"
         elif kind == "replace_in_snippet":
             return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), True, "blind-replace0"
-    
-    if any_changed and all(s == 9999 for s in [best_score]):
-        kind, payload = ops[0]
-        if kind == "insert_before_hole":
-            return _apply_insert_before_hole(full_text, hole_span, payload.line), True, "blind-accept"
-        elif kind == "replace_in_snippet":
-            return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), True, "blind-accept"
-    
+        elif kind == "insert_have_block":
+            cand = _apply_insert_have_block(full_text, hole_span, payload.label, payload.statement, payload.after_line_matching, payload.body_hint)
+            return cand, True, "blind-insert-have"
+
     return full_text, False, "repairs-did-not-help"
 
 # =========================
@@ -794,33 +855,100 @@ def _enclosing_subproof(lines: List[str], hole_line: int) -> Tuple[int, int]:
         j += 1
     return (i, j if j > i else -1)
 
-def _looks_like_reasonable_proof_attempt(block_text: str) -> bool:
-    """Check if block looks like reasonable proof attempt."""
-    lines = block_text.strip().split('\n')
-    if len(lines) < 2:
-        return False
-    
-    has_structure = any(keyword in line for line in lines 
-                       for keyword in ['have ', 'show ', 'using '])
-    non_sorry_lines = [line for line in lines if 'sorry' not in line.strip()]
-    
-    return has_structure and len(non_sorry_lines) >= len(lines) // 2
+def _enclosing_whole_proof(lines: List[str]) -> Tuple[int, int]:
+    """
+    Find the outermost top-level proof..qed block that encloses the hole’s proof.
+    Very simple scan: last 'proof' before the last 'qed'.
+    """
+    proof_re = re.compile(r"(?m)^\s*proof\b")
+    qed_re   = re.compile(r"(?m)^\s*qed\b")
+    # find last 'qed'
+    last_qed = -1
+    for i, line in enumerate(lines):
+        if qed_re.match(line):
+            last_qed = i
+    if last_qed < 0:
+        return (-1, -1)
+    # find the nearest 'proof' before that qed
+    start = -1
+    for i in range(last_qed, -1, -1):
+        if proof_re.match(lines[i]):
+            start = i
+            break
+    if start < 0:
+        return (-1, -1)
+    return (start, last_qed + 1)
 
-def _replace_failing_tactics_with_sorry(block_text: str) -> str:
-    """Replace likely-failing tactics with sorry."""
-    lines = block_text.split('\n')
-    result_lines = []
-    
-    for line in lines:
-        if any(keyword in line for keyword in ['have ', 'show ', 'case ', 'using ', 'then ']):
-            result_lines.append(line)
-        elif any(tactic in line.strip() for tactic in ['by simp', 'by auto', 'by blast', 'by clarsimp']):
-            indent = line[:len(line) - len(line.lstrip())]
-            result_lines.append(f"{indent}sorry")
+def _replace_failing_tactics_with_sorry(
+    block_text: str,
+    *,
+    full_text_lines: List[str],
+    start_line: int,   # 1-based in the assembled Isabelle doc
+    end_line: int,     # exclusive
+    isabelle,
+    session: str,
+    trace: bool = False,
+) -> str:
+    """
+    Systematic version: compile the whole document, read Isabelle's error positions,
+    and replace only those lines *inside [start_line, end_line)* that:
+      (1) are tactic lines, and
+      (2) are the earliest failing line (top-down) at that iteration.
+    Repeat until no errors remain within the block or no tactic lines left to replace.
+    """
+    block_lines = block_text.splitlines()
+
+    def build_doc(with_block_lines: List[str]) -> str:
+        return "\n".join(
+            full_text_lines[: start_line - 1] + with_block_lines + full_text_lines[end_line - 1 :]
+        )
+
+    # Iterate: each pass replaces the earliest failing tactic line (if any).
+    while True:
+        doc = build_doc(block_lines)
+        _state, errs = _quick_state_and_errors(isabelle, session, doc)
+        err_lines = sorted(_extract_error_lines(errs))
+        # Restrict to errors inside the block span
+        err_in_block = [ln for ln in err_lines if start_line <= ln < end_line]
+        if not err_in_block:
+            if trace:
+                print("[repair] Block has no Isabelle errors; no 'sorry' needed.")
+            break
+
+        failing_abs = err_in_block[0]             # earliest failing line in the block (1-based)
+        failing_idx = failing_abs - start_line    # 0-based index into block_lines
+
+        # If the exact line isn't a tactic, try to anchor to the *nearest preceding* tactic line;
+        # if none, try the next following tactic line.
+        cand = None
+        if 0 <= failing_idx < len(block_lines) and _is_tactic_line(block_lines[failing_idx]):
+            cand = failing_idx
         else:
-            result_lines.append(line)
-    
-    return '\n'.join(result_lines)
+            # search up
+            for i in range(failing_idx, -1, -1):
+                if _is_tactic_line(block_lines[i]):
+                    cand = i
+                    break
+            # if none up, search down
+            if cand is None:
+                for i in range(failing_idx + 1, len(block_lines)):
+                    if _is_tactic_line(block_lines[i]):
+                        cand = i
+                        break
+
+        if cand is None:
+            if trace:
+                print(f"[repair] Earliest error at doc line {failing_abs}, but no tactic lines "
+                      f"found in the block to replace. Leaving block as-is.")
+            break
+
+        indent = block_lines[cand][: len(block_lines[cand]) - len(block_lines[cand].lstrip())]
+        if trace:
+            print(f"[repair] Marking failing tactic at doc line {start_line + cand} "
+                  f"→ 'sorry' (top-down).")
+        block_lines[cand] = f"{indent}sorry"
+
+    return "\n".join(block_lines)
 
 # =========================
 # CEGIS: Multi-stage repair with iteration
@@ -830,50 +958,63 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                      model: Optional[str], isabelle, session: str,
                      repair_budget_s: float = 15.0, max_ops_to_try: int = 3,
                      beam_k: int = 1, allow_whole_fallback: bool = False,
-                     trace: bool = False) -> Tuple[str, bool, str]:
+                     trace: bool = False,
+                     resume_stage: int = 0) -> Tuple[str, bool, str]:
     """Try CEGIS repairs with multiple stages."""
     t0 = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - t0))
     
     base_s = _quick_state_subgoals(isabelle, session, full_text)
     current_text = full_text
+    # compute the state at the hole once; reuse until text actually changes
+    state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+    _log_state_block("repair", state0, trace=trace)
     
-    # Stage 1: Local repairs (iterate a few rounds)
-    for round_i in range(3):
-        if left() <= 5.0:
-            break
-        
-        eff_k = 1 if left() < 15.0 else max(1, beam_k)
-        patched, ok, tag = try_local_repairs(
-            full_text=current_text, hole_span=hole_span, goal_text=goal_text,
-            model=model, isabelle=isabelle, session=session,
-            repair_budget_s=min(12.0, max(8.0, left() * 0.4)),
-            max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,
-        )
-        
-        if ok and patched != current_text:
-            s1 = _quick_state_subgoals(isabelle, session, patched)
+    # Stage 0: Local repairs (iterate a few rounds) — only if resume_stage allows
+    if resume_stage <= 0:
+        for round_i in range(3):
+            if left() <= 5.0:
+                break
+            
+            eff_k = 1 if left() < 15.0 else max(1, beam_k)
             if trace:
-                print(f"[cegis] local round {round_i}: {base_s} -> {s1}")
+                print(f"[repair] Trying local proof step repair…")
+            patched, ok, tag = try_local_repairs(
+                full_text=current_text, hole_span=hole_span, goal_text=goal_text,
+                model=model, isabelle=isabelle, session=session,
+                repair_budget_s=min(12.0, max(8.0, left() * 0.4)),
+                max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace,
+            )
             
-            if s1 != 9999 and s1 <= base_s:
-                return patched, True, f"local:{tag}"
-            
-            if "blind" in (tag or ""):
-                return patched, True, f"local:{tag}(neutral)"
-            
-            if s1 == 9999 and s1 == base_s:
-                current_text = patched
+            if ok and patched != current_text:
+                s1 = _quick_state_subgoals(isabelle, session, patched)
                 if trace:
-                    print(f"[cegis] using changed text for next iteration")
+                    print(f"[cegis] local round {round_i}: {base_s} -> {s1}")
+                
+                if s1 != 9999 and s1 <= base_s:
+                    return patched, True, f"stage=0 local:{tag}"
+                
+                if "blind" in (tag or ""):
+                    return patched, True, f"stage=0 local:{tag}(neutral)"
+                
+                if s1 == 9999 and s1 == base_s:
+                    current_text = patched
+                    if trace:
+                        print(f"[cegis] using changed text for next iteration")
+                    # refresh state0 since text changed
+                    state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
-    # Stage 2: Case-block rewrite
+    # Stage 1: Case-block rewrite
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
     cs, ce = _enclosing_case_block(lines, hole_line)
     
-    if cs >= 0 and left() > 5.0:
-        state_block, errs = _quick_state_and_errors(isabelle, session, current_text)
+    if resume_stage <= 1 and cs >= 0 and left() > 5.0:
+        # Reuse the same state until text changes
+        state_block = state0
+        _, errs = _quick_state_and_errors(isabelle, session, current_text)       
         _log_state_block("repair", state_block, trace=trace)
+        if trace and not state_block.strip() and errs:
+            print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")        
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[cs:ce])
         # print the raw case block before we rewrite/sanitize
@@ -881,6 +1022,8 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         block_timeout = int(min(60, max(20, left() * 0.6)))
         
         try:
+            if trace:
+                print(f"[repair] Trying proof block repair…")
             blk = _propose_block_repair(
                 goal=goal_text, errors=errs, ce_hints=ceh,
                 state_block=state_block, block_text=block,
@@ -896,39 +1039,35 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if trace:
                 print(f"[cegis] case-block (raw): {base_s} -> {s1_raw}")
             
-            if s1_raw != 9999 and s1_raw <= base_s:
-                return patched_raw, True, "block:case(raw)"
-            
-            # Aggressive acceptance for reasonable attempts
-            if s1_raw == 9999 and _looks_like_reasonable_proof_attempt(blk):
-                if trace:
-                    print("[cegis] accepting reasonable case block despite scoring issues")
-                blk_with_sorry = _replace_failing_tactics_with_sorry(blk)
-                patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
-                return patched_sorry, True, "block:case(aggressive)"
-            
-            # Conservative fallback
-            blk_sanit = re.sub(r"(?m)^\s*(?:by\b.*|done\s*)$", "  sorry", blk)
-            patched = "\n".join(lines[:cs] + [blk_sanit] + lines[ce:])
-            s1 = _quick_state_subgoals(isabelle, session, patched)
-            if trace:
-                print(f"[cegis] case-block (sanit): {base_s} -> {s1}")
-            
-            if s1 != 9999 and s1 <= base_s:
-                return patched, True, "block:case(sanit)"
+            blk_with_sorry = _replace_failing_tactics_with_sorry(
+                blk,
+                full_text_lines=lines,
+                start_line=cs,
+                end_line=ce,
+                isabelle=isabelle,
+                session=session,
+                trace=trace,
+            )
+            patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
+            return patched_sorry, True, "stage=1 block:case(accepted)"
     
-    # Stage 3: Subproof rewrite
+    # Stage 2: Subproof rewrite
     ps, pe = _enclosing_subproof(lines, hole_line)
     
-    if ps >= 0 and left() > 3.0:
-        state_block, errs = _quick_state_and_errors(isabelle, session, current_text)
+    if resume_stage <= 2 and ps >= 0 and left() > 3.0:
+        state_block = state0
+        _, errs = _quick_state_and_errors(isabelle, session, current_text)
         _log_state_block("repair", state_block, trace=trace)
+        if trace and not state_block.strip() and errs:
+            print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")        
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[ps:pe])
         _log_block("repair", "subproof-block/raw", block, trace=trace)
         subproof_timeout = int(min(45, max(15, left() * 0.7)))
         
         try:
+            if trace:
+                print(f"[repair] Trying subproof repair…")            
             blk = _propose_block_repair(
                 goal=goal_text, errors=errs, ce_hints=ceh,
                 state_block=state_block, block_text=block,
@@ -943,20 +1082,62 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if trace:
                 print(f"[cegis] subproof-block (raw): {base_s} -> {s1_raw}")
             
-            if s1_raw != 9999 and s1_raw <= base_s:
-                return patched_raw, True, "block:subproof(raw)"
+            blk_with_sorry = _replace_failing_tactics_with_sorry(
+                blk,
+                full_text_lines=lines,
+                start_line=ps,
+                end_line=pe,
+                isabelle=isabelle,
+                session=session,
+                trace=trace,
+            )
+            patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
+            return patched_sorry, True, "stage=2 block:subproof(aggressive)"
             
-            if s1_raw == 9999 and _looks_like_reasonable_proof_attempt(blk):
+    # Stage 3: Whole-proof rewrite (fallback)
+    if allow_whole_fallback and resume_stage <= 3 and left() > 3.0:
+        ws, we = _enclosing_whole_proof(lines)
+        if ws >= 0 and we > ws:
+            state_block = state0
+            _, errs = _quick_state_and_errors(isabelle, session, current_text)
+            _log_state_block("repair", state_block, trace=trace)
+            if trace and not state_block.strip() and errs:
+                print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")
+            ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+            block = "\n".join(lines[ws:we])
+            _log_block("repair", "whole-proof/raw", block, trace=trace)
+            whole_timeout = int(min(60, max(20, left() * 0.7)))
+            try:
                 if trace:
-                    print("[cegis] accepting reasonable subproof despite scoring issues")
-                blk_with_sorry = _replace_failing_tactics_with_sorry(blk)
-                patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
-                return patched_sorry, True, "block:subproof(aggressive)"
+                    print(f"[repair] Trying whole-proof repair…")
+                blk = _propose_block_repair(
+                    goal=goal_text, errors=errs, ce_hints=ceh,
+                    state_block=state_block, block_text=block,
+                    model=model, timeout_s=whole_timeout
+                )
+            except Exception:
+                blk = ""
+            if _is_effective_block(blk) and blk.strip() != block.strip():
+                patched_raw = "\n".join(lines[:ws] + [blk] + lines[we:])
+                s1_raw = _quick_state_subgoals(isabelle, session, patched_raw)
+                if trace:
+                    print(f"[cegis] whole-proof (raw): {base_s} -> {s1_raw}")
+                blk_with_sorry = _replace_failing_tactics_with_sorry(
+                    blk,
+                    full_text_lines=lines,
+                    start_line=ws,
+                    end_line=we,
+                    isabelle=isabelle,
+                    session=session,
+                    trace=trace,
+                )
+                patched_sorry = "\n".join(lines[:ws] + [blk_with_sorry] + lines[we:])
+                return patched_sorry, True, "stage=3 block:whole(aggressive)"            
     
     # Return modified text even without measurable improvement
     if current_text != full_text:
         if trace:
             print("[cegis] returning modified text despite no scoring improvement")
-        return current_text, True, "partial-progress"
+        return current_text, True, f"stage={resume_stage} partial-progress"
     
     return full_text, False, "cegis-nohelp"
