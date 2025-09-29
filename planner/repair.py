@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
-import concurrent.futures
 import requests
 
 from prover.config import (
@@ -743,20 +742,21 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         err_texts = err_texts[:8]        
         if propose_timeout >= 3:
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    future = ex.submit(propose_local_repairs,
-                                     goal=goal_text, state_block=state0, errors=err_texts,
-                                     ce_hints=ce, block_snippet=snippet, nearest_header=header,
-                                     recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout)
-                    ops = future.result(timeout=propose_timeout)
-                    # If the proposer returned a whole snippet op, print it.
-                    for op in ops:
-                        if isinstance(op, tuple) and len(op) == 2 and op[0] in ("replace_block", "insert_block"):
-                            block_obj = op[1]
-                            text = getattr(block_obj, "text", None) or getattr(block_obj, "block", None)
-                            if isinstance(text, str):
-                                _log_block("repair", "local-block", text, trace=trace)                    
-            except (concurrent.futures.TimeoutError, requests.RequestException):
+                ops = propose_local_repairs(
+                    goal=goal_text, state_block=state0, errors=err_texts,
+                    ce_hints=ce, block_snippet=snippet, nearest_header=header,
+                    recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout
+                )
+                # If the proposer returned a whole snippet op, print it.
+                for op in ops:
+                    if isinstance(op, tuple) and len(op) == 2 and op[0] in ("replace_block", "insert_block"):
+                        block_obj = op[1]
+                        text = getattr(block_obj, "text", None) or getattr(block_obj, "block", None)
+                        if isinstance(text, str):
+                            _log_block("repair", "local-block", text, trace=trace)
+            except requests.RequestException:
+                ops = []
+            except Exception:
                 ops = []
     
     if not ops:
@@ -930,11 +930,17 @@ def _replace_failing_tactics_with_sorry(
     Repeat until no errors remain within the block or no tactic lines left to replace.
     """
     block_lines = block_text.splitlines()
+    if not block_lines:
+        # Nothing to do; avoid any indexing when the block is empty.
+        if trace:
+            print("[repair] Block is empty; skipping 'sorry' replacement.")
+        return block_text
 
     def build_doc(with_block_lines: List[str]) -> str:
         # 1-based half-open [start_line, end_line) → 0-based [s0, e0)
         s0 = max(0, start_line - 1)
-        e0 = max(s0, end_line - 1)
+        # Clamp e0 so we never slice beyond the full document
+        e0 = max(s0, min(end_line - 1, len(full_text_lines)))
         return "\n".join(full_text_lines[:s0] + with_block_lines + full_text_lines[e0:])
 
     # Iterate: each pass replaces the earliest failing tactic line (if any).
@@ -979,14 +985,16 @@ def _replace_failing_tactics_with_sorry(
         if 0 <= failing_idx < len(block_lines) and _is_tactic_line(block_lines[failing_idx]):
             cand = failing_idx
         else:
-            # search up
-            for i in range(failing_idx, -1, -1):
+            # search up (clamp start to last valid index)
+            start_up = min(failing_idx, len(block_lines) - 1)
+            for i in range(start_up, -1, -1):
                 if _is_tactic_line(block_lines[i]):
                     cand = i
                     break
-            # if none up, search down
+            # if none up, search down (clamp lower bound to [0, len))
             if cand is None:
-                for i in range(failing_idx + 1, len(block_lines)):
+                start_down = max(0, failing_idx + 1)
+                for i in range(start_down, len(block_lines)):
                     if _is_tactic_line(block_lines[i]):
                         cand = i
                         break
