@@ -907,6 +907,105 @@ def _enclosing_whole_proof(lines: List[str]) -> Tuple[int, int]:
         return (-1, -1)
     return (start, last_qed + 1)
 
+# -------------------------
+# Wrapper-stripping helpers
+# -------------------------
+
+_WRAPPED_THEOREM_HEAD = re.compile(
+    r"""(?mx)
+    \A
+    (?:
+        [ \t]* (?:\(\*.*?\*\)|\<comment\>.*?\<\/comment\>) [ \t]* \n   # skip ML/Isabelle comments
+      | [ \t]* \n                                                      # skip blank lines
+    )*
+    [ \t]* (?:lemma|theorem|corollary)\b
+    """
+)
+_CASE_LINE_RE         = re.compile(r"^\s*case\b")
+_NEXT_OR_QED_RE       = re.compile(r"^\s*(?:next|qed)\b")
+_PROOF_RE             = re.compile(r"^\s*proof\b")
+_QED_RE               = re.compile(r"^\s*qed\b")
+
+def _strip_wrapper_to_case_block(proposed: str, original_case_block: str) -> str:
+    """
+    If 'proposed' starts with lemma/theorem/corollary, extract only the target case-block.
+    We try to match the case name from the original case header; otherwise fall back to the
+    first 'case' block.
+    """
+    if not isinstance(proposed, str) or not _WRAPPED_THEOREM_HEAD.match(proposed):
+        return proposed
+
+    # Try to identify the target case name from the original block
+    case_name = None
+    m = re.search(r"(?m)^\s*case\s*\((\w+)", original_case_block or "")
+    if m:
+        case_name = m.group(1)
+    else:
+        m = re.search(r"(?m)^\s*case\s+(\w+)", original_case_block or "")
+        if m:
+            case_name = m.group(1)
+
+    lines = proposed.splitlines()
+    start = None
+    # Prefer matching the same case name
+    for i, L in enumerate(lines):
+        if not _CASE_LINE_RE.match(L):
+            continue
+        if case_name is None:
+            start = i
+            break
+        if re.match(rf"^\s*case\s*\({re.escape(case_name)}\b", L) or \
+           re.match(rf"^\s*case\s+{re.escape(case_name)}\b", L):
+            start = i
+            break
+
+    # If we couldn't match by name, take the first case in the proposed block
+    if start is None:
+        for i, L in enumerate(lines):
+            if _CASE_LINE_RE.match(L):
+                start = i
+                break
+    if start is None:
+        # As a last resort, keep the original proposed text
+        return proposed
+
+    # The case-block ends at the next 'next' or 'qed' (or EOF)
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if _NEXT_OR_QED_RE.match(lines[j]):
+            end = j
+            break
+    return "\n".join(lines[start:end]).rstrip()
+
+def _strip_wrapper_to_subproof(proposed: str) -> str:
+    """
+    If 'proposed' starts with lemma/theorem/corollary, extract only the inner
+    'proof ... qed' region (balanced).
+    """
+    if not isinstance(proposed, str) or not _WRAPPED_THEOREM_HEAD.match(proposed):
+        return proposed
+
+    lines = proposed.splitlines()
+    # Find first 'proof'
+    start = None
+    for i, L in enumerate(lines):
+        if _PROOF_RE.match(L):
+            start = i
+            break
+    if start is None:
+        return proposed
+
+    # Balance nested proof..qed
+    depth, j = 1, start + 1
+    while j < len(lines) and depth > 0:
+        if _PROOF_RE.match(lines[j]):
+            depth += 1
+        elif _QED_RE.match(lines[j]):
+            depth -= 1
+        j += 1
+    end = j if depth == 0 else len(lines)
+    return "\n".join(lines[start:end]).rstrip()
+
 def _replace_failing_tactics_with_sorry(
     block_text: str,
     *,
@@ -1080,6 +1179,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         except Exception:
             blk = ""
         
+        # Normalize ASAP (before any logging/branching)
+        if _is_effective_block(blk):
+            before = blk
+            blk = _strip_wrapper_to_case_block(blk, block)
+            if trace and blk.strip() != (before or "").strip():
+                print("[repair] normalized full-lemma → case-block")
         if _is_effective_block(blk) and blk.strip() != block.strip():
             # Try raw suggestion
             if trace:
@@ -1094,8 +1199,13 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 session=session,
                 trace=trace,
             )
+            # Log just the repaired block to avoid confusion
+            _log_block("repair", "case-block", blk_with_sorry, trace=trace)
+            # Show a tiny in-doc context window for orientation (optional; cheap)
             patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
-            _log_block("repair", "case-block", patched_sorry, trace=trace) 
+            if trace:
+                print("[repair] in-doc slice after case-block patch:")
+                print("\n".join(patched_sorry.splitlines()[max(0, cs-2):min(len(lines), ce+2)]))
             # Final verification gate: only accept if whole document finishes OK.
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(run_theory(isabelle, session, thy))
@@ -1131,6 +1241,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         except Exception:
             blk = ""
 
+        # Normalize ASAP (before any logging/branching)
+        if _is_effective_block(blk):
+            before = blk
+            blk = _strip_wrapper_to_subproof(blk)
+            if trace and blk.strip() != (before or "").strip():
+                print("[repair] normalized full-lemma → subproof")
         if _is_effective_block(blk) and blk.strip() != block.strip():
             if trace:
                 print(f"[cegis] subproof-block (raw):")
@@ -1144,8 +1260,8 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 session=session,
                 trace=trace,
             )
+            _log_block("repair", "subproof-block", blk_with_sorry, trace=trace)
             patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
-            _log_block("repair", "subproof-block", patched_sorry, trace=trace)
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(run_theory(isabelle, session, thy))
             if not ok:
