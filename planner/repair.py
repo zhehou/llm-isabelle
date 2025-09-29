@@ -5,7 +5,6 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 import requests
 
@@ -14,7 +13,6 @@ from prover.config import (
     OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P,
 )
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
-from prover.utils import parse_subgoals
 
 # Global session for connection reuse
 _SESSION = requests.Session()
@@ -549,19 +547,6 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
     except Exception:
         return "", [{"text": "transport_or_build_error"}]
 
-def _quick_state_subgoals(isabelle, session: str, text: str) -> int:
-    """Get subgoal count from Isabelle state."""
-    try:
-        thy = build_theory(text.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session, thy)
-        block = _extract_print_state_from_responses(resps)
-        if not block.strip():
-            return 9999
-        n = parse_subgoals(block)
-        return int(n) if isinstance(n, int) else 9999
-    except Exception:
-        return 9999
-
 # =========================
 # Counterexample hints
 # =========================
@@ -708,8 +693,6 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     start = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - start))
     
-    # # Get baseline and context
-    # s0 = _quick_state_subgoals(isabelle, session, full_text)
     # (scoring removed) Get context only
     # Get the state *at the hole* (robust even if later text is malformed)
     state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=trace)

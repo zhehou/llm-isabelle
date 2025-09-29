@@ -16,7 +16,6 @@ from prover.isabelle_api import (
     run_theory, start_isabelle_server,
 )
 from prover.prover import prove_goal
-from prover.utils import parse_subgoals
 
 # Constants
 _LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
@@ -83,35 +82,32 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
             print("[planner]   (failed-tactic) no tactic lines found", flush=True)
         return full, False
     
-    for i, span in enumerate(t_spans):
+    i = 0
+    while i < len(t_spans):
         if left_s() <= 3.0:
             break
-        
+        span = t_spans[i]
         if trace:
             print(f"[planner]   (failed-tactic) probing tactic #{i+1}/{len(t_spans)}", flush=True)
-        
         st = _print_state_before_hole(isa, session, full, span, trace)
         eff_goal = _effective_goal_from_state(st, goal_text, full, span, trace)
         per_budget = min(30.0, max(15.0, left_s() * 0.33))
-        
         patched, applied, _reason = try_cegis_repairs(
             full_text=full, hole_span=span, goal_text=eff_goal, model=model,
             isabelle=isa, session=session, repair_budget_s=per_budget,
-            max_ops_to_try=max_repairs_per_hole, beam_k=2, 
-            allow_whole_fallback=False, trace=trace,
-            resume_stage=0,
+            max_ops_to_try=max_repairs_per_hole, beam_k=2,
+            allow_whole_fallback=False, trace=trace, resume_stage=0,
         )
-        
         if applied and patched != full:
             full = patched
             if trace:
                 print("[planner]   (failed-tactic) patch applied, re-verifying…", flush=True)
             if _verify_full_proof(isa, session, full):
                 return full, True
-            # Rebuild spans after patch
+            # Recompute tactic spans after patch and retry from same index
             t_spans = _tactic_spans_topdown(full)
-            if i >= len(t_spans):
-                i = max(0, len(t_spans) - 1)
+            continue
+        i += 1
     
     return full, False
 
@@ -428,15 +424,6 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
                   goal_text: str, model: Optional[str], per_hole_timeout: int, *, trace: bool = False) -> Tuple[str, bool, str]:
     """Fill a single hole in the proof."""
     
-    def _quick_subgoals(text: str) -> int:
-        try:
-            thy = build_theory(text.splitlines(), add_print_state=True, end_with="sorry")
-            resps = run_theory(isabelle, session, thy)
-            block = _extract_print_state_from_responses(resps) or ""
-            return int(parse_subgoals(block)) if block.strip() else 9999
-        except Exception:
-            return 9999
-    
     def _insert_above_hole_keep_sorry(text: str, hole: Tuple[int, int], lines_to_insert: List[str]) -> str:
         s, _ = hole
         ls = text.rfind("\n", 0, s) + 1
@@ -499,14 +486,15 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
         s, e = hole_span
         new_text = full_text[:s] + insert + full_text[e:]
         
-        before, after = _quick_subgoals(full_text), _quick_subgoals(new_text)
-        if trace:
-            print(f"[fill] subgoals: {before} → {after} (finisher present)")
-        
-        if after == 9999:
-            return (new_text, True, "\n".join(script_lines)) if _verify_full_proof(isabelle, session, new_text) else (full_text, False, "finisher-ambiguous-noverify")
-        
-        return (new_text, True, "\n".join(script_lines)) if after <= before else (full_text, False, "finisher-regressed")
+        # No subgoal counting; verify full proof instead
+        if _verify_full_proof(isabelle, session, new_text):
+            if trace:
+                print("[fill] finisher accepted (verified)")
+            return new_text, True, "\n".join(script_lines)
+        else:
+            if trace:
+                print("[fill] finisher rejected (failed verification)")
+            return full_text, False, "finisher-unverified"
     
     # Handle apply-only case
     if applies:
@@ -519,12 +507,10 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
             return full_text, False, "apply-duplicate"
         
         probe_text = _insert_above_hole_keep_sorry(full_text, hole_span, dedup)
-        before, after = _quick_subgoals(full_text), _quick_subgoals(probe_text)
-        
+        # No subgoal counting; accept apply-only steps (defer verification)
         if trace:
-            print(f"[fill] subgoals: {before} → {after} (apply-only)")
-        
-        return (probe_text, False, "\n".join(dedup)) if after != 9999 and after < before else (full_text, False, "apply-no-effect")
+            print("[fill] apply-only steps inserted")
+        return probe_text, False, "\n".join(dedup)
     
     return full_text, False, "no-tactics"
 
