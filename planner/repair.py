@@ -31,7 +31,7 @@ def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
         print("  (empty or whitespace only)")
 
 def _log_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
-    """Pretty-print a proposed proof block (case/subproof) before we apply it."""
+    """Pretty-print an LLM-proposed proof block (output)."""
     if not trace:
         return
     b = block or ""
@@ -40,6 +40,17 @@ def _log_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
         print(b)
     else:
         print("  (empty or whitespace only)")
+
+def _log_input_block(prefix: str, label: str, block: str, trace: bool = True) -> None:
+    """Pretty-print an input/original proof block (what we send to the LLM)."""
+    if not trace:
+        return
+    b = block or ""
+    print(f"[{prefix}] Input {label} (length={len(b)}):")
+    if b.strip():
+        print(b)
+    else:
+        print("  (empty or whitespace only)")        
 
 def _sanitize_llm_block(text: str) -> str:
     """Remove known fence lines, preserving Isabelle content."""
@@ -705,7 +716,8 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     _,  errs0 = _quick_state_and_errors(isabelle, session, full_text)
     _log_state_block("repair", state0, trace=trace)
     if trace and not state0.strip() and errs0:
-        print(f"[repair] Isabelle errors (first): {errs0[0][:200]}…")
+        _first = errs0[0].get("text", str(errs0[0])) if isinstance(errs0[0], dict) else str(errs0[0])
+        print(f"[repair] Isabelle errors (first): {_first[:200]}…")
     
     hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
@@ -1066,11 +1078,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         # (This reduces trace noise; no functional change.)
         # _log_state_block("repair", state_block, trace=trace)
         if trace and not state_block.strip() and errs:
-            print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")        
+            _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+            print(f"[repair] Isabelle errors (first): {_first[:200]}…")        
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[cs:ce])
-        # print the raw case block before we rewrite/sanitize
-        _log_block("repair", "case-block/raw", block, trace=trace)        
+        # log the input/original case block
+        _log_input_block("repair", "case-block", block, trace=trace)     
         block_timeout = int(min(60, max(20, left() * 0.6)))
         
         try:
@@ -1099,6 +1112,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 trace=trace,
             )
             patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
+            _log_block("repair", "case-block", patched_sorry, trace=trace) 
             # Final verification gate: only accept if whole document finishes OK.
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(run_theory(isabelle, session, thy))
@@ -1116,10 +1130,11 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
         _log_state_block("repair", state_block, trace=trace)
         if trace and not state_block.strip() and errs:
-            print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")        
+            _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+            print(f"[repair] Isabelle errors (first): {_first[:200]}…")       
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
         block = "\n".join(lines[ps:pe])
-        _log_block("repair", "subproof-block/raw", block, trace=trace)
+        _log_input_block("repair", "subproof-block", block, trace=trace)
         subproof_timeout = int(min(45, max(15, left() * 0.7)))
         
         try:
@@ -1132,7 +1147,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             )
         except Exception:
             blk = ""
-        
+
         if _is_effective_block(blk) and blk.strip() != block.strip():
             if trace:
                 print(f"[cegis] subproof-block (raw):")
@@ -1147,6 +1162,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 trace=trace,
             )
             patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
+            _log_block("repair", "subproof-block", patched_sorry, trace=trace)
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(run_theory(isabelle, session, thy))
             if not ok:
@@ -1163,10 +1179,11 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             _, errs = _quick_state_and_errors(isabelle, session, current_text)
             _log_state_block("repair", state_block, trace=trace)
             if trace and not state_block.strip() and errs:
-                print(f"[repair] Isabelle errors (first): {errs[0][:200]}…")
+                _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+                print(f"[repair] Isabelle errors (first): {_first[:200]}…")
             ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
             block = "\n".join(lines[ws:we])
-            _log_block("repair", "whole-proof/raw", block, trace=trace)
+            _log_input_block("repair", "whole-proof", block, trace=trace)
             whole_timeout = int(min(60, max(20, left() * 0.7)))
             try:
                 if trace:
@@ -1178,6 +1195,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 )
             except Exception:
                 blk = ""
+                                        
             if _is_effective_block(blk) and blk.strip() != block.strip():                              
                 if trace:
                     print(f"[cegis] whole-proof (raw):")
@@ -1191,8 +1209,15 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                     trace=trace,
                 )
                 patched_sorry = "\n".join(lines[:ws] + [blk_with_sorry] + lines[we:])
-                return patched_sorry, True, "stage=3 block:whole(aggressive)"            
-    
+                _log_block("repair", "whole-proof", patched_sorry, trace=trace)
+                thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
+                ok, _ = finished_ok(run_theory(isabelle, session, thy))
+                if not ok:
+                    if trace:
+                        print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
+                    return patched_sorry, False, "stage=3 block:whole(pending-verify)"
+                return patched_sorry, True, "stage=3 block:whole(aggressive)"
+                                
     # Return modified text even without measurable improvement (but NOT as success).
     if current_text != full_text:
         if trace:
