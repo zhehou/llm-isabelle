@@ -16,12 +16,36 @@ from prover.isabelle_api import (
     run_theory, start_isabelle_server,
 )
 from prover.prover import prove_goal
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
+import os
 
 # Constants
 _LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
 _LLM_VARS_MARK = "[LLM_VARS]"
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _BARE_DOT = re.compile(r"(?m)^\s*\.\s*$")
+
+# -------- Timeout config (env-tunable) ----------
+# "fast" queries (print_state / probing)
+_ISA_FAST_TIMEOUT_S   = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
+# "verify" gates (full proof verification)
+_ISA_VERIFY_TIMEOUT_S = int(os.getenv("ISABELLE_VERIFY_TIMEOUT_S", "30"))
+
+def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_s: Optional[int]) -> List:
+    """Hard wall-clock timeout around run_theory."""
+    if not timeout_s or timeout_s <= 0:
+        return _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(run_theory, isabelle, session, thy)
+        try:
+            return fut.result(timeout=timeout_s)
+        except _FuturesTimeout:
+            try:
+                if hasattr(isabelle, "interrupt"):
+                    isabelle.interrupt()
+            except Exception:
+                pass
+            raise TimeoutError("isabelle_run_timeout")
 
 def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
     """Pretty-print the exact proof state block we consumed."""
@@ -219,14 +243,14 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
         
         proof_lines1 = prolog + proof_lines
         thy = build_theory(proof_lines1, add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session, thy)        
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state_block = _extract_print_state_from_responses(resps)
         
         # Handle truncation
         if _looks_truncated(state_block):
             proof_lines_wide = prolog + proof_lines + ["ML ‹Pretty.setmargin 100000›"]
             thy2 = build_theory(proof_lines_wide, add_print_state=True, end_with="sorry")
-            resps2 = run_theory(isabelle, session, thy2)
+            resps2 = _run_theory_with_timeout(isabelle, session, thy2, timeout_s=_ISA_FAST_TIMEOUT_S)
             state_block2 = _extract_print_state_from_responses(resps2)
             if state_block2:
                 state_block = state_block2
@@ -518,7 +542,7 @@ def _verify_full_proof(isabelle, session: str, text: str) -> bool:
     """Verify that a complete proof is valid."""
     try:
         thy = build_theory(text.splitlines(), add_print_state=False, end_with=None)
-        run_theory(isabelle, session, thy)
+        _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
         return True
     except Exception:
         return False
@@ -528,7 +552,7 @@ def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]
     def _runs(ts: List[str]) -> bool:
         try:
             thy = build_theory(ts, add_print_state=True, end_with="sorry")
-            run_theory(isabelle, session, thy)
+            _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
             return True
         except Exception:
             return False

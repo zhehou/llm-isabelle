@@ -14,6 +14,35 @@ from prover.config import (
 )
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
+
+# -------- Timeout config (env-tunable) ----------
+# "fast" queries (print_state / quick parse)
+_ISA_FAST_TIMEOUT_S  = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
+# "verify" gates (post-patch full theory checks)
+_ISA_VERIFY_TIMEOUT_S = int(os.getenv("ISABELLE_VERIFY_TIMEOUT_S", "30"))
+
+def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_s: Optional[int]) -> List:
+    """
+    Run Isabelle with a hard wall-clock timeout. If the timeout elapses:
+      - try to interrupt the client (best effort),
+      - raise TimeoutError("isabelle_run_timeout").
+    """
+    if not timeout_s or timeout_s <= 0:
+        return run_theory(isabelle, session, thy)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(run_theory, isabelle, session, thy)
+        try:
+            return fut.result(timeout=timeout_s)
+        except _FuturesTimeout:
+            try:
+                # Best-effort interrupt if supported by your client
+                if hasattr(isabelle, "interrupt"):
+                    isabelle.interrupt()
+            except Exception:
+                pass
+            raise TimeoutError("isabelle_run_timeout")
+
 # Global session for connection reuse
 _SESSION = requests.Session()
 
@@ -509,7 +538,7 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
     variant = full_text[:s] + injected + full_text[e:]
     try:
         thy = build_theory(variant.splitlines(), add_print_state=False, end_with="sorry")
-        resps = run_theory(isabelle, session, thy)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         return _extract_print_state_from_responses(resps)
     except Exception:
         return ""
@@ -518,7 +547,7 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
     """Get state and errors from Isabelle (preserve line numbers when available)."""
     try:
         thy = build_theory(full_text.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session, thy)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state_block = _extract_print_state_from_responses(resps)
         
         # Extract errors (structured, with line numbers when possible)
@@ -600,7 +629,7 @@ def _earliest_failure_anchor(isabelle, session: str, full_text: str, *, default_
             return _nearest_structural_head_before(lines, len(lines) - 1), "error_line_out_of_range"
         # No error lines — check if the whole theory actually finishes OK.
         thy = build_theory(lines, add_print_state=False, end_with=None)
-        ok, _ = finished_ok(run_theory(isabelle, session, thy))
+        ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
         if not ok:
             # Unsolved/failed but with no localized error spans: anchor to earliest 'sorry'
             for i, L in enumerate(lines):
@@ -623,7 +652,7 @@ def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tupl
     
     try:
         thy = build_theory(variant.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session, thy)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=max(3, timeout_s + 2))
         return "\n".join(getattr(r, "response_body", b"").decode(errors="replace") 
                         if isinstance(getattr(r, "response_body", None), bytes)
                         else str(getattr(r, "response_body", ""))
@@ -1192,7 +1221,7 @@ def _replace_failing_tactics_with_sorry(
         # Also compute global "ok" (theory finished without errors), to catch cases
         # where Isabelle reports errors *without* precise line locations.
         thy = build_theory(doc.splitlines(), add_print_state=False, end_with=None)
-        ok, _ = finished_ok(run_theory(isabelle, session, thy))
+        ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
 
         if not err_in_block:
             if trace:
@@ -1331,7 +1360,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             _log_block("repair", "have-show-block", blk_with_sorry, trace=trace)
             patched_sorry = "\n".join(lines[:hs_s] + [blk_with_sorry] + lines[hs_e:])
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
-            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return patched_sorry, True, "stage=1 block:have-show(accepted)"
             # Not solved → escalate to Stage 2 using the patched text
@@ -1400,7 +1429,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 print("\n".join(patched_sorry.splitlines()[max(0, cs-2):min(len(lines), ce+2)]))
             # Final verification gate: only accept if whole document finishes OK.
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
-            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if not ok:
                 if trace:
                     print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
@@ -1455,7 +1484,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             _log_block("repair", "subproof-block", blk_with_sorry, trace=trace)
             patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
-            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if not ok:
                 if trace:
                     print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
@@ -1502,7 +1531,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 patched_sorry = "\n".join(lines[:ws] + [blk_with_sorry] + lines[we:])
                 _log_block("repair", "whole-proof", patched_sorry, trace=trace)
                 thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
-                ok, _ = finished_ok(run_theory(isabelle, session, thy))
+                ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
                 if not ok:
                     if trace:
                         print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
