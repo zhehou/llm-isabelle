@@ -311,6 +311,17 @@ def _extract_error_lines(errs) -> list[int]:
             out.append(ln)
     return out
 
+def _normalize_error_texts(errs) -> List[str]:
+    texts: List[str] = []
+    for ee in (errs or []):
+        if isinstance(ee, dict):
+            t = str(ee.get("text", "")).strip()
+        else:
+            t = str(ee).strip()
+        if t:
+            texts.append(t)
+    return texts[:8]    
+
 def _extract_json_array(text: str) -> Optional[list]:
     """Extract JSON array from text."""
     try:
@@ -378,18 +389,43 @@ def _snippet_window(lines: List[str], hole_line: int, radius: int = 12) -> Tuple
     return max(0, hole_line - radius), min(len(lines), hole_line + radius + 1)
 
 def _facts_from_state(state_block: str, limit: int = 16) -> List[str]:
-    """Extract facts from state block."""
+    """Extract *useful* facts from the printed state.
+    Priority:
+      (1) verbatim lines following `using this:` (indented), as propositions
+      (2) any explicitly quoted facts (between double quotes) on their own lines
+      (3) fall back to *_def names
+    """
     if not state_block:
         return []
-    
-    defs = re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b", state_block)
-    tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)\b", state_block)
-    
-    seen, facts = set(), []
-    for x in defs + tokens:
-        if x and x not in seen:
-            seen.add(x)
-            facts.append(x)
+
+    facts: List[str] = []
+    seen: set[str] = set()
+
+    # (1) Grab the exact propositions under "using this:"
+    m = re.search(r"using this:\n((?:[ \t].*\n)+)", state_block)
+    if m:
+        for L in m.group(1).splitlines():
+            s = L.strip()
+            if s and s not in seen:
+                seen.add(s)
+                facts.append(s)
+                if len(facts) >= limit:
+                    return facts
+
+    # (2) Quoted propositions on their own lines (e.g., from subgoals or messages)
+    for q in re.findall(r'(?m)^\s*"(.*?)"\s*$', state_block):
+        s = q.strip()
+        if s and s not in seen:
+            seen.add(s)
+            facts.append(s)
+            if len(facts) >= limit:
+                return facts
+
+    # (3) *_def names remain handy for unfolding/simp
+    for d in re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b", state_block):
+        if d and d not in seen:
+            seen.add(d)
+            facts.append(f"{d}_def")
             if len(facts) >= limit:
                 break
     return facts
@@ -507,7 +543,12 @@ def _apply_insert_have_block(full_text: str, hole_span: Tuple[int, int],
             break
     
     pad = " " * max(2, indent)
-    block = [f'{pad}have {label}: "{statement}"', f"{pad}  sorry"]
+    block = [
+        f'{pad}have {label}: "{statement}"',
+        f"{pad}  proof -",
+        f"{pad}    sorry",
+        f"{pad}  qed",
+    ]
     new_lines = lines[:anchor_idx] + block + lines[anchor_idx:]
     return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
 
@@ -525,19 +566,20 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
         sorry
     so Isabelle will always emit a state even if later text is malformed.
     """
-    s, e = hole_span
-    # Respect indentation of the hole line
     hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
-    pad = " " * max(0, indent)
-    injected = (
-        f"{pad}prefer 1\n"
-        f"{pad}print_state\n"
-        f"{pad}(* REPAIR-PRINT-STATE *)\n"
-        f"{pad}sorry\n"
-    )
-    variant = full_text[:s] + injected + full_text[e:]
+    # If the span is stale (line no longer contains 'sorry'), fall back to the nearest actual hole
+    if not (0 <= hole_line < len(lines) and "sorry" in lines[hole_line]):
+        nearest = _find_first_hole(lines)
+        if nearest is not None:
+            hole_line = nearest
+            indent = len(lines[hole_line]) - len(lines[hole_line].lstrip(" "))
+    pad = " " * max(2, indent)
+    # Purely diagnostic; no 'sorry' here
+    injected_lines = [f"{pad}prefer 1", f"{pad}print_state", f"{pad}(* REPAIR-PRINT-STATE *)"]
+    variant_lines = lines[:hole_line] + injected_lines + lines[hole_line:]
+    variant = "\n".join(variant_lines) + ("\n" if full_text.endswith("\n") else "")
     try:
-        thy = build_theory(variant.splitlines(), add_print_state=False, end_with="sorry")
+        thy = build_theory(variant.splitlines(), add_print_state=False, end_with=None)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         return _extract_print_state_from_responses(resps)
     except Exception:
@@ -546,7 +588,7 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
 def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[dict]]:
     """Get state and errors from Isabelle (preserve line numbers when available)."""
     try:
-        thy = build_theory(full_text.splitlines(), add_print_state=True, end_with="sorry")
+        thy = build_theory(full_text.splitlines(), add_print_state=True, end_with=None)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state_block = _extract_print_state_from_responses(resps)
         
@@ -646,12 +688,23 @@ def _earliest_failure_anchor(isabelle, session: str, full_text: str, *, default_
 
 def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], timeout_s: int = 3) -> str:
     """Run Nitpick at hole location."""
-    s, e = hole_span
-    injected = f"  prefer 1\n  nitpick [timeout={max(1, timeout_s)}]\n  (* NITPICK-MARK *)\n  sorry\n"
-    variant = full_text[:s] + injected + full_text[e:]
+    hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
+    if not (0 <= hole_line < len(lines) and "sorry" in lines[hole_line]):
+        nearest = _find_first_hole(lines)
+        if nearest is not None:
+            hole_line = nearest
+            indent = len(lines[hole_line]) - len(lines[hole_line].lstrip(" "))
+    pad = " " * max(2, indent)
+    injected_lines = [
+        f"{pad}prefer 1",
+        f"{pad}nitpick [timeout={max(1, timeout_s)}]",
+        f"{pad}(* REPAIR-NITPICK *)",
+    ]
+    variant_lines = lines[:hole_line] + injected_lines + lines[hole_line:]
+    variant = "\n".join(variant_lines) + ("\n" if full_text.endswith("\n") else "")
     
     try:
-        thy = build_theory(variant.splitlines(), add_print_state=True, end_with="sorry")
+        thy = build_theory(variant.splitlines(), add_print_state=True, end_with=None)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=max(3, timeout_s + 2))
         return "\n".join(getattr(r, "response_body", b"").decode(errors="replace") 
                         if isinstance(getattr(r, "response_body", None), bytes)
@@ -661,17 +714,34 @@ def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tupl
         return ""
 
 def _nitpick_state_hints_from_text(text: str) -> Dict[str, List[str]]:
-    """Extract hints from Nitpick output."""
-    bindings = re.findall(r"\b([a-z][A-Za-z0-9_']*)\s*=\s*([^,\s][^,\n]*)", text or "")
-    defs = list(dict.fromkeys(re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b", text or "")))
-    
+    """Extract practical hints from Nitpick output."""
+    t = text or ""
+    t_lc = t.lower()
+
+    # Only trust hints if Nitpick indicates a (potential) counterexample/model
+    found_model = any(
+        key in t_lc
+        for key in [
+            "nitpick found a counterexample",
+            "nitpick found a potential counterexample",
+            "model found",  # appears in some Nitpick prints
+        ]
+    )
+    if not found_model:
+        return {"bindings": [], "def_hints": []}
+
+    # Variable bindings like x = ..., S = {...}, etc.
+    bindings = re.findall(r"\b([a-z][A-Za-z0-9_']*)\s*=\s*([^,\n][^,\n]*)", t)
     bind_list = [f"{v} = {val.strip()}" for v, val in bindings]
-    def_hints = []
+
+    # *_def occurrences suggest unfolding opportunities
+    defs = list(dict.fromkeys(re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b", t)))
+    def_hints: List[str] = []
     if defs:
         def_hints.extend(f"{d}_def" for d in defs)
         def_hints.extend(f"unfolding {d}_def" for d in defs)
         def_hints.extend(f"simp only: {d}_def" for d in defs)
-    
+
     return {"bindings": bind_list[:8], "def_hints": def_hints[:12]}
 
 def _counterexample_hints(isabelle, session: str, full_text: str, hole_span: Tuple[int, int]) -> Dict[str, List[str]]:
@@ -830,6 +900,9 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         err_texts = err_texts[:8]        
         if propose_timeout >= 3:
             try:
+                if trace:
+                    print("[repair] prompt/facts ⤵")
+                    for f in facts: print("  fact:", f[:200])                
                 ops = propose_local_repairs(
                     goal=goal_text, state_block=state0, errors=err_texts,
                     ce_hints=ce, block_snippet=snippet, nearest_header=header,
@@ -1321,10 +1394,17 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 1 and hs_s >= 0 and left() > 5.0:
         state_block = state0
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
+        err_texts = _normalize_error_texts(errs)
         if trace and not state_block.strip() and errs:
             _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
             print(f"[repair] Isabelle errors (first): {_first[:200]}…")
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+        if trace:
+            print("[repair] prompt/errors ⤵")
+            for t in err_texts: print("  -", t[:200])
+            print("[repair] prompt/nitpick-hints ⤵")
+            for b in ceh.get("bindings", []): print("  binding:", b[:200])
+            for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])
         block = "\n".join(lines[hs_s:hs_e])
         _log_input_block("repair", "have-show-block", block, trace=trace)
         hs_timeout = int(min(45, max(12, left() * 0.6)))
@@ -1332,7 +1412,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if trace:
                 print("[repair] Trying have/show block repair…")
             blk = _propose_block_repair(
-                goal=goal_text, errors=errs, ce_hints=ceh,
+                goal=goal_text, errors=err_texts, ce_hints=ceh,
                 state_block=state_block, block_text=block,
                 model=model, timeout_s=hs_timeout
             )
@@ -1376,6 +1456,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         # Reuse the same state until text changes
         state_block = state0
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
+        err_texts = _normalize_error_texts(errs)
         # Avoid re-printing the exact same state block that was already logged
         # right before calling try_local_repairs.
         # (This reduces trace noise; no functional change.)
@@ -1384,6 +1465,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
             print(f"[repair] Isabelle errors (first): {_first[:200]}…")        
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+        if trace:
+            print("[repair] prompt/errors ⤵")
+            for t in err_texts: print("  -", t[:200])
+            print("[repair] prompt/nitpick-hints ⤵")
+            for b in ceh.get("bindings", []): print("  binding:", b[:200])
+            for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])        
         block = "\n".join(lines[cs:ce])
         # log the input/original case block
         _log_input_block("repair", "case-block", block, trace=trace)     
@@ -1393,7 +1480,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if trace:
                 print(f"[repair] Trying proof block repair…")
             blk = _propose_block_repair(
-                goal=goal_text, errors=errs, ce_hints=ceh,
+                goal=goal_text, errors=err_texts, ce_hints=ceh,
                 state_block=state_block, block_text=block,
                 model=model, timeout_s=block_timeout
             )
@@ -1442,11 +1529,18 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 2 and ps >= 0 and left() > 3.0:
         state_block = state0
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
+        err_texts = _normalize_error_texts(errs)
         _log_state_block("repair", state_block, trace=trace)
         if trace and not state_block.strip() and errs:
             _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
             print(f"[repair] Isabelle errors (first): {_first[:200]}…")       
         ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+        if trace:
+            print("[repair] prompt/errors ⤵")
+            for t in err_texts: print("  -", t[:200])
+            print("[repair] prompt/nitpick-hints ⤵")
+            for b in ceh.get("bindings", []): print("  binding:", b[:200])
+            for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])        
         block = "\n".join(lines[ps:pe])
         _log_input_block("repair", "subproof-block", block, trace=trace)
         subproof_timeout = int(min(45, max(15, left() * 0.7)))
@@ -1455,7 +1549,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if trace:
                 print(f"[repair] Trying subproof repair…")            
             blk = _propose_block_repair(
-                goal=goal_text, errors=errs, ce_hints=ceh,
+                goal=goal_text, errors=err_texts, ce_hints=ceh,
                 state_block=state_block, block_text=block,
                 model=model, timeout_s=subproof_timeout
             )
@@ -1497,11 +1591,18 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if ws >= 0 and we > ws:
             state_block = state0
             _, errs = _quick_state_and_errors(isabelle, session, current_text)
+            err_texts = _normalize_error_texts(errs)
             _log_state_block("repair", state_block, trace=trace)
             if trace and not state_block.strip() and errs:
                 _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
                 print(f"[repair] Isabelle errors (first): {_first[:200]}…")
             ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+            if trace:
+                print("[repair] prompt/errors ⤵")
+                for t in err_texts: print("  -", t[:200])
+                print("[repair] prompt/nitpick-hints ⤵")
+                for b in ceh.get("bindings", []): print("  binding:", b[:200])
+                for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])            
             block = "\n".join(lines[ws:we])
             _log_input_block("repair", "whole-proof", block, trace=trace)
             whole_timeout = int(min(60, max(20, left() * 0.7)))
@@ -1509,7 +1610,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 if trace:
                     print(f"[repair] Trying whole-proof repair…")
                 blk = _propose_block_repair(
-                    goal=goal_text, errors=errs, ce_hints=ceh,
+                    goal=goal_text, errors=err_texts, ce_hints=ceh,
                     state_block=state_block, block_text=block,
                     model=model, timeout_s=whole_timeout
                 )
