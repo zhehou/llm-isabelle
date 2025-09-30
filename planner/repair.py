@@ -69,6 +69,35 @@ def _is_effective_block(text: str) -> bool:
     """True if block has non-empty, non-fence content."""
     return bool(_sanitize_llm_block(text or "").strip())
 
+def _clamp_line_index(lines: List[str], idx: int) -> int:
+    """Return idx clamped into [0, len(lines)-1]. If the file is empty, return -1."""
+    if not lines:
+        return -1
+    if idx < 0:
+        return 0
+    if idx >= len(lines):
+        return len(lines) - 1
+    return idx
+
+def _nearest_structural_head_before(lines: List[str], idx: int) -> int:
+    """
+    Walk upward from idx to find a meaningful structural head to anchor:
+    have/show/obtain | case | proof
+    Returns a valid 0-based line index.
+    """
+    if not lines:
+        return -1
+    i = idx
+    if i >= len(lines):
+        i = len(lines) - 1
+    if i < 0:
+        i = 0
+    head_re = re.compile(r"^\s*(?:have|show|obtain|case\b|proof\b)\b")
+    for j in range(i, -1, -1):
+        if head_re.match(lines[j]):
+            return j
+    return i
+
 def _extract_print_state_from_responses(resps: List) -> str:
     """Extract print_state output from Isabelle responses."""
     standard_result = last_print_state_block(resps) or ""
@@ -547,6 +576,41 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
     except Exception:
         return "", [{"text": "transport_or_build_error"}]
 
+def _earliest_failure_anchor(isabelle, session: str, full_text: str, *, default_line_0: int) -> Tuple[int, str]:
+    """
+    Choose an anchor line (0-based) to target the smallest enclosing structure that actually fails first.
+    Priority:
+      1) earliest Isabelle error line (from _quick_state_and_errors)
+      2) if no error lines but the theory doesn't finish OK, anchor to the first 'sorry' in the file
+      3) fallback to the caller-provided default_line_0 (usually the current hole line)
+    Returns (anchor_line_0, reason_tag).
+    """
+    try:
+        lines = full_text.splitlines()
+        _state, errs = _quick_state_and_errors(isabelle, session, full_text)
+        err_lines = sorted(_extract_error_lines(errs))
+        if err_lines:
+            pos0 = (err_lines[0] - 1)  # Isabelle lines are 1-based
+            if 0 <= pos0 < len(lines):
+                return pos0, "error_line"
+            # Out-of-range error line → prefer first sorry, else nearest head before EOF
+            for i, L in enumerate(lines):
+                if "sorry" in L:
+                    return i, "first_sorry_from_error"
+            return _nearest_structural_head_before(lines, len(lines) - 1), "error_line_out_of_range"
+        # No error lines — check if the whole theory actually finishes OK.
+        thy = build_theory(lines, add_print_state=False, end_with=None)
+        ok, _ = finished_ok(run_theory(isabelle, session, thy))
+        if not ok:
+            # Unsolved/failed but with no localized error spans: anchor to earliest 'sorry'
+            for i, L in enumerate(lines):
+                if "sorry" in L:
+                    return i, "first_sorry"
+        # Clean or no better info: keep the default
+        return default_line_0, "default"
+    except Exception:
+        return default_line_0, "default"
+
 # =========================
 # Counterexample hints
 # =========================
@@ -893,8 +957,16 @@ def _enclosing_have_show_block(lines: List[str], hole_line: int) -> Tuple[int, i
     proof_re = re.compile(r"(?m)^\s*proof\b")
     qed_re   = re.compile(r"(?m)^\s*qed\b")
 
-    # Find the nearest head above
+    # Guard empty file and clamp starting index
+    if not lines:
+        return (-1, -1)
     i = hole_line
+    if i < 0:
+        i = 0
+    if i >= len(lines):
+        i = len(lines) - 1
+
+    # Find the nearest head above
     while i >= 0 and not head_re.match(lines[i]):
         # Stop if we just crossed an enclosing boundary
         if re.match(r"(?m)^\s*(?:case\b|next\b|qed\b)\b", lines[i]):
@@ -1209,7 +1281,14 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     # Stage 1: have/show/obtain micro-block rewrite (smallest structural unit)
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
-    hs_s, hs_e = _enclosing_have_show_block(lines, hole_line)
+    # Retarget to earliest failure (error line or first 'sorry') if different from the hole
+    anchor_line, anchor_reason = _earliest_failure_anchor(isabelle, session, current_text, default_line_0=hole_line)
+    focus_line = _clamp_line_index(lines, anchor_line)
+    if trace and anchor_line != hole_line:
+        shown_anchor = "EOF" if (anchor_line >= len(lines) and len(lines) > 0) else f"{anchor_line + 1}"
+        shown_focus  = "EOF" if (focus_line == len(lines) - 1 and anchor_line >= len(lines)) else f"{focus_line + 1}"
+        print(f"[repair] Retargeting from hole line {hole_line + 1} to earliest-failure line {shown_anchor} ({anchor_reason}); focus={shown_focus}.")
+    hs_s, hs_e = _enclosing_have_show_block(lines, focus_line)
     if resume_stage <= 1 and hs_s >= 0 and left() > 5.0:
         state_block = state0
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
@@ -1263,7 +1342,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)   
     
     # Stage 2a: Case-block rewrite (moved under sub-proof stage)
-    cs, ce = _enclosing_case_block(lines, hole_line)
+    cs, ce = _enclosing_case_block(lines, _clamp_line_index(lines, focus_line))
     if resume_stage <= 2 and cs >= 0 and left() > 5.0:
         # Reuse the same state until text changes
         state_block = state0
@@ -1329,7 +1408,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             return patched_sorry, True, "stage=2 block:case(accepted)"
     
     # Stage 2b: Subproof rewrite
-    ps, pe = _enclosing_subproof(lines, hole_line)
+    ps, pe = _enclosing_subproof(lines, _clamp_line_index(lines, focus_line))
     
     if resume_stage <= 2 and ps >= 0 and left() > 3.0:
         state_block = state0
