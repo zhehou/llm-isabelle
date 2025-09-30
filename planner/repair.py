@@ -883,6 +883,43 @@ def _enclosing_subproof(lines: List[str], hole_line: int) -> Tuple[int, int]:
         j += 1
     return (i, j if j > i else -1)
 
+def _enclosing_have_show_block(lines: List[str], hole_line: int) -> Tuple[int, int]:
+    """
+    Smallest micro-block headed by have/show/obtain at the current proof depth.
+    Start = nearest head above the hole; End = next structural head at the same depth.
+    """
+    head_re = re.compile(r"(?m)^\s*(have|show|obtain)\b")
+    stop_re = re.compile(r"(?m)^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b|proof\b)\b")
+    proof_re = re.compile(r"(?m)^\s*proof\b")
+    qed_re   = re.compile(r"(?m)^\s*qed\b")
+
+    # Find the nearest head above
+    i = hole_line
+    while i >= 0 and not head_re.match(lines[i]):
+        # Stop if we just crossed an enclosing boundary
+        if re.match(r"(?m)^\s*(?:case\b|next\b|qed\b)\b", lines[i]):
+            break
+        i -= 1
+    if i < 0 or not head_re.match(lines[i]):
+        return (-1, -1)
+
+    # Determine current proof depth at i
+    depth = 0
+    for k in range(0, i + 1):
+        if proof_re.match(lines[k]): depth += 1
+        elif qed_re.match(lines[k]): depth = max(0, depth - 1)
+    base = depth
+
+    # Scan forward to the next stop at the same depth
+    j = i + 1
+    while j < len(lines):
+        if proof_re.match(lines[j]): depth += 1
+        elif qed_re.match(lines[j]): depth = max(0, depth - 1)
+        if depth == base and stop_re.match(lines[j]):
+            break
+        j += 1
+    return (i, j)
+
 def _enclosing_whole_proof(lines: List[str]) -> Tuple[int, int]:
     """
     Find the outermost top-level proof..qed block that encloses the hole’s proof.
@@ -977,6 +1014,40 @@ def _strip_wrapper_to_case_block(proposed: str, original_case_block: str) -> str
             break
     return "\n".join(lines[start:end]).rstrip()
 
+def _strip_wrapper_to_have_show(proposed: str, original_block: str) -> str:
+    """
+    If the LLM returns a wrapped lemma, keep only the target have/show/obtain block.
+    Prefer matching the same head kind (have|show|obtain) from the original when present.
+    """
+    if not isinstance(proposed, str) or not _WRAPPED_THEOREM_HEAD.match(proposed):
+        return proposed
+
+    # Identify the head word from the original (have/show/obtain)
+    m = re.search(r"(?m)^\s*(have|show|obtain)\b", original_block or "")
+    prefer = m.group(1) if m else None
+
+    lines = proposed.splitlines()
+    head_idx = None
+    for i, L in enumerate(lines):
+        if prefer:
+            if re.match(rf"^\s*{prefer}\b", L):
+                head_idx = i
+                break
+        else:
+            if re.match(r"^\s*(have|show|obtain)\b", L):
+                head_idx = i
+                break
+    if head_idx is None:
+        return proposed
+
+    stop_re = re.compile(r"(?m)^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b|proof\b)\b")
+    end = len(lines)
+    for j in range(head_idx + 1, len(lines)):
+        if stop_re.match(lines[j]):
+            end = j
+            break
+    return "\n".join(lines[head_idx:end]).rstrip()
+
 def _strip_wrapper_to_subproof(proposed: str) -> str:
     """
     If 'proposed' starts with lemma/theorem/corollary, extract only the inner
@@ -1052,23 +1123,12 @@ def _replace_failing_tactics_with_sorry(
         ok, _ = finished_ok(run_theory(isabelle, session, thy))
 
         if not err_in_block:
-            if ok:
-                if trace:
-                    print("[repair] Block has no Isabelle errors; no 'sorry' needed.")
-                break
-            # No localized errors, but finished_ok = False → synthesize a target:
-            # Replace the first tactic line in the block and iterate.
-            first_tac = next((i for i, ln in enumerate(block_lines) if _is_tactic_line(ln)), None)
-            if first_tac is None:
-                if trace:
-                    print("[repair] Theory failed but no tactic lines found in block; leaving block as-is.")
-                break
-            indent = block_lines[first_tac][: len(block_lines[first_tac]) - len(block_lines[first_tac].lstrip())]
             if trace:
-                print(f"[repair] No line-localized errors; replacing first tactic in block at doc line "
-                      f"{start_line + first_tac} → 'sorry'.")
-            block_lines[first_tac] = f"{indent}sorry"
-            continue
+                if ok:
+                    print("[repair] Block has no Isabelle errors; no 'sorry' needed.")
+                else:
+                    print("[repair] Theory failed but without line-localized errors inside block; leaving block unchanged.")
+            break
 
         failing_abs = err_in_block[0]             # earliest failing line in the block (1-based)
         failing_idx = failing_abs - start_line    # 0-based index into block_lines
@@ -1127,7 +1187,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     _log_state_block("repair", state0, trace=trace)
     
-    # Stage 0: Local repair — exactly one attempt; if not successful, proceed to later stages.
+    # Stage 0: Local repair — one tactic only, exactly one attempt; if not successful, proceed to later stages.
     if resume_stage <= 0 and left() > 5.0:
         eff_k = 1 if left() < 15.0 else max(1, beam_k)
         if trace:
@@ -1147,11 +1207,64 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             current_text = patched
             state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
-    # Stage 1: Case-block rewrite
+    # Stage 1: have/show/obtain micro-block rewrite (smallest structural unit)
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
-    cs, ce = _enclosing_case_block(lines, hole_line)
+    hs_s, hs_e = _enclosing_have_show_block(lines, hole_line)
+    if resume_stage <= 1 and hs_s >= 0 and left() > 5.0:
+        state_block = state0
+        _, errs = _quick_state_and_errors(isabelle, session, current_text)
+        if trace and not state_block.strip() and errs:
+            _first = errs[0].get("text", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+            print(f"[repair] Isabelle errors (first): {_first[:200]}…")
+        ceh = _counterexample_hints(isabelle, session, current_text, hole_span)
+        block = "\n".join(lines[hs_s:hs_e])
+        _log_input_block("repair", "have-show-block", block, trace=trace)
+        hs_timeout = int(min(45, max(12, left() * 0.6)))
+        try:
+            if trace:
+                print("[repair] Trying have/show block repair…")
+            blk = _propose_block_repair(
+                goal=goal_text, errors=errs, ce_hints=ceh,
+                state_block=state_block, block_text=block,
+                model=model, timeout_s=hs_timeout
+            )
+        except Exception:
+            blk = ""
+
+        # Normalize ASAP
+        if _is_effective_block(blk):
+            before = blk
+            blk = _strip_wrapper_to_have_show(blk, block)
+            if trace and blk.strip() != (before or "").strip():
+                print("[repair] normalized full-lemma → have/show")
+        if _is_effective_block(blk) and blk.strip() != block.strip():
+            if trace:
+                print("[cegis] have-show-block (raw):")
+            blk_with_sorry = _replace_failing_tactics_with_sorry(
+                blk,
+                full_text_lines=lines,
+                start_line=hs_s + 1,
+                end_line=hs_e + 1,
+                isabelle=isabelle,
+                session=session,
+                trace=trace,
+            )
+            _log_block("repair", "have-show-block", blk_with_sorry, trace=trace)
+            patched_sorry = "\n".join(lines[:hs_s] + [blk_with_sorry] + lines[hs_e:])
+            thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
+            ok, _ = finished_ok(run_theory(isabelle, session, thy))
+            if ok:
+                return patched_sorry, True, "stage=1 block:have-show(accepted)"
+            # Not solved → escalate to Stage 2 using the patched text
+            if trace:
+                print("[repair] have/show patch did not solve; escalating to sub-proof…")
+            current_text = patched_sorry
+            lines = current_text.splitlines()
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)   
     
-    if resume_stage <= 1 and cs >= 0 and left() > 5.0:
+    # Stage 2a: Case-block rewrite (moved under sub-proof stage)
+    cs, ce = _enclosing_case_block(lines, hole_line)
+    if resume_stage <= 2 and cs >= 0 and left() > 5.0:
         # Reuse the same state until text changes
         state_block = state0
         _, errs = _quick_state_and_errors(isabelle, session, current_text)
@@ -1212,10 +1325,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if not ok:
                 if trace:
                     print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
-                return patched_sorry, False, "stage=1 block:case(pending-verify)"
-            return patched_sorry, True, "stage=1 block:case(accepted)"
+                return patched_sorry, False, "stage=2 block:case(pending-verify)"
+            return patched_sorry, True, "stage=2 block:case(accepted)"
     
-    # Stage 2: Subproof rewrite
+    # Stage 2b: Subproof rewrite
     ps, pe = _enclosing_subproof(lines, hole_line)
     
     if resume_stage <= 2 and ps >= 0 and left() > 3.0:
