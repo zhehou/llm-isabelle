@@ -4,8 +4,8 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Set, Any
 import requests
 
 from prover.config import (
@@ -281,7 +281,7 @@ RepairOp = Tuple[str, object]
 # Regex patterns
 _CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
 _HAS_BODY = re.compile(r"^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
-_APPLY_OR_BY = re.compile(r"^\s*(apply\b|by\b)")
+_APPLY_OR_BY_DECISIVE = re.compile(r"^\s*(apply|by)\b")
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _HEADER_RE = re.compile(r"^\s*(proof\s*\(|proof\b|case\s+|then\s+show\b)")
 
@@ -364,6 +364,71 @@ def _parse_repair_ops(text: str) -> List[RepairOp]:
                            InsertHaveBlock(lab.strip(), stmt.strip(), after.strip(), hint.strip())))
     
     return ops[:3]
+
+# =========================
+# Light-weight banlist + memory for iterative repair
+# =========================
+
+def _canon_line(s: str) -> str:
+    """Canonicalize a single Isar/tactic line for comparison."""
+    if not s:
+        return ""
+    t = s.strip()
+    t = re.sub(r"\s+", " ", t)              # collapse whitespace
+    t = re.sub(r";\s*$", "", t)             # drop trailing semicolons
+    t = t.replace("`", "").replace("‹", "").replace("›", "")
+    return t
+
+def _extract_lines_from_op(op: Dict[str, Any]) -> List[str]:
+    """Pull decisive line(s) from a JSON op to record as prior failures."""
+    out: List[str] = []
+    if "insert_before_hole" in op:
+        out.append(op["insert_before_hole"])
+    elif "replace_in_snippet" in op:
+        r = op["replace_in_snippet"]
+        out.append(r.get("replace", ""))
+    elif "insert_have_block" in op:
+        hb = op["insert_have_block"]
+        # Record the one-liner hint if present, otherwise the have header.
+        if isinstance(hb.get("body_hint"), str) and hb["body_hint"].strip():
+            out.append(hb["body_hint"])
+        stmt = hb.get("statement")
+        if stmt:
+            out.append(f'have "{stmt}"')
+    return [l for l in out if isinstance(l, str) and l.strip()]
+
+def _filter_ops_against_banlist(ops_json_text: str, ban: Set[str]) -> List[RepairOp]:
+    """Parse ops JSON and drop ops whose decisive line is already banned."""
+    ops = _parse_repair_ops(ops_json_text)
+    keep: List[RepairOp] = []
+    for kind, payload in ops:
+        # Convert back to the JSON-shape dict for reuse of extractor
+        op_dict: Dict[str, Any]
+        if kind == "insert_before_hole":
+            op_dict = {"insert_before_hole": payload.line}
+        elif kind == "replace_in_snippet":
+            op_dict = {"replace_in_snippet": {"find": payload.find, "replace": payload.replace}}
+        elif kind == "insert_have_block":
+            op_dict = {"insert_have_block": {
+                "label": payload.label,
+                "statement": payload.statement,
+                "after_line_matching": payload.after_line_matching,
+                "body_hint": payload.body_hint,
+            }}
+        else:
+            keep.append((kind, payload))
+            continue
+        lines = _extract_lines_from_op(op_dict)
+        key = _canon_line(" ".join(lines)) if lines else ""
+        if key and key in ban:
+            continue
+        keep.append((kind, payload))
+    return keep
+
+@dataclass
+class _RepairMemory:
+    ban: Set[str] = field(default_factory=set)           # canonicalized lines to avoid
+    rounds: int = 0
 
 # =========================
 # Context analysis helpers
@@ -760,20 +825,26 @@ def _counterexample_hints(isabelle, session: str, full_text: str, hole_span: Tup
 # Repair proposal
 # =========================
 
-_REPAIR_SYSTEM = """You patch an Isabelle/Isar proof LOCALLY. Do not regenerate the whole proof.
-Return ONLY a JSON array of at most 3 patch operations from the allowed schema.
+_REPAIR_SYSTEM = """You repair ONLY the local Isar snippet around a failing hole.
+Do NOT regenerate the whole proof. Return a JSON array (≤3) of patch operations.
 
 ALLOWED OPS:
 1) {"insert_before_hole": "<ONE LINE>"}
 2) {"replace_in_snippet": {"find": "<EXACT LINE>", "replace": "<NEW LINE>"}}
 3) {"insert_have_block": {"label":"H", "statement":"<FORMULA>", "after_line_matching":"<LINE>", "body_hint":"<ONE LINE>"}}
 
-Rules:
-- Edit only inside the provided SNIPPET
-- Prefer single-line hints like `apply (simp add: …)`, `using …`
-- Output MUST be valid JSON"""
+Global rules:
+- Edit only inside the provided SNIPPET; keep surrounding text verbatim.
+- Do NOT repeat or reinsert any line that already appears in SNIPPET or RECENT_STEPS.
+- Use ONLY identifiers that appear in STATE_BEFORE_HOLE or SNIPPET. Do NOT invent new fact names.
+- In `using`, refer to named facts only; do NOT paste raw propositions or backticks/cartouches.
+- Each suggested op must reflect a distinct strategy family (automation vs rule/intro/elim vs cases/induct vs small have..qed).
+- Output MUST be valid JSON (no code fences, no comments)."""
 
-_REPAIR_USER = """GOAL: {goal}
+_REPAIR_USER = """WHAT FAILED (concise):
+{why}
+
+GOAL: {goal}
 
 STATE_BEFORE_HOLE: {state_block}
 
@@ -787,6 +858,9 @@ NEAREST_HEADER: {nearest_header}
 
 RECENT_STEPS: {recent_steps}
 
+BANLIST / PRIOR_FAILURES (avoid exact or near-duplicate lines):
+{prior_failures}
+
 SNIPPET:
 <<<SNIPPET
 {block_snippet}
@@ -797,7 +871,8 @@ Output JSON array of patch ops:"""
 def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], 
                          ce_hints: Dict[str, List[str]], block_snippet: str,
                          nearest_header: str, recent_steps: List[str], facts: List[str],
-                         model: Optional[str], timeout_s: int) -> List[RepairOp]:
+                         model: Optional[str], timeout_s: int,
+                         prior_failures: str = "(none)", why: str = "Previous attempt failed; propose a new approach.") -> str:
     """Propose local repair operations."""
     ce_list = (ce_hints.get("bindings", []) + ce_hints.get("def_hints", []))
     
@@ -808,15 +883,16 @@ def propose_local_repairs(*, goal: str, state_block: str, errors: List[str],
         ce_hints="\n".join(ce_list) or "(none)",
         block_snippet=block_snippet.rstrip(),
         nearest_header=nearest_header.strip(),
-        recent_steps="\n".join(recent_steps),
-        facts_list=", ".join(facts),
+        recent_steps="\n".join(recent_steps) or "(none)",
+        facts_list=", ".join(facts) or "(none)",
+        prior_failures=prior_failures,
+        why=why,
     )
     
     try:
-        raw = _generate_simple(prompt, model=model, timeout_s=timeout_s)
-        return _parse_repair_ops(raw)
+        return _generate_simple(prompt, model=model, timeout_s=timeout_s)
     except Exception:
-        return []
+        return "[]"
 
 def _heuristic_fallback_ops(goal_text: str, state_block: str, header: str, facts: List[str]) -> List[RepairOp]:
     """Generate heuristic fallback operations."""
@@ -852,18 +928,13 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                      model: Optional[str], isabelle, session: str,
                      repair_budget_s: float = 12.0, max_ops_to_try: int = 2,
                      beam_k: int = 1, trace: bool = False) -> Tuple[str, bool, str]:
-    """Try local repairs with budget management."""
+    """Single-shot local repair (no iteration)."""
     start = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - start))
     
-    # (scoring removed) Get context only
-    # Get the state *at the hole* (robust even if later text is malformed)
-    state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=trace)
+    # (scoring removed) Get context once
+    state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=False)
     _,  errs0 = _quick_state_and_errors(isabelle, session, full_text)
-    _log_state_block("repair", state0, trace=trace)
-    if trace and not state0.strip() and errs0:
-        _first = errs0[0].get("text", str(errs0[0])) if isinstance(errs0[0], dict) else str(errs0[0])
-        print(f"[repair] Isabelle errors (first): {_first[:200]}…")
     
     hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
     s, e = _snippet_window(lines, hole_line, radius=12)
@@ -872,99 +943,78 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     header = _nearest_header(lines, hole_line)
     rsteps = _recent_steps(lines, hole_line)
     
-    # Get facts and CE hints if time allows
-    facts, ce = [], {"bindings": [], "def_hints": []}
-    if left() >= 8.0:
-        facts = _facts_from_state(state0, limit=8)
-    if left() >= 12.0:
-        ce = _counterexample_hints(isabelle, session, full_text, hole_span)
-        if ce.get("def_hints"):
-            facts = list(dict.fromkeys(ce["def_hints"] + facts))[:12]
+    # Always provide facts; try Nitpick (returns empty hints if no model found).
+    facts = _facts_from_state(state0, limit=8)
+    ce = _counterexample_hints(isabelle, session, full_text, hole_span)
+    if ce.get("def_hints"):
+        facts = list(dict.fromkeys(ce["def_hints"] + facts))[:12]
     
-    # Propose operations
-    ops = []
+    # Single-pass local repair with a small banlist to avoid trivial repeats
+    mem = _RepairMemory()
+    # Seed banlist with tactic lines already present near the hole and recent steps
+    seed_lines: List[str] = []
+    for ln in (snippet.splitlines() + rsteps):
+        if _APPLY_OR_BY.match(ln or ""):
+            seed_lines.append(ln)
+    for L in seed_lines:
+        k = _canon_line(L)
+        if k:
+            mem.ban.add(k)
+
     remaining = left()
     HEADROOM_S = 3
-    
-    if remaining > HEADROOM_S + 2.0:
-        propose_timeout = int(max(2, min(45, (remaining - HEADROOM_S) * 0.6)))
-        # normalize Isabelle errors to plain strings for the prompt
-        err_texts: List[str] = []
-        for ee in (errs0 or []):
-            if isinstance(ee, dict):
-                t = str(ee.get("text", "")).strip()
-            else:
-                t = str(ee).strip()
-            if t:
-                err_texts.append(t)
-        err_texts = err_texts[:8]        
-        if propose_timeout >= 3:
-            try:
-                if trace:
-                    print("[repair] prompt/facts ⤵")
-                    for f in facts: print("  fact:", f[:200])                
-                ops = propose_local_repairs(
-                    goal=goal_text, state_block=state0, errors=err_texts,
-                    ce_hints=ce, block_snippet=snippet, nearest_header=header,
-                    recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout
-                )
-                # If the proposer returned a whole snippet op, print it.
-                for op in ops:
-                    if isinstance(op, tuple) and len(op) == 2 and op[0] in ("replace_block", "insert_block"):
-                        block_obj = op[1]
-                        text = getattr(block_obj, "text", None) or getattr(block_obj, "block", None)
-                        if isinstance(text, str):
-                            _log_block("repair", "local-block", text, trace=trace)
-            except requests.RequestException:
-                ops = []
-            except Exception:
-                ops = []
-    
+    propose_timeout = int(max(2, min(45, (remaining - HEADROOM_S) * 0.6)))
+    # Normalize Isabelle errors to plain strings for the prompt
+    err_texts: List[str] = []
+    for ee in (errs0 or []):
+        t = str(ee.get("text", "") if isinstance(ee, dict) else ee).strip()
+        if t:
+            err_texts.append(t)
+    err_texts = err_texts[:8]
+    why_msg = "Previous attempt failed; propose a corrected, different strategy." if err_texts else \
+              "Previous attempt did not close the subgoal; propose NEW strategies."
+    prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+
+    raw = "[]"
+    if propose_timeout >= 3:
+        try:
+            raw = propose_local_repairs(
+                goal=goal_text, state_block=state0, errors=err_texts,
+                ce_hints=ce, block_snippet=snippet, nearest_header=header,
+                recent_steps=rsteps, facts=facts, model=model, timeout_s=propose_timeout,
+                prior_failures=prior_failures_txt, why=why_msg
+            )
+        except Exception:
+            raw = "[]"
+
+    # Parse + filter against banlist
+    ops = _filter_ops_against_banlist(raw, mem.ban)
     if not ops:
+        # One-shot heuristic fallback if LLM gave nothing useful
         ops = _heuristic_fallback_ops(goal_text, state0, header, facts)
-    
-    # Try operations (no scoring): accept the first changed candidate
-    first_text, first_kind = None, ""
-    tried, any_changed = 0, False
-    
+
+    tried = 0
     for kind, payload in ops:
         if left() <= 0 or tried >= max_ops_to_try:
             break
         tried += 1
-        
-        # Apply operation
         if kind == "insert_before_hole":
             cand = _apply_insert_before_hole(full_text, hole_span, payload.line)
+            decisive = payload.line
         elif kind == "replace_in_snippet":
             cand = _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace)
-        elif kind == "insert_have_block":
-            cand = _apply_insert_have_block(full_text, hole_span, payload.label, 
-                                          payload.statement, payload.after_line_matching, payload.body_hint)
-        else:
-            continue
-        
-        if cand == full_text:
-            continue
-            
-        # scoring removed; keep the first effective change
-        if first_text is None:
-            first_text, first_kind = cand, kind
-    
-    # Accept the first changed candidate
-    if first_text is not None:
-            return first_text, True, f"beam:{first_kind or 'local'}"
-
-    # Fallback: if we had ops but none scored, apply the first anyway
-    if ops:
-        kind, payload = ops[0]
-        if kind == "insert_before_hole":
-            return _apply_insert_before_hole(full_text, hole_span, payload.line), False, "blind-insert0"
-        elif kind == "replace_in_snippet":
-            return _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), False, "blind-replace0"
+            decisive = payload.replace
         elif kind == "insert_have_block":
             cand = _apply_insert_have_block(full_text, hole_span, payload.label,
                                             payload.statement, payload.after_line_matching, payload.body_hint)
-            return cand, False, "blind-insert-have"
+            decisive = payload.body_hint or f'have "{payload.statement}"'
+        else:
+            continue
+        k = _canon_line(decisive)
+        if k:
+            mem.ban.add(k)
+        if cand != full_text:
+            return cand, False, f"beam:{kind or 'local'}(partial)"
 
     return full_text, False, "repairs-did-not-help"
 
@@ -972,25 +1022,41 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
 # Block repair for larger regions
 # =========================
 
-_BLOCK_SYSTEM = """You repair an Isabelle/Isar PROOF BLOCK.
-Edit ONLY the given BLOCK. Preserve the rest verbatim.
-The repaired block MUST compile and be as small as possible.
-Use 'sorry' as placeholder for steps that cannot be proven.
-Output ONLY the new block (no fences, no comments)."""
+_BLOCK_SYSTEM = """You propose a replacement for the provided Isabelle/Isar BLOCK.
+Preserve the surrounding text; return only the new BLOCK text (no JSON, no comments).
 
-_BLOCK_USER = """GOAL: {goal}
+Global rules:
+- Edit only inside this BLOCK. Keep lemma headers and surrounding text unchanged.
+- Do NOT invent new fact names; only use identifiers that appear in LOCAL_CONTEXT or in this BLOCK.
+- Do NOT paste raw propositions into 'using'; refer only to named facts or previously introduced labels.
+- Each suggestion must be a distinct strategy family (automation vs rule/intro/elim vs cases/induct vs small have..qed).
+"""
+
+_BLOCK_USER = """WHAT FAILED (concise):
+{why}
+
+GOAL: {goal}
+
 ISABELLE_ERRORS: {errors}
+
 COUNTEREXAMPLE_HINTS: {ce_hints}
+
 LOCAL_CONTEXT: {state_block}
 
 ORIGINAL BLOCK:
 <<<BLOCK
 {block_text}
 BLOCK
+
+BANLIST / PRIOR_FAILURES (avoid exact/near-duplicate decisive lines):
+{prior_failures}
+
+Return ONLY the new BLOCK text.
 """
 
 def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]],
-                         state_block: str, block_text: str, model: Optional[str], timeout_s: int) -> str:
+                         state_block: str, block_text: str, model: Optional[str], timeout_s: int,
+                         prior_failures: str = "(none)", why: str = "Previous attempt failed; propose a different block-level change.") -> str:
     """Propose block-level repair."""
     ce = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
     
@@ -1000,6 +1066,8 @@ def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, L
         ce_hints="\n".join(ce) or "(none)",
         state_block=(state_block or "").strip(),
         block_text=block_text.rstrip(),
+        prior_failures=prior_failures,
+        why=why,        
     )
     
     try:
@@ -1007,6 +1075,37 @@ def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, L
         return _sanitize_llm_block(out)
     except Exception:
         return ""
+
+# =========================
+# Decisive-line extraction for BLOCK proposals
+# =========================
+
+_APPLY_OR_BY = re.compile(r"^\s*(apply|by)\b")
+_PROOF_HDR   = re.compile(r"^\s*proof\b")
+
+def _decisive_lines_from_block_text(block_text: str) -> List[str]:
+    """
+    Heuristic yet theory-agnostic: pick the first 'apply/by' or 'proof' line(s)
+    as the decisive step to ban on subsequent rounds.
+    """
+    lines = (block_text or "").splitlines()
+    out: List[str] = []
+    for ln in lines:
+        if _APPLY_OR_BY_DECISIVE.match(ln) or _PROOF_HDR.match(ln):
+            out.append(ln)
+            break
+    # also catch a single 'show ?case by ...' if present
+    for ln in lines:
+        if re.search(r"\bshow\b", ln) and " by " in ln:
+            out.append(ln)
+            break
+    return out[:2]
+
+def _decisive_key_for_block(block_text: str) -> str:
+    xs = _decisive_lines_from_block_text(block_text)
+    if not xs:
+        return ""
+    return _canon_line(" ".join(xs))
 
 # =========================
 # Region analysis for block repairs
@@ -1251,6 +1350,25 @@ def _strip_wrapper_to_subproof(proposed: str) -> str:
     end = j if depth == 0 else len(lines)
     return "\n".join(lines[start:end]).rstrip()
 
+# Helpers for safe 'sorry' insertion in tactic scripts
+_HEAD_CMD_RE = re.compile(r"^\s*(have|show|obtain|then\s+show|thus|hence)\b")
+
+def _find_enclosing_head(block_lines: List[str], from_idx: int) -> Optional[int]:
+    for i in range(from_idx, -1, -1):
+        if _HEAD_CMD_RE.match(block_lines[i] or ""):
+            return i
+    return None
+
+def _apply_sequence_bounds(block_lines: List[str], idx: int) -> Tuple[int, int]:
+    s = idx
+    while s > 0 and _is_tactic_line(block_lines[s-1]):
+        s -= 1
+    e = idx + 1
+    n = len(block_lines)
+    while e < n and _is_tactic_line(block_lines[e]):
+        e += 1
+    return s, e
+
 def _replace_failing_tactics_with_sorry(
     block_text: str,
     *,
@@ -1334,10 +1452,25 @@ def _replace_failing_tactics_with_sorry(
             break
 
         indent = block_lines[cand][: len(block_lines[cand]) - len(block_lines[cand].lstrip())]
+        line_stripped = block_lines[cand].lstrip()
         if trace:
             print(f"[repair] Marking failing tactic at doc line {start_line + cand} "
-                  f"→ 'sorry' (top-down).")
-        block_lines[cand] = f"{indent}sorry"
+                  f"→ 'sorry' (context-aware).")
+        # If this is an 'apply' step, prefer to wrap the enclosing head into a tiny proof.
+        if line_stripped.startswith("apply"):
+            head_idx = _find_enclosing_head(block_lines, cand)
+            if head_idx is not None:
+                head_indent = block_lines[head_idx][: len(block_lines[head_idx]) - len(block_lines[head_idx].lstrip())]
+                seq_s, seq_e = _apply_sequence_bounds(block_lines, cand)
+                replacement = [f"{head_indent}proof -", f"{head_indent}  sorry", f"{head_indent}qed"]
+                block_lines[seq_s:seq_e] = replacement
+            else:
+                if trace:
+                    print("[repair] 'apply' step without an enclosing have/show; skipping risky 'sorry' insertion.")
+                break
+        else:
+            # 'by ...' or other single-step tactic → safe to replace with 'sorry'
+            block_lines[cand] = f"{indent}sorry"
 
     return "\n".join(block_lines)
 
@@ -1365,7 +1498,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 0 and left() > 5.0:
         eff_k = 1 if left() < 15.0 else max(1, beam_k)
         if trace:
-            print(f"[repair] Trying local proof step repair…")
+            print("[repair] Trying local proof step repair…")
         patched, ok, tag = try_local_repairs(
             full_text=current_text, hole_span=hole_span, goal_text=goal_text,
             model=model, isabelle=isabelle, session=session,
@@ -1377,7 +1510,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 print(f"[cegis] local repair accepted")
             return patched, True, f"stage=0 local:{tag}"
         elif patched != current_text:
-            # carry forward neutral/partial change, but do not claim success
+            # carry forward partial change (no misleading logs)
             current_text = patched
             state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
@@ -1407,27 +1540,43 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])
         block = "\n".join(lines[hs_s:hs_e])
         _log_input_block("repair", "have-show-block", block, trace=trace)
-        hs_timeout = int(min(45, max(12, left() * 0.6)))
-        try:
-            if trace:
-                print("[repair] Trying have/show block repair…")
-            blk = _propose_block_repair(
-                goal=goal_text, errors=err_texts, ce_hints=ceh,
-                state_block=state_block, block_text=block,
-                model=model, timeout_s=hs_timeout
-            )
-        except Exception:
-            blk = ""
-
-        # Normalize ASAP
-        if _is_effective_block(blk):
+        # Iterative have/show repair: 2 rounds (time permitting) with BANLIST
+        rounds = 2 if left() >= 8.0 else 1
+        mem = _RepairMemory()
+        seed_key = _decisive_key_for_block(block)
+        if seed_key:
+            mem.ban.add(seed_key)
+        if trace:
+            print("[repair] Trying have/show block repair…")
+        for rr in range(rounds):
+            if left() <= 3.0:
+                break
+            mem.rounds = rr + 1
+            prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+            why = "Previous attempt did not discharge the goal; propose a different have/show-level change."
+            hs_timeout = int(min(45, max(6, left() * (0.55 / max(1, rounds - rr)))))
+            try:
+                blk = _propose_block_repair(
+                    goal=goal_text, errors=err_texts, ce_hints=ceh,
+                    state_block=state_block, block_text=block,
+                    model=model, timeout_s=hs_timeout,
+                    prior_failures=prior_failures_txt, why=why
+                )
+            except Exception:
+                blk = ""
+            if not _is_effective_block(blk):
+                continue
             before = blk
             blk = _strip_wrapper_to_have_show(blk, block)
+            key = _decisive_key_for_block(blk)
+            if key and key in mem.ban:
+                if trace: print("[repair] filtered have/show proposal by banlist; next round…")
+                continue
             if trace and blk.strip() != (before or "").strip():
                 print("[repair] normalized full-lemma → have/show")
-        if _is_effective_block(blk) and blk.strip() != block.strip():
-            if trace:
-                print("[cegis] have-show-block (raw):")
+            if blk.strip() == block.strip():
+                if key: mem.ban.add(key)
+                continue
             blk_with_sorry = _replace_failing_tactics_with_sorry(
                 blk,
                 full_text_lines=lines,
@@ -1442,13 +1591,15 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
-                return patched_sorry, True, "stage=1 block:have-show(accepted)"
-            # Not solved → escalate to Stage 2 using the patched text
-            if trace:
-                print("[repair] have/show patch did not solve; escalating to sub-proof…")
+                return patched_sorry, True, f"stage=1 block:have-show(round={mem.rounds})"
+            if key:
+                mem.ban.add(key)
+            # carry forward best effort before escalating
             current_text = patched_sorry
             lines = current_text.splitlines()
-            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)   
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+        if trace:
+            print("[repair] have/show patch did not solve; escalating to sub-proof…")  
     
     # Stage 2a: Case-block rewrite (moved under sub-proof stage)
     cs, ce = _enclosing_case_block(lines, _clamp_line_index(lines, focus_line))
@@ -1474,30 +1625,43 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         block = "\n".join(lines[cs:ce])
         # log the input/original case block
         _log_input_block("repair", "case-block", block, trace=trace)     
-        block_timeout = int(min(60, max(20, left() * 0.6)))
-        
-        try:
-            if trace:
-                print(f"[repair] Trying proof block repair…")
-            blk = _propose_block_repair(
-                goal=goal_text, errors=err_texts, ce_hints=ceh,
-                state_block=state_block, block_text=block,
-                model=model, timeout_s=block_timeout
-            )
-        except Exception:
-            blk = ""
-        
-        # Normalize ASAP (before any logging/branching)
-        if _is_effective_block(blk):
+        # Iterative case-block repair: 2 rounds (time permitting) with BANLIST
+        rounds = 2 if left() >= 10.0 else 1
+        mem = _RepairMemory()
+        seed_key = _decisive_key_for_block(block)
+        if seed_key:
+            mem.ban.add(seed_key)
+        if trace:
+            print(f"[repair] Trying case-block repair…")
+        for rr in range(rounds):
+            if left() <= 3.0:
+                break
+            mem.rounds = rr + 1
+            prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+            why = "Previous case-block attempt did not solve the goal; try a different strategy."
+            block_timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
+            try:
+                blk = _propose_block_repair(
+                    goal=goal_text, errors=err_texts, ce_hints=ceh,
+                    state_block=state_block, block_text=block,
+                    model=model, timeout_s=block_timeout,
+                    prior_failures=prior_failures_txt, why=why
+                )
+            except Exception:
+                blk = ""
+            if not _is_effective_block(blk):
+                continue
             before = blk
             blk = _strip_wrapper_to_case_block(blk, block)
+            key = _decisive_key_for_block(blk)
+            if key and key in mem.ban:
+                if trace: print("[repair] filtered case proposal by banlist; next round…")
+                continue
             if trace and blk.strip() != (before or "").strip():
                 print("[repair] normalized full-lemma → case-block")
-        if _is_effective_block(blk) and blk.strip() != block.strip():
-            # Try raw suggestion
-            if trace:
-                print(f"[cegis] case-block (raw):")
-            # Map 0-based [cs, ce) → 1-based [start_line, end_line) with end exclusive
+            if blk.strip() == block.strip():
+                if key: mem.ban.add(key)
+                continue
             blk_with_sorry = _replace_failing_tactics_with_sorry(
                 blk,
                 full_text_lines=lines,
@@ -1507,21 +1671,18 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 session=session,
                 trace=trace,
             )
-            # Log just the repaired block to avoid confusion
             _log_block("repair", "case-block", blk_with_sorry, trace=trace)
-            # Show a tiny in-doc context window for orientation (optional; cheap)
             patched_sorry = "\n".join(lines[:cs] + [blk_with_sorry] + lines[ce:])
             if trace:
                 print("[repair] in-doc slice after case-block patch:")
                 print("\n".join(patched_sorry.splitlines()[max(0, cs-2):min(len(lines), ce+2)]))
-            # Final verification gate: only accept if whole document finishes OK.
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-            if not ok:
-                if trace:
-                    print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
-                return patched_sorry, False, "stage=2 block:case(pending-verify)"
-            return patched_sorry, True, "stage=2 block:case(accepted)"
+            if ok:
+                return patched_sorry, True, f"stage=2 block:case(round={mem.rounds})"
+            if key:
+                mem.ban.add(key)
+        # fallthrough to sub-proof
     
     # Stage 2b: Subproof rewrite
     ps, pe = _enclosing_subproof(lines, _clamp_line_index(lines, focus_line))
@@ -1543,29 +1704,43 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])        
         block = "\n".join(lines[ps:pe])
         _log_input_block("repair", "subproof-block", block, trace=trace)
-        subproof_timeout = int(min(45, max(15, left() * 0.7)))
-        
-        try:
-            if trace:
-                print(f"[repair] Trying subproof repair…")            
-            blk = _propose_block_repair(
-                goal=goal_text, errors=err_texts, ce_hints=ceh,
-                state_block=state_block, block_text=block,
-                model=model, timeout_s=subproof_timeout
-            )
-        except Exception:
-            blk = ""
-
-        # Normalize ASAP (before any logging/branching)
-        if _is_effective_block(blk):
+        # Iterative subproof repair: 2–3 rounds (time permitting) with BANLIST
+        rounds = 3 if left() >= 18.0 else 2
+        mem = _RepairMemory()
+        seed_key = _decisive_key_for_block(block)
+        if seed_key:
+            mem.ban.add(seed_key)
+        if trace:
+            print(f"[repair] Trying subproof repair…")
+        for rr in range(rounds):
+            if left() <= 3.0:
+                break
+            mem.rounds = rr + 1
+            prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+            why = "Previous sub-proof attempt failed; try a different structured sub-proof."
+            subproof_timeout = int(min(45, max(10, left() * (0.55 / max(1, rounds - rr)))))
+            try:
+                blk = _propose_block_repair(
+                    goal=goal_text, errors=err_texts, ce_hints=ceh,
+                    state_block=state_block, block_text=block,
+                    model=model, timeout_s=subproof_timeout,
+                    prior_failures=prior_failures_txt, why=why
+                )
+            except Exception:
+                blk = ""
+            if not _is_effective_block(blk):
+                continue
             before = blk
             blk = _strip_wrapper_to_subproof(blk)
+            key = _decisive_key_for_block(blk)
+            if key and key in mem.ban:
+                if trace: print("[repair] filtered subproof proposal by banlist; next round…")
+                continue
             if trace and blk.strip() != (before or "").strip():
                 print("[repair] normalized full-lemma → subproof")
-        if _is_effective_block(blk) and blk.strip() != block.strip():
-            if trace:
-                print(f"[cegis] subproof-block (raw):")
-            
+            if blk.strip() == block.strip():
+                if key: mem.ban.add(key)
+                continue
             blk_with_sorry = _replace_failing_tactics_with_sorry(
                 blk,
                 full_text_lines=lines,
@@ -1579,11 +1754,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             patched_sorry = "\n".join(lines[:ps] + [blk_with_sorry] + lines[pe:])
             thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-            if not ok:
-                if trace:
-                    print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
-                return patched_sorry, False, "stage=2 block:subproof(pending-verify)"
-            return patched_sorry, True, "stage=2 block:subproof(aggressive)"
+            if ok:
+                return patched_sorry, True, f"stage=2 block:subproof(round={mem.rounds})"
+            if key:
+                mem.ban.add(key)
             
     # Stage 3: Whole-proof rewrite (fallback)
     if allow_whole_fallback and resume_stage <= 3 and left() > 3.0:
@@ -1605,21 +1779,39 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 for d in ceh.get("def_hints", []): print("  def_hint:", d[:200])            
             block = "\n".join(lines[ws:we])
             _log_input_block("repair", "whole-proof", block, trace=trace)
-            whole_timeout = int(min(60, max(20, left() * 0.7)))
-            try:
-                if trace:
-                    print(f"[repair] Trying whole-proof repair…")
-                blk = _propose_block_repair(
-                    goal=goal_text, errors=err_texts, ce_hints=ceh,
-                    state_block=state_block, block_text=block,
-                    model=model, timeout_s=whole_timeout
-                )
-            except Exception:
-                blk = ""
-                                        
-            if _is_effective_block(blk) and blk.strip() != block.strip():                              
-                if trace:
-                    print(f"[cegis] whole-proof (raw):")
+            # Iterative whole-proof repair: 3–5 rounds (time permitting) with BANLIST
+            rounds = 5 if left() >= 30.0 else (4 if left() >= 20.0 else 3)
+            mem = _RepairMemory()
+            seed_key = _decisive_key_for_block(block)
+            if seed_key:
+                mem.ban.add(seed_key)
+            if trace:
+                print(f"[repair] Trying whole-proof repair…")
+            for rr in range(rounds):
+                if left() <= 3.0:
+                    break
+                mem.rounds = rr + 1
+                prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+                why = "Previous whole-proof attempt failed; propose a substantially different proof body."
+                whole_timeout = int(min(60, max(12, left() * (0.55 / max(1, rounds - rr)))))
+                try:
+                    blk = _propose_block_repair(
+                        goal=goal_text, errors=err_texts, ce_hints=ceh,
+                        state_block=state_block, block_text=block,
+                        model=model, timeout_s=whole_timeout,
+                        prior_failures=prior_failures_txt, why=why
+                    )
+                except Exception:
+                    blk = ""
+                if not _is_effective_block(blk):
+                    continue
+                key = _decisive_key_for_block(blk)
+                if key and key in mem.ban:
+                    if trace: print("[repair] filtered whole-proof proposal by banlist; next round…")
+                    continue
+                if blk.strip() == block.strip():
+                    if key: mem.ban.add(key)
+                    continue
                 blk_with_sorry = _replace_failing_tactics_with_sorry(
                     blk,
                     full_text_lines=lines,
@@ -1633,16 +1825,13 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                 _log_block("repair", "whole-proof", patched_sorry, trace=trace)
                 thy = build_theory(patched_sorry.splitlines(), add_print_state=False, end_with=None)
                 ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-                if not ok:
-                    if trace:
-                        print("[repair] Post-insert verification failed; keeping repair but marking as not solved yet.")
-                    return patched_sorry, False, "stage=3 block:whole(pending-verify)"
-                return patched_sorry, True, "stage=3 block:whole(aggressive)"
+                if ok:
+                    return patched_sorry, True, f"stage=3 block:whole(round={mem.rounds})"
+                if key:
+                    mem.ban.add(key)
                                 
-    # Return modified text even without measurable improvement (but NOT as success).
+    # If we made partial changes, return them quietly (not success).
     if current_text != full_text:
-        if trace:
-            print("[cegis] returning modified text despite no scoring improvement")
         return current_text, False, f"stage={resume_stage} partial-progress"
     
     return full_text, False, "cegis-nohelp"
