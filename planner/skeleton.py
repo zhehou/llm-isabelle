@@ -34,66 +34,36 @@ _SESSION = requests.Session()
 SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
 
 TASK
-Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar outline that compiles. Leave nontrivial reasoning steps as `sorry`.
+Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and compiles. Leave nontrivial reasoning steps as `sorry`.
 
-OUTPUT REQUIREMENTS
-- Output ONLY Isabelle/Isar text (no explanations, no code fences).
-- Always begin at or after a line exactly of the form:
+HARD OUTPUT RULES
+- Output ONLY Isabelle/Isar (no prose, no code fences).
+- Begin at (or immediately after) the exact header:
   lemma "{goal}"
-- Choose proof strategies appropriate to the problem:
-  • Induction: use `proof (induction <var>)` with clear case splits (`case 0`/`case (Suc n)`, `case Nil`/`case Cons`, etc.), and in each branch end with `show ?case …`.
-  • Exhaustive case analysis: `proof (cases <expr>)` or `proof (cases rule: <type>.exhaust)`, and in each branch end with `show ?thesis …`.
-  • Calculational reasoning: use `proof -`, chain `have …`, `also`, `moreover`, and `finally show ?thesis …`.
-  • Advanced methods: when suitable, use structured subproofs with `from … have …`, `ultimately show …`, `thus`, or `hence`.
-- **Intermediate facts should be named** and reused:
-  • `have f1: "…"` then later `have f2: "…" using f1 …`.
-  • Final steps should reference earlier facts: `show ?thesis using f1 f2 …`.
-- When goals are trivial, close with strong but simple tactics like `by simp`, `by auto`, `by blast`, `by fastforce`, but **not** with a bare `.`.
-- For complex or very hard problems:
-  • It is acceptable to leave nontrivial reasoning as `sorry`.
-  • Provide a well-structured skeleton so that further details can be filled in systematically.
-  • Nested proofs (`subgoal`, `proof - … qed`) may be used where appropriate.
+- Produce exactly ONE lemma..qed block.
+- Prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
+- Use the right shell:
+  • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
+  • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
+  • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`. Otherwise leave `sorry`.
+- Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
+- Avoid one-liner “by …” closings if any nontrivial step remains.
 
-
-OUTPUT GRAMMAR
-Top-level:
-- lemma "{goal}" <proof>
-<proof> ::= <refinement>* <proper_proof>
-<refinement> ::=
-  | apply <method>
-  | using <thms>
-  | unfolding <thms>
-<proper_proof> ::=
-  | proof [<method>] <statement>* qed [<method>]
-  | by <method> [<method>] | sorry | done
-<statement> ::=
-  | fix <vars>
-  | assume <name>: "<prop>"
-  | have "<prop>" <proof>
-  | show ?case <proof>          # use inside induction branches
-  | show ?thesis <proof>        # otherwise at the end
-  | then <goal_stmt>
-  | from <thms> <goal_stmt>
-  | with <thms> <goal_stmt>
-  | also                        # calculational chains
-  | finally <goal_stmt>
-  | next                        # separates branches
+LIGHT GRAMMAR (allowed shapes)
+lemma "{goal}"
+<refine>* <proof>
+<refine> ::= using <thms> | unfolding <thms> | apply <method>
+<proof>  ::= proof [<method>] <stmts>* qed | by <method> | sorry | done
+<stmts>  ::= fix <vars> | assume <n>: "<prop>" | have "<prop>" <proof>
+             | show ?case <proof> | show ?thesis <proof> | then <goal_stmt>
+             | from <thms> <goal_stmt> | with <thms> <goal_stmt>
+             | also | moreover | finally <goal_stmt> | next
 <goal_stmt> ::= have "<prop>" <proof> | show "<prop>" <proof>
-# Structured shells the model may choose:
-#   proof (induction <var>)  …  next …  qed
-#   proof (cases <expr>)     …  next …  qed
-#   proof -                  …             qed
-# Methods (small, stable set):
-<method> ::=
-  | "induction" <var> [ "arbitrary:" <vars> ]
-  | "cases" <expr>
-  | "-"
-  | "simp" [ "add:" <thms> ] [ "only:" <thms> ]
-  | "auto" [ "simp" "add:" <thms> ]
-  | "blast" | "fastforce" | "clarsimp"
-  | "intro" <thms> | "elim" <thms> | "rule" <thm>
-  | "metis" [ <thms> ]
-  | "(" <method> ")"            # parenthesized method (e.g., by (simp add: …))
+<method> ::= "induction" <var> ["arbitrary:" <vars>] | "cases" <expr> | "-"
+             | "simp" ["add:" <thms>] ["only:" <thms>] | "auto" | "blast"
+             | "fastforce" | "clarsimp" | "intro" <thms> | "elim" <thms>
+             | "rule" <thm> | "metis" [<thms>] | "(" <method> ")"
 
 STYLE EXAMPLES
 lemma "{goal}"
@@ -137,16 +107,10 @@ qed
 
 lemma "{goal}"
 proof -
-  have f1: "A = B"
-    sorry
-  have f2: "B = C"
-    using f1
-    sorry
-  also have "... = D"
-    sorry
-  finally show ?thesis
-    using f2
-    sorry
+  have f1: "A = B"  sorry
+  have f2: "B = C"  using f1  sorry
+  also have "... = D"  sorry
+  finally show ?thesis  using f2  sorry
 qed
 """
 

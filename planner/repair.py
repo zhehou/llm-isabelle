@@ -21,7 +21,7 @@ _SESSION = requests.Session()
 _CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
 _HAS_BODY = re.compile(r"^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
 _APPLY_OR_BY = re.compile(r"^\s*(apply|by)\b")
-_APPLY_OR_BY_DECISIVE = re.compile(r"^\s*(apply|by)\b")
+_APPLY_OR_BY_DECISIVE = re.compile(r"(?m)^\s*(apply|by)\b")
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _HEADER_RE = re.compile(r"^\s*(proof\s*\(|proof\b|case\s+|then\s+show\b)")
 _TACTIC_LINE = re.compile(r"^\s*(?:apply|by)\b|(?:\s)by\s+\S")
@@ -32,6 +32,10 @@ _QED_RE = re.compile(r"^\s*qed\b")
 _CASE_LINE_RE = re.compile(r"^\s*case\b")
 _NEXT_OR_QED_RE = re.compile(r"^\s*(?:next|qed)\b")
 _WRAPPED_THEOREM_HEAD = re.compile(r"(?mx)\A(?:[ \t]*(?:\(\*.*?\*\)|\<comment\>.*?\<\/comment\>)[ \t]*\n|[ \t]*\n)*[ \t]*(?:lemma|theorem|corollary)\b")
+# Outline-level strategies we want to ban on whole-proof regen
+_OUTLINE_PROOF_LINE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]*)\))?\s*$")
+_OUTLINE_TACTIC_PAREN = re.compile(r"(?m)^\s*(?:apply|by)\s*\(((?:induction|cases|coinduction)\b[^)]*)\)")
+_OUTLINE_BARE         = re.compile(r"(?m)^\s*(?:induction|cases|coinduction)\b.*$")
 
 # ========== Utility Functions ==========
 def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_s: Optional[int]) -> List:
@@ -75,6 +79,44 @@ def _canon_line(s: str) -> str:
     t = re.sub(r"\s+", " ", s.strip())
     t = re.sub(r";\s*$", "", t)
     return t.replace("`", "").replace("​", "").replace("​", "")
+
+def _outline_strategies(text: str) -> List[str]:
+    """
+    Extract high-level proof outline 'strategy' fingerprints:
+      - 'proof (induction …)', 'proof (cases …)', 'proof -'
+      - 'apply (induction …)', 'by (cases …)'
+      - bare 'induction …' / 'cases …' lines
+    Returned tokens are canonicalized single lines suitable for banlists.
+    """
+    if not text:
+        return []
+    out: List[str] = []
+    for ln in text.splitlines():
+        m = _OUTLINE_PROOF_LINE.match(ln or "")
+        if m:
+            # 'proof -' or 'proof (…)' → keep only 'proof -' or 'proof (<payload>)'
+            payload = m.group(1)
+            tok = f"proof ({_canon_line(payload)})" if payload else "proof -"
+            out.append(_canon_line(tok))
+            continue
+        m = _OUTLINE_TACTIC_PAREN.match(ln or "")
+        if m:
+            out.append(_canon_line(f"({m.group(1)})"))
+            continue
+        if _OUTLINE_BARE.match(ln or ""):
+            out.append(_canon_line(ln))
+    # dedup, preserve order
+    seen = set()
+    dedup = []
+    for s in out:
+        if s and s not in seen:
+            seen.add(s); dedup.append(s)
+    return dedup
+
+def _first_outline_strategy(text: str) -> Optional[str]:
+    for s in _outline_strategies(text or ""):
+        return s
+    return None
 
 def _decisive_lines(text: str) -> List[str]:
     """Extract decisive tactic lines (apply/by) for banlists."""
@@ -516,40 +558,51 @@ def _counterexample_hints(isabelle, session: str, full_text: str, hole_span: Tup
     return _nitpick_state_hints_from_text(state_only)
 
 # ========== Prompt Templates ==========
-_REPAIR_SYSTEM = """You repair ONLY the local Isar snippet around a failing hole.
+_REPAIR_SYSTEM = """You are an Isabelle/HOL expert.
+You repair ONLY the local Isar SNIPPET around a failing hole.
 Do NOT regenerate the whole proof. Return a JSON array (≤3) of patch operations.
 
-ALLOWED OPS:
+ALLOWED OPS (SCHEMA EXACTLY):
 1) {"insert_before_hole": "<ONE LINE>"}
 2) {"replace_in_snippet": {"find": "<EXACT LINE>", "replace": "<NEW LINE>"}}
-3) {"insert_have_block": {"label":"H", "statement":"<FORMULA>", "after_line_matching":"<LINE>", "body_hint":"<ONE LINE>"}}
+3) {"insert_have_block": {"label":"H","statement":"<FORMULA>","after_line_matching":"<LINE>","body_hint":"<ONE LINE>"}}
 
-Global rules:
-- Edit only inside the provided SNIPPET; keep surrounding text verbatim.
-- Do NOT repeat or reinsert any line that already appears in SNIPPET or RECENT_STEPS.
-- Use ONLY identifiers that appear in STATE_BEFORE_HOLE or SNIPPET. Do NOT invent new fact names.
-- In `using`, refer to named facts only; do NOT paste raw propositions or backticks/cartouches.
-- Each suggested op must reflect a distinct strategy family (automation vs rule/intro/elim vs cases/induct vs small have..qed).
-- Output MUST be valid JSON (no code fences, no comments)."""
+STRICT RULES
+- Edit ONLY inside the given SNIPPET; keep all surrounding text verbatim.
+- Do NOT change lemma headers, case labels, indentation, or add/remove 'qed'.
+- Do NOT reinsert any line already present in SNIPPET or RECENT_STEPS.
+- Use ONLY identifiers present in STATE_BEFORE_HOLE, SNIPPET, or FACTS_CANDIDATES.
+- In `using`, reference named facts only; never paste raw propositions or quoted goals.
+- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
+- Prefer small, compile-friendly steps: automation (`simp/auto/fastforce`), rule/intro/elim, or a tiny `have … qed` with `sorry`.
+- Each op must embody a different strategy family (e.g., automation vs rule vs micro-have).
+- Output MUST be valid JSON (no comments, no code fences, no trailing commas)."""
 
-_REPAIR_USER = """WHAT FAILED (concise):
+_REPAIR_USER = """WHAT FAILED:
 {why}
 
-GOAL: {goal}
+GOAL:
+{goal}
 
-STATE_BEFORE_HOLE: {state_block}
+STATE_BEFORE_HOLE:
+{state_block}
 
-ISABELLE_ERRORS: {errors}
+ISABELLE_ERRORS:
+{errors}
 
-COUNTEREXAMPLE_HINTS: {ce_hints}
+COUNTEREXAMPLE_HINTS (bindings/defs you may unfold or use in simp sets):
+{ce_hints}
 
-FACTS_CANDIDATES: {facts_list}
+FACTS_CANDIDATES (named thms you may cite in 'using'/'simp add:'):
+{facts_list}
 
-NEAREST_HEADER: {nearest_header}
+NEAREST_HEADER:
+{nearest_header}
 
-RECENT_STEPS: {recent_steps}
+RECENT_STEPS (avoid near-duplicates):
+{recent_steps}
 
-BANLIST / PRIOR_FAILURES (avoid exact or near-duplicate lines):
+BANLIST / PRIOR_FAILURES (avoid exact/near-duplicate decisive lines):
 {prior_failures}
 
 SNIPPET:
@@ -557,37 +610,79 @@ SNIPPET:
 {block_snippet}
 SNIPPET
 
-Output JSON array of patch ops:"""
+Return ONLY the JSON array of patch ops."""
 
-_BLOCK_SYSTEM = """You propose a replacement for the provided Isabelle/Isar BLOCK.
-Preserve the surrounding text; return only the new BLOCK text (no JSON, no comments).
+_BLOCK_SYSTEM = """You are an Isabelle/HOL expert.
+You propose a replacement for the provided Isabelle/Isar BLOCK.
+Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
-Global rules:
-- Edit only inside this BLOCK. Keep lemma headers and surrounding text unchanged.
-- Do NOT invent new fact names; only use identifiers that appear in LOCAL_CONTEXT or in this BLOCK.
-- Do NOT paste raw propositions into 'using'; refer only to named facts or previously introduced labels.
-- Each suggestion must be a distinct strategy family (automation vs rule/intro/elim vs cases/induct vs small have..qed)."""
+EDIT SCOPE
+- Edit ONLY inside this BLOCK; keep lemma header and outer structure unchanged.
+- Keep case names/labels stable; close every branch; do not add/remove ‘lemma’/‘qed’.
+- Maintain indentation and whitespace style of the original.
 
-_BLOCK_USER = """WHAT FAILED (concise):
+FACTS & METHODS
+- In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
+- Prefer small, compile-friendly steps: `simp/auto/fastforce`, `rule/intro/elim`, `cases/induction` with correct `show ?case`.
+- If a sub-step is nontrivial, leave `sorry` rather than risk long/t brittle tactics.
+- Avoid heavy `metis` unless the goal is clearly first-order and local facts suffice.
+
+LIGHT GRAMMAR (allowed shapes)
+<stmt> ::=
+  "using" <thms>
+| "unfolding" <thms>
+| "have" "<prop>" <proof>
+| "show ?case" <proof>        // inside induction branches
+| "show ?thesis" <proof>      // other branches
+| "from" <thms> <goalstmt>
+| "with" <thms> <goalstmt>
+| "also" | "moreover" | "finally" <goalstmt>
+| "next"                       // to separate branches
+| "let" <pat> "=" <expr> | "define" <name> "where" "<eqn>"
+
+<goalstmt> ::= "have" "<prop>" <proof> | "show" "<prop>" <proof>
+
+<proof> ::=
+  "by" <method>
+| "proof" ["(" <method> ")"] <stmts>* "qed"
+| "sorry"
+
+<method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
+           | "auto" | "blast" | "fastforce" | "clarsimp"
+           | "intro" <thms> | "elim" <thms> | "rule" <thm>
+           | "cases" <expr> | "induction" <var> ["arbitrary:" <vars>]
+           | "subst" <thm> | "-"
+
+OUTPUT
+- Keep branch structure intact; every opened branch must end with a `show` and close.
+- Do NOT invent new constants or fact names; use only identifiers in LOCAL_CONTEXT or the original BLOCK.
+- Output ONLY the revised BLOCK (no fences).
+"""
+
+_BLOCK_USER = """WHAT FAILED:
 {why}
 
-GOAL: {goal}
+GOAL:
+{goal}
 
-ISABELLE_ERRORS: {errors}
+ISABELLE_ERRORS:
+{errors}
 
-COUNTEREXAMPLE_HINTS: {ce_hints}
+COUNTEREXAMPLE_HINTS (bindings / *_def you may unfold or add to simp):
+{ce_hints}
 
-LOCAL_CONTEXT: {state_block}
+LOCAL_CONTEXT (state before the hole):
+{state_block}
 
 ORIGINAL BLOCK:
 <<<BLOCK
 {block_text}
 BLOCK
 
-BANLIST / PRIOR_FAILURES (avoid exact/near-duplicate decisive lines):
+BANLIST / PRIOR FAILURES (avoid exact/near-duplicate decisive lines):
 {prior_failures}
 
-Return ONLY the new BLOCK text."""
+Return ONLY the new BLOCK text (no fences)."""
 
 # ========== Repair Proposal Functions ==========
 def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], ce_hints: Dict[str, List[str]], 
@@ -1015,12 +1110,19 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     ce = _counterexample_hints(isabelle, session, current_text, (0, 0))
     block = "\n".join(lines[start:end])
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
+    # Log what we send to the LLM for transparency
+    _log("repair", "errors (LLM input)", "\n".join(err_texts) or "(none)", trace=trace)
+    _log("repair", "counterexamples (LLM input)", "\n".join(ce.get("bindings", []) + ce.get("def_hints", [])) or "(none)", trace=trace)    
     
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
-    seed_key = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(block)[:2]))
-    if seed_key:
-        mem.ban.add(seed_key)
+    # Prefer an outline fingerprint; fall back to the old apply/by key
+    seed_outline = _first_outline_strategy(block)
+    if seed_outline:
+        mem.ban.add(seed_outline)
+    seed_applyby = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(block)[:2]))
+    if seed_applyby:
+        mem.ban.add(seed_applyby)
     # Seed additional prior failures (decisive lines only)
     if extra_ban_lines:
         for b in extra_ban_lines:
@@ -1033,6 +1135,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             break
         mem.rounds = rr + 1
         prior_failures = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
+        _log("repair", "prior_failures (LLM input)", prior_failures, trace=trace)
         why = f"Previous {block_type}-block attempt did not solve the goal; try a different strategy."
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
         
@@ -1054,7 +1157,10 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         elif block_type == "subproof":
             blk = _strip_wrapper_to_subproof(blk)
         
-        key = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(blk)[:2]))
+        # Filter by outline ban first; if absent, fall back to apply/by key
+        key_outline = _first_outline_strategy(blk)
+        key_applyby = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(blk)[:2]))
+        key = key_outline or key_applyby
         if key and key in mem.ban:
             if trace:
                 print(f"[repair] filtered {block_type} proposal by banlist")
@@ -1109,8 +1215,9 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     # Simple local timer for the block repair
     t0 = time.monotonic()
     left = lambda: max(0.0, budget_s - (time.monotonic() - t0))
-    # Use decisive lines from the prior outline as extra banlist
-    extra_ban = _decisive_lines(prior_outline_text or full_text)
+    # Use OUTLINE strategies from the prior outline as extra banlist; fall back to decisive tactic lines
+    extra_ban = _outline_strategies(prior_outline_text or full_text) or _decisive_lines(prior_outline_text or full_text)
+    _log("repair", "prior_failures (whole-proof)", "\n".join(extra_ban) or "(none)", trace=trace)
     if trace:
         print(f"[repair] Trying whole-proof regeneration with {len(extra_ban)} prior-failure bans…")
 
