@@ -76,6 +76,18 @@ def _canon_line(s: str) -> str:
     t = re.sub(r";\s*$", "", t)
     return t.replace("`", "").replace("​", "").replace("​", "")
 
+def _decisive_lines(text: str) -> List[str]:
+    """Extract decisive tactic lines (apply/by) for banlists."""
+    if not text:
+        return []
+    out = []
+    for ln in text.splitlines():
+        if _APPLY_OR_BY_DECISIVE.search(ln or ""):
+            c = _canon_line(ln)
+            if c:
+                out.append(c)
+    return out
+
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
 
@@ -921,6 +933,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     current_text = full_text
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     _log("repair", "State block", state0, trace=trace)
+    # Deprecate the old "whole-proof fallback" inside CEGIS. The driver now owns whole regeneration.
+    if allow_whole_fallback and trace:
+        print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")    
     
     # Stage 0: Local repair
     if resume_stage <= 0 and left() > 5.0:
@@ -986,25 +1001,15 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if ok:
                 return current_text, True, "stage=2 block:subproof"
     
-    # Stage 3: Whole-proof
-    if allow_whole_fallback and resume_stage <= 3 and left() > 3.0:
-        ws, we = _enclosing_whole_proof(lines)
-        if ws >= 0 and we > ws:
-            if trace:
-                print("[repair] Trying whole-proof repair…")
-            current_text = _repair_block(current_text, lines, ws, we, goal_text, state0, isabelle, session, 
-                                         model, left, trace, "whole", stage=3)
-            if current_text != full_text:
-                thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
-                ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-                if ok:
-                    return current_text, True, "stage=3 block:whole"
+    # (No stage 3 here anymore; whole-proof regeneration is performed by the driver via regenerate_whole_proof)
     
-    return current_text if current_text != full_text else full_text, False, f"stage={resume_stage} " + ("partial-progress" if current_text != full_text else "cegis-nohelp")
+    # Strict policy for the caller: if no stage produced a compiling patch,
+    # do not return a modified text. Signal only that we made partial progress.
+    return full_text, False, f"stage={resume_stage} " + ("partial-progress" if current_text != full_text else "cegis-nohelp")
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 
                  state0: str, isabelle, session: str, model: Optional[str], left, trace: bool, 
-                 block_type: str, stage: int) -> str:
+                 block_type: str, stage: int, *, extra_ban_lines: Optional[List[str]] = None) -> str:
     _, errs = _quick_state_and_errors(isabelle, session, current_text)
     err_texts = _normalize_error_texts(errs)
     ce = _counterexample_hints(isabelle, session, current_text, (0, 0))
@@ -1016,7 +1021,13 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     seed_key = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(block)[:2]))
     if seed_key:
         mem.ban.add(seed_key)
-    
+    # Seed additional prior failures (decisive lines only)
+    if extra_ban_lines:
+        for b in extra_ban_lines:
+            k = _canon_line(b)
+            if k:
+                mem.ban.add(k)
+
     for rr in range(rounds):
         if left() <= 3.0:
             break
@@ -1071,3 +1082,43 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         lines = current_text.splitlines()
     
     return current_text
+
+# ---------- Public helper: whole-proof regeneration with prior-failure banlist ----------
+def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[str],
+                           isabelle, session: str, budget_s: float = 20.0,
+                           trace: bool = False, prior_outline_text: Optional[str] = None
+                          ) -> Tuple[str, bool, str]:
+    """
+    Re-generate the last proof..qed block (or from the lemma head to EOF if no qed yet),
+    feeding decisive lines from `prior_outline_text` as a ban list so the LLM avoids
+    repeating previously failed tactics. Only returns a patched text if it *verifies*.
+    """
+    lines = full_text.splitlines()
+    ws, we = _enclosing_whole_proof(lines)
+    if ws < 0 or we <= ws:
+        # Fallback: from first lemma/theorem head to EOF
+        start = None
+        for i, L in enumerate(lines):
+            if re.match(r"^\s*(?:lemma|theorem|corollary)\b", L):
+                start = i
+                break
+        if start is None:
+            return full_text, False, "whole:region-not-found"
+        ws, we = start, len(lines)
+
+    # Simple local timer for the block repair
+    t0 = time.monotonic()
+    left = lambda: max(0.0, budget_s - (time.monotonic() - t0))
+    # Use decisive lines from the prior outline as extra banlist
+    extra_ban = _decisive_lines(prior_outline_text or full_text)
+    if trace:
+        print(f"[repair] Trying whole-proof regeneration with {len(extra_ban)} prior-failure bans…")
+
+    # Use empty/quick state — the block prompt already carries enough context
+    state0 = ""
+    patched = _repair_block(full_text, lines, ws, we, goal_text, state0, isabelle, session,
+                            model, left, trace, "whole", stage=3, extra_ban_lines=extra_ban)
+    if patched != full_text:
+        # _repair_block only returns a different text if it verified successfully
+        return patched, True, "regen:whole-proof"
+    return full_text, False, "regen:no-change"
