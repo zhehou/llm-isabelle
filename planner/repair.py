@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Set, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 import requests
+from typing import Callable
 
 from prover.config import MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S, OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
@@ -21,7 +22,7 @@ _SESSION = requests.Session()
 _CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
 _HAS_BODY = re.compile(r"^\s*(?:by\b|apply\b|proof\b|sorry\b|done\b)")
 _APPLY_OR_BY = re.compile(r"^\s*(apply|by)\b")
-_APPLY_OR_BY_DECISIVE = re.compile(r"(?m)^\s*(apply|by)\b")
+_APPLY_OR_BY_DECISIVE = re.compile(r"(?m)^\s*(?:apply|by)\b.*$")
 _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _HEADER_RE = re.compile(r"^\s*(proof\s*\(|proof\b|case\s+|then\s+show\b)")
 _TACTIC_LINE = re.compile(r"^\s*(?:apply|by)\b|(?:\s)by\s+\S")
@@ -34,10 +35,33 @@ _NEXT_OR_QED_RE = re.compile(r"^\s*(?:next|qed)\b")
 _WRAPPED_THEOREM_HEAD = re.compile(r"(?mx)\A(?:[ \t]*(?:\(\*.*?\*\)|\<comment\>.*?\<\/comment\>)[ \t]*\n|[ \t]*\n)*[ \t]*(?:lemma|theorem|corollary)\b")
 # Outline-level strategies we want to ban on whole-proof regen
 _OUTLINE_PROOF_LINE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]*)\))?\s*$")
-_OUTLINE_TACTIC_PAREN = re.compile(r"(?m)^\s*(?:apply|by)\s*\(((?:induction|cases|coinduction)\b[^)]*)\)")
 _OUTLINE_BARE         = re.compile(r"(?m)^\s*(?:induction|cases|coinduction)\b.*$")
 
 # ========== Utility Functions ==========
+
+_STRAT_OPENING = re.compile(r'^\s*proof\s*\(([^)]+)\)')
+
+def _earliest_failing_anchor_or_hole(isabelle, session: str, full_text: str, hole_span):
+    try:
+        line_idx, err_excerpt = _earliest_failure_anchor(isabelle, session, full_text,
+                                                         default_line_0=full_text.count("\n"))
+        if isinstance(line_idx, int) and line_idx >= 0:
+            return ("line", line_idx, err_excerpt)
+    except Exception:
+        pass
+    return ("hole", hole_span, "")
+
+def _counterexample_hints_precise(isabelle, session: str, full_text: str, hole_span):
+    kind, at, _ = _earliest_failing_anchor_or_hole(isabelle, session, full_text, hole_span)
+    if kind == "line":
+        lines = full_text.splitlines()
+        nit = _run_nitpick_at_line(isabelle, session, lines,
+                                   inject_before_1based=at + 1,
+                                   qc_timeout_s=3, nitpick_timeout_s=5)
+    else:
+        nit = _run_nitpick_at_hole(isabelle, session, full_text, hole_span, timeout_s=3)
+    return _nitpick_state_hints_from_text(nit)
+
 def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_s: Optional[int]) -> List:
     if not timeout_s or timeout_s <= 0:
         return run_theory(isabelle, session, thy)
@@ -60,7 +84,18 @@ def _log(prefix: str, label: str, content: str, trace: bool = True) -> None:
 def _sanitize_llm_block(text: str) -> str:
     if not text:
         return text
-    patterns = [r"^\s*<<<BLOCK\s*$", r"^\s*BLOCK\s*$", r"^\s*<<<PROOF\s*$", r"^\s*PROOF\s*$", r"^\s*```\s*$", r"^\s*```isabelle\s*$", r"^\s*```isar\s*$"]
+    patterns = [
+        r"^\s*<<<BLOCK\s*$",
+        r"^\s*BLOCK\s*$",
+        r"^\s*<<<PROOF\s*$",
+        r"^\s*PROOF\s*$",
+        r"^\s*```\s*$",
+        r"^\s*```isabelle\s*$",
+        r"^\s*```isar\s*$",
+        # strip stray fence markers sometimes emitted by LLMs
+        r"^\s*<<<\s*$",
+        r"^\s*>>>\s*$",
+    ]
     compiled = [re.compile(p) for p in patterns]
     lines = [l for l in text.splitlines() if not any(p.match(l) for p in compiled)]
     return "\n".join(lines).strip()
@@ -80,12 +115,31 @@ def _canon_line(s: str) -> str:
     t = re.sub(r";\s*$", "", t)
     return t.replace("`", "").replace("​", "").replace("​", "")
 
+def _fingerprint_block(text: str) -> str:
+    """Canonicalize a block to detect duplicates across rounds."""
+    if not text:
+        return ""
+    # Collapse whitespace, drop zero-width and backticks, normalize quotes.
+    t = re.sub(r"\s+", " ", text.strip())
+    t = t.replace("`", "").replace("“", '"').replace("”", '"').replace("’", "'")
+    return t
+
+def _trim_block_for_prompt(text: str, max_chars: int = 800) -> str:
+    """Keep prompt sizes sane by trimming long blocks."""
+    t = (text or "").strip()
+    if len(t) <= max_chars:
+        return t
+    head = t[: max_chars // 2].rstrip()
+    tail = t[- max_chars // 2 :].lstrip()
+    return head + "\n…\n" + tail
+
 def _outline_strategies(text: str) -> List[str]:
     """
-    Extract high-level proof outline 'strategy' fingerprints:
-      - 'proof (induction …)', 'proof (cases …)', 'proof -'
-      - 'apply (induction …)', 'by (cases …)'
-      - bare 'induction …' / 'cases …' lines
+    Extract high-level proof outline 'strategy' fingerprints for the ban list.
+    We only admit true outline openings:
+      - 'proof (induction …)', 'proof (cases …)', 'proof (coinduction …)'
+      - bare 'induction …' / 'cases …' / 'coinduction …' lines
+    We explicitly DO NOT include step tactics like 'apply …' or 'by …'.
     Returned tokens are canonicalized single lines suitable for banlists.
     """
     if not text:
@@ -94,14 +148,11 @@ def _outline_strategies(text: str) -> List[str]:
     for ln in text.splitlines():
         m = _OUTLINE_PROOF_LINE.match(ln or "")
         if m:
-            # 'proof -' or 'proof (…)' → keep only 'proof -' or 'proof (<payload>)'
-            payload = m.group(1)
-            tok = f"proof ({_canon_line(payload)})" if payload else "proof -"
-            out.append(_canon_line(tok))
-            continue
-        m = _OUTLINE_TACTIC_PAREN.match(ln or "")
-        if m:
-            out.append(_canon_line(f"({m.group(1)})"))
+            payload = (m.group(1) or "").strip()
+            # Only ban proof openings that actually name a high-level method.
+            if payload and re.match(r"^(?:induction|cases|coinduction)\b", payload):
+                tok = f"proof ({_canon_line(payload)})"
+                out.append(_canon_line(tok))
             continue
         if _OUTLINE_BARE.match(ln or ""):
             out.append(_canon_line(ln))
@@ -117,18 +168,6 @@ def _first_outline_strategy(text: str) -> Optional[str]:
     for s in _outline_strategies(text or ""):
         return s
     return None
-
-def _decisive_lines(text: str) -> List[str]:
-    """Extract decisive tactic lines (apply/by) for banlists."""
-    if not text:
-        return []
-    out = []
-    for ln in text.splitlines():
-        if _APPLY_OR_BY_DECISIVE.search(ln or ""):
-            c = _canon_line(ln)
-            if c:
-                out.append(c)
-    return out
 
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
@@ -168,47 +207,47 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state = _extract_print_state_from_responses(resps)
         errors = []
+        
         for r in resps or []:
             raw = getattr(r, "response_body", None)
             if isinstance(raw, (bytes, bytearray)):
                 raw = raw.decode(errors="replace")
+            
+            # Try structured JSON first
             try:
-                data = json.loads(raw) if isinstance(raw, str) else raw
-            except Exception:
-                data = None
-            if isinstance(data, dict) and data.get("nodes"):
-                for node in data.get("nodes", []):
-                    for msg in node.get("messages", []):
-                        if str(msg.get("kind", "")).lower() != "error":
-                            continue
-                        txt = str(msg.get("message", "") or "")
-                        pos = msg.get("pos") or {}
-                        rng = msg.get("range") or {}
-                        line = pos.get("line") or (rng.get("start") or {}).get("line") or msg.get("line")
-                        if not isinstance(line, int):
-                            m = re.search(r"\bline\s+(\d+)\b", txt)
-                            if m:
-                                try:
-                                    line = int(m.group(1))
-                                except Exception:
-                                    pass
-                        err_obj = {"text": txt}
-                        if isinstance(line, int):
-                            err_obj["line"] = line
-                        errors.append(err_obj)
-            elif isinstance(raw, str) and any(k in raw for k in ["*** Error:", "*** Outer syntax error", "*** Failed"]):
-                txt = raw.strip().splitlines()[-1]
-                err_obj = {"text": txt}
-                m = re.search(r"\bline\s+(\d+)\b", raw)
-                if m:
-                    try:
-                        err_obj["line"] = int(m.group(1))
-                    except Exception:
-                        pass
-                errors.append(err_obj)
-        return state, errors[:5]
-    except Exception:
-        return "", [{"text": "transport_or_build_error"}]
+                data = json.loads(raw) if isinstance(raw, str) and raw.strip() else None
+                if isinstance(data, dict):
+                    for node in data.get("nodes", []):
+                        for msg in node.get("messages", []):
+                            if str(msg.get("kind", "")).lower() == "error":
+                                txt = str(msg.get("message", "") or "").strip()
+                                if txt:  # Only add non-empty errors
+                                    errors.append({"text": txt, "line": msg.get("line")})
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+            
+            # Fallback: raw text parsing for error markers
+            if isinstance(raw, str):
+                for pattern in ["*** Error:", "*** Outer syntax error", "*** Failed"]:
+                    if pattern in raw:
+                        # Extract the actual error message
+                        for line in raw.split('\n'):
+                            if pattern in line:
+                                errors.append({"text": line.strip()})
+                                break
+        
+        # Deduplicate by text
+        seen = set()
+        deduped = []
+        for e in errors:
+            txt = e.get("text", "")
+            if txt and txt not in seen:
+                seen.add(txt)
+                deduped.append(e)
+        
+        return state, deduped[:5]
+    except Exception as e:
+        return "", [{"text": f"extraction_error: {type(e).__name__}"}]
 
 def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
     hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
@@ -413,8 +452,15 @@ RepairOp = Tuple[str, object]
 
 @dataclass
 class _RepairMemory:
-    ban: Set[str] = field(default_factory=set)
     rounds: int = 0
+    # Keep full failed blocks (same block_type) we tried this session
+    prev_blocks: List[str] = field(default_factory=list)
+    # Fingerprints to dedup within a session
+    prev_fps: Set[str] = field(default_factory=set)
+
+# --- Prior-block store shared across repairs of the *same hole* ---------------
+# Maps block_type -> list of failed blocks (latest first, length-capped)
+_MAX_PREV_BLOCKS = int(os.getenv("REPAIR_MAX_PREV_BLOCKS", "4"))
 
 # ========== Repair Operations (Parsing & Application) ==========
 def _parse_repair_ops(text: str) -> List[RepairOp]:
@@ -541,21 +587,73 @@ def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tupl
         return ""
 
 def _nitpick_state_hints_from_text(text: str) -> Dict[str, List[str]]:
-    t = (text or "").lower()
-    if not any(k in t for k in ["nitpick found a counterexample", "nitpick found a potential counterexample", "model found"]):
+    if not text:
         return {"bindings": [], "def_hints": []}
-    bindings = [f"{v} = {val.strip()}" for v, val in re.findall(r"\b([a-z][A-Za-z0-9_']*)\s*=\s*([^,\n][^,\n]*)", text)]
-    defs = list(dict.fromkeys(re.findall(r"\b([A-Za-z_][A-Za-z0-9_']*)_def\b", text)))
-    def_hints = [hint for d in defs for hint in [f"{d}_def", f"unfolding {d}_def", f"simp only: {d}_def"]]
+    
+    t_lower = text.lower()
+    has_cex = any(marker in t_lower for marker in [
+        "nitpick found a counterexample",
+        "nitpick found a potential counterexample",
+        "quickcheck found a counterexample",
+        "model found"
+    ])
+    
+    if not has_cex:
+        return {"bindings": [], "def_hints": []}
+    
+    # Extract bindings more carefully
+    bindings = []
+    for line in text.split('\n'):
+        # Match "var = value" patterns
+        match = re.match(r'\s*([a-z][A-Za-z0-9_\']*)\s*=\s*(.+)', line)
+        if match:
+            var, val = match.groups()
+            # Clean up value (remove trailing punctuation/whitespace)
+            val = re.sub(r'[,;.\s]+$', '', val.strip())
+            if val:
+                bindings.append(f"{var} = {val}")
+    
+    # Extract definition names
+    defs = list(dict.fromkeys(re.findall(r"\b([A-Za-z_]\w*'*)_def\b", text)))
+    def_hints = [f"unfolding {d}_def" for d in defs]  # Use more specific syntax
+    
     return {"bindings": bindings[:8], "def_hints": def_hints[:12]}
 
-def _counterexample_hints(isabelle, session: str, full_text: str, hole_span: Tuple[int, int]) -> Dict[str, List[str]]:
-    nit = _run_nitpick_at_hole(isabelle, session, full_text, hole_span, timeout_s=3)
-    hints = _nitpick_state_hints_from_text(nit)
-    if hints.get("bindings") or hints.get("def_hints"):
-        return hints
-    state_only, _ = _quick_state_and_errors(isabelle, session, full_text)
-    return _nitpick_state_hints_from_text(state_only)
+def _run_nitpick_at_line(
+    isabelle,
+    session: str,
+    full_text_lines: List[str],
+    inject_before_1based: int,
+    qc_timeout_s: int = 3,
+    nitpick_timeout_s: int = 5,
+) -> str:
+    """
+    Build a transient doc variant that inserts Quickcheck/Nitpick *before* the
+    earliest failing tactic line, so diagnostics run on the exact subgoal that
+    was about to fail. Returns concatenated Isabelle response text.
+    """
+    i0 = max(0, inject_before_1based - 1)
+    pad = ""
+    if 0 <= i0 < len(full_text_lines):
+        ln = full_text_lines[i0]
+        pad = ln[: len(ln) - len(ln.lstrip(" "))]
+    injected = [
+        f"{pad}prefer 1",
+        f"{pad}quickcheck[timeout={max(1, qc_timeout_s)}]",
+        f"{pad}nitpick[timeout={max(1, nitpick_timeout_s)}]",
+    ]
+    variant = "\n".join(full_text_lines[:i0] + injected + full_text_lines[i0:])
+    try:
+        thy = build_theory(variant.splitlines(), add_print_state=True, end_with=None)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=max(3, qc_timeout_s + nitpick_timeout_s + 2))
+        return "\n".join(
+            getattr(r, "response_body", b"").decode(errors="replace")
+            if isinstance(getattr(r, "response_body", None), (bytes, bytearray))
+            else str(getattr(r, "response_body", ""))
+            for r in resps or []
+        )
+    except Exception:
+        return ""
 
 # ========== Prompt Templates ==========
 _REPAIR_SYSTEM = """You are an Isabelle/HOL expert.
@@ -576,7 +674,8 @@ STRICT RULES
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Prefer small, compile-friendly steps: automation (`simp/auto/fastforce`), rule/intro/elim, or a tiny `have … qed` with `sorry`.
 - Each op must embody a different strategy family (e.g., automation vs rule vs micro-have).
-- Output MUST be valid JSON (no comments, no code fences, no trailing commas)."""
+- Output MUST be valid JSON (no comments, no code fences, no trailing commas).
+"""
 
 _REPAIR_USER = """WHAT FAILED:
 {why}
@@ -602,9 +701,6 @@ NEAREST_HEADER:
 RECENT_STEPS (avoid near-duplicates):
 {recent_steps}
 
-BANLIST / PRIOR_FAILURES (avoid exact/near-duplicate decisive lines):
-{prior_failures}
-
 SNIPPET:
 <<<SNIPPET
 {block_snippet}
@@ -617,15 +713,15 @@ You propose a replacement for the provided Isabelle/Isar BLOCK.
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
-- Edit ONLY inside this BLOCK; keep lemma header and outer structure unchanged.
+- Edit ONLY inside this BLOCK; keep lemma header and outer structure unchanged EXCEPT:
+  • You MAY change the opening `proof (…)`/`induction …`/`cases …` if needed to avoid repeating a failed approach.
 - Keep case names/labels stable; close every branch; do not add/remove ‘lemma’/‘qed’.
 - Maintain indentation and whitespace style of the original.
 
-FACTS & METHODS
+STRICT RULES
 - In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
-- Prefer small, compile-friendly steps: `simp/auto/fastforce`, `rule/intro/elim`, `cases/induction` with correct `show ?case`.
-- If a sub-step is nontrivial, leave `sorry` rather than risk long/t brittle tactics.
-- Avoid heavy `metis` unless the goal is clearly first-order and local facts suffice.
+- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
+- Your new BLOCK must be substantively different from every item in PRIOR FAILED BLOCKS.
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::=
@@ -671,6 +767,11 @@ ISABELLE_ERRORS:
 COUNTEREXAMPLE_HINTS (bindings / *_def you may unfold or add to simp):
 {ce_hints}
 
+PRIOR FAILED BLOCKS (same-type; produce a substantively different structure and tactic sequence):
+<<<FAILS
+{prior_failed_blocks}
+FAILS
+
 LOCAL_CONTEXT (state before the hole):
 {state_block}
 
@@ -679,15 +780,12 @@ ORIGINAL BLOCK:
 {block_text}
 BLOCK
 
-BANLIST / PRIOR FAILURES (avoid exact/near-duplicate decisive lines):
-{prior_failures}
-
 Return ONLY the new BLOCK text (no fences)."""
 
 # ========== Repair Proposal Functions ==========
 def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], ce_hints: Dict[str, List[str]], 
                          block_snippet: str, nearest_header: str, recent_steps: List[str], facts: List[str],
-                         model: Optional[str], timeout_s: int, prior_failures: str = "(none)", 
+                         model: Optional[str], timeout_s: int, 
                          why: str = "Previous attempt failed; propose a new approach.") -> str:
     ce_list = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
     prompt = _REPAIR_SYSTEM + "\n\n" + _REPAIR_USER.format(
@@ -695,7 +793,7 @@ def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], ce_
         errors="\n".join(f"- {e}" for e in errors) or "(none)",
         ce_hints="\n".join(ce_list) or "(none)", block_snippet=block_snippet.rstrip(),
         nearest_header=nearest_header.strip(), recent_steps="\n".join(recent_steps) or "(none)",
-        facts_list=", ".join(facts) or "(none)", prior_failures=prior_failures, why=why
+        facts_list=", ".join(facts) or "(none)", why=why
     )
     try:
         return _generate_simple(prompt, model=model, timeout_s=timeout_s)
@@ -703,35 +801,24 @@ def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], ce_
         return "[]"
 
 def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], state_block: str, 
-                         block_text: str, model: Optional[str], timeout_s: int, prior_failures: str = "(none)", 
-                         why: str = "Previous attempt failed; propose a different block-level change.") -> str:
+                         block_text: str, model: Optional[str], timeout_s: int,
+                         why: str = "Previous attempt failed; propose a different block-level change.",
+                         prior_failed_blocks: Optional[str] = None) -> str:
     ce = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
     prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
         goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
         ce_hints="\n".join(ce) or "(none)", state_block=(state_block or "").strip(),
-        block_text=block_text.rstrip(), prior_failures=prior_failures, why=why
+        block_text=block_text.rstrip(), why=why,
+        prior_failed_blocks=(prior_failed_blocks or "(none)")
     )
     try:
         return _sanitize_llm_block(_generate_simple(prompt, model=model, timeout_s=timeout_s))
     except Exception:
         return ""
 
-def _filter_ops_against_banlist(ops_json_text: str, ban: Set[str]) -> List[RepairOp]:
-    ops = _parse_repair_ops(ops_json_text)
-    keep = []
-    for kind, payload in ops:
-        if kind == "insert_before_hole":
-            key = _canon_line(payload.line)
-        elif kind == "replace_in_snippet":
-            key = _canon_line(payload.replace)
-        elif kind == "insert_have_block":
-            key = _canon_line(payload.body_hint or f'have "{payload.statement}"')
-        else:
-            keep.append((kind, payload))
-            continue
-        if not key or key not in ban:
-            keep.append((kind, payload))
-    return keep
+# def _filter_ops_against_banlist(ops_json_text: str, ban: Set[str]) -> List[RepairOp]:
+#     # Ban list is outline-only; local step edits are never filtered by it.
+#     return _parse_repair_ops(ops_json_text)
 
 def _heuristic_fallback_ops(goal_text: str, state_block: str, header: str, facts: List[str]) -> List[RepairOp]:
     ops = []
@@ -905,8 +992,7 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
                                        end_line: int, isabelle, session: str, trace: bool = False) -> str:
     block_lines = block_text.splitlines()
     if not block_lines:
-        return block_text
-    
+        return block_text    
     def build_doc(with_block_lines: List[str]) -> str:
         s0, e0 = max(0, start_line - 1), max(max(0, start_line - 1), min(end_line - 1, len(full_text_lines)))
         return "\n".join(full_text_lines[:s0] + with_block_lines + full_text_lines[e0:])
@@ -938,7 +1024,20 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
         
         if cand is None:
             break
-        
+
+        # --- Diagnostics before modifying the block ---
+        # Run Quickcheck/Nitpick on the exact failing tactic line, so we capture
+        # a counterexample on the subgoal that is about to fail.
+        try:
+            diag_txt = _run_nitpick_at_line(
+                isabelle, session, full_text_lines,
+                inject_before_1based=start_line + cand
+            )
+            if diag_txt:
+                _log("repair", "nitpick (pre-sorry)", diag_txt, trace=trace)
+        except Exception:
+            pass
+
         indent = block_lines[cand][:len(block_lines[cand]) - len(block_lines[cand].lstrip())]
         if block_lines[cand].lstrip().startswith("apply"):
             head_idx = _find_enclosing_head(block_lines, cand)
@@ -968,34 +1067,27 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     header = _nearest_header(lines, hole_line)
     rsteps = _recent_steps(lines, hole_line)
     facts = _facts_from_state(state0, limit=8)
-    ce = _counterexample_hints(isabelle, session, full_text, hole_span)
+    ce = _counterexample_hints_precise(isabelle, session, full_text, hole_span)
     if ce.get("def_hints"):
         facts = list(dict.fromkeys(ce["def_hints"] + facts))[:12]
     
     mem = _RepairMemory()
-    for ln in (snippet.splitlines() + rsteps):
-        if _APPLY_OR_BY.match(ln or ""):
-            k = _canon_line(ln)
-            if k:
-                mem.ban.add(k)
     
     remaining = left()
     propose_timeout = int(max(2, min(45, (remaining - 3) * 0.6)))
     err_texts = _normalize_error_texts(errs0)
     why_msg = "Previous attempt failed; propose a corrected, different strategy." if err_texts else "Previous attempt did not close the subgoal; propose NEW strategies."
-    prior_failures_txt = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
     
     raw = "[]"
     if propose_timeout >= 3:
         try:
             raw = propose_local_repairs(goal=goal_text, state_block=state0, errors=err_texts, ce_hints=ce, 
                                        block_snippet=snippet, nearest_header=header, recent_steps=rsteps, 
-                                       facts=facts, model=model, timeout_s=propose_timeout, 
-                                       prior_failures=prior_failures_txt, why=why_msg)
+                                       facts=facts, model=model, timeout_s=propose_timeout, why=why_msg)
         except Exception:
             pass
     
-    ops = _filter_ops_against_banlist(raw, mem.ban)
+    ops = _parse_repair_ops(raw)
     if not ops:
         ops = _heuristic_fallback_ops(goal_text, state0, header, facts)
     
@@ -1011,9 +1103,6 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             decisive = payload.body_hint or f'have "{payload.statement}"'
         else:
             continue
-        k = _canon_line(decisive)
-        if k:
-            mem.ban.add(k)
         if cand != full_text:
             return cand, False, f"beam:{kind or 'local'}(partial)"
     
@@ -1048,7 +1137,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         elif patched != current_text:
             current_text = patched
             state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
-    
+
+    # Shared prior-failure store (per hole) used across block kinds
+    prior_store: Dict[str, List[str]] = {}
+
     # Stage 1: have/show/obtain micro-block
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
     anchor_line, anchor_reason = _earliest_failure_anchor(isabelle, session, current_text, default_line_0=hole_line)
@@ -1060,8 +1152,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 1 and hs_s >= 0 and left() > 5.0:
         if trace:
             print("[repair] Trying have/show block repair…")
-        current_text = _repair_block(current_text, lines, hs_s, hs_e, goal_text, state0, isabelle, session, 
-                                     model, left, trace, "have-show", stage=1)
+        current_text = _repair_block(current_text, lines, hs_s, hs_e, goal_text, state0, 
+                                     isabelle, session, model, left, trace, "have-show", 
+                                     stage=1, prior_store=prior_store)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -1076,7 +1169,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if trace:
             print("[repair] Trying case-block repair…")
         current_text = _repair_block(current_text, lines, cs, ce, goal_text, state0, isabelle, session, 
-                                     model, left, trace, "case", stage=2)
+                                     model, left, trace, "case", stage=2, prior_store=prior_store)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -1089,7 +1182,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if trace:
             print("[repair] Trying subproof repair…")
         current_text = _repair_block(current_text, lines, ps, pe, goal_text, state0, isabelle, session, 
-                                     model, left, trace, "subproof", stage=2)
+                                     model, left, trace, "subproof", stage=2, prior_store=prior_store)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -1104,10 +1197,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 
                  state0: str, isabelle, session: str, model: Optional[str], left, trace: bool, 
-                 block_type: str, stage: int, *, extra_ban_lines: Optional[List[str]] = None) -> str:
+                 block_type: str, stage: int, *, prior_store: Optional[Dict[str, List[str]]] = None) -> str:
     _, errs = _quick_state_and_errors(isabelle, session, current_text)
     err_texts = _normalize_error_texts(errs)
-    ce = _counterexample_hints(isabelle, session, current_text, (0, 0))
+    ce = _counterexample_hints_precise(isabelle, session, current_text, (0, 0))
     block = "\n".join(lines[start:end])
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
     # Log what we send to the LLM for transparency
@@ -1116,33 +1209,34 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
-    # Prefer an outline fingerprint; fall back to the old apply/by key
-    seed_outline = _first_outline_strategy(block)
-    if seed_outline:
-        mem.ban.add(seed_outline)
-    seed_applyby = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(block)[:2]))
-    if seed_applyby:
-        mem.ban.add(seed_applyby)
-    # Seed additional prior failures (decisive lines only)
-    if extra_ban_lines:
-        for b in extra_ban_lines:
-            k = _canon_line(b)
-            if k:
-                mem.ban.add(k)
+
+    # Prepare "prior failed blocks" (same block_type) from shared store
+    prior_blocks_for_type: List[str] = []
+    if isinstance(prior_store, dict):
+        prior_blocks_for_type = list(prior_store.get(block_type, []))
+    if block and (not prior_blocks_for_type):
+        # Optionally seed with the ORIGINAL BLOCK to encourage change
+        pass
 
     for rr in range(rounds):
         if left() <= 3.0:
             break
         mem.rounds = rr + 1
-        prior_failures = "\n".join(f"- {b}" for b in sorted(mem.ban)) or "(none)"
-        _log("repair", "prior_failures (LLM input)", prior_failures, trace=trace)
         why = f"Previous {block_type}-block attempt did not solve the goal; try a different strategy."
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
+        # Build prior failed blocks text (trim + separators)
+        # Always include the ORIGINAL BLOCK as the first 'failed' reference to force change
+        seed_list = [block] + prior_blocks_for_type
+        if seed_list:
+            fails_txt = ("\n---\n".join(_trim_block_for_prompt(b) for b in seed_list[:_MAX_PREV_BLOCKS])) or "(none)"
+            _log("repair", "prior_block_failures (LLM input)", fails_txt, trace=trace)
+        else:
+            fails_txt = "(none)"        
         
         try:
             blk = _propose_block_repair(goal=goal_text, errors=err_texts, ce_hints=ce, state_block=state0, 
-                                       block_text=block, model=model, timeout_s=timeout, 
-                                       prior_failures=prior_failures, why=why)
+                                       block_text=block, model=model, timeout_s=timeout, why=why,
+                                       prior_failed_blocks=fails_txt)
         except Exception:
             blk = ""
         
@@ -1157,24 +1251,32 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         elif block_type == "subproof":
             blk = _strip_wrapper_to_subproof(blk)
         
-        # Filter by outline ban first; if absent, fall back to apply/by key
-        key_outline = _first_outline_strategy(blk)
-        key_applyby = _canon_line(" ".join(_APPLY_OR_BY_DECISIVE.findall(blk)[:2]))
-        key = key_outline or key_applyby
-        if key and key in mem.ban:
-            if trace:
-                print(f"[repair] filtered {block_type} proposal by banlist")
-            continue
+        # # Filter by outline ban only (never by step tactics)
+        # key = _first_outline_strategy(blk)        
+        # if key and key in mem.ban:
+        #     if trace:
+        #         print(f"[repair] filtered {block_type} proposal by banlist (key={key!r})")
+        #     continue
         
         if blk.strip() == block.strip():
-            if key:
-                mem.ban.add(key)
             continue
         
         blk_with_sorry = _replace_failing_tactics_with_sorry(blk, full_text_lines=lines, start_line=start + 1, 
                                                              end_line=end + 1, isabelle=isabelle, 
                                                              session=session, trace=trace)
         _log("repair", f"{block_type}-block (output)", blk_with_sorry, trace=trace)
+        # Record this failed candidate into local and shared stores (so next round tries differ)
+        fp = _fingerprint_block(blk_with_sorry)
+        if fp and fp not in mem.prev_fps:
+            mem.prev_fps.add(fp)
+            mem.prev_blocks.insert(0, blk_with_sorry)
+            mem.prev_blocks = mem.prev_blocks[:_MAX_PREV_BLOCKS]
+            if isinstance(prior_store, dict):
+                lst = prior_store.setdefault(block_type, [])
+                # De-dup in shared store too
+                if fp not in [_fingerprint_block(x) for x in lst]:
+                    lst.insert(0, blk_with_sorry)
+                    del lst[_MAX_PREV_BLOCKS:]        
         patched = "\n".join(lines[:start] + [blk_with_sorry] + lines[end:])
         
         thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
@@ -1182,8 +1284,6 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         
         if ok:
             return patched
-        if key:
-            mem.ban.add(key)
         current_text = patched
         lines = current_text.splitlines()
     
@@ -1215,16 +1315,14 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     # Simple local timer for the block repair
     t0 = time.monotonic()
     left = lambda: max(0.0, budget_s - (time.monotonic() - t0))
-    # Use OUTLINE strategies from the prior outline as extra banlist; fall back to decisive tactic lines
-    extra_ban = _outline_strategies(prior_outline_text or full_text) or _decisive_lines(prior_outline_text or full_text)
-    _log("repair", "prior_failures (whole-proof)", "\n".join(extra_ban) or "(none)", trace=trace)
-    if trace:
-        print(f"[repair] Trying whole-proof regeneration with {len(extra_ban)} prior-failure bans…")
-
     # Use empty/quick state — the block prompt already carries enough context
     state0 = ""
+    # Seed prior failed blocks with the previous outline (so the first round won't repeat it)
+    prior_store: Dict[str, List[str]] = {}
+    if prior_outline_text:
+        prior_store["whole"] = [prior_outline_text]
     patched = _repair_block(full_text, lines, ws, we, goal_text, state0, isabelle, session,
-                            model, left, trace, "whole", stage=3, extra_ban_lines=extra_ban)
+                            model, left, trace, "whole", stage=3, prior_store=prior_store)
     if patched != full_text:
         # _repair_block only returns a different text if it verified successfully
         return patched, True, "regen:whole-proof"
