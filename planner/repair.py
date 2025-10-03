@@ -744,7 +744,7 @@ EDIT SCOPE
 STRICT RULES
 - In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Your new BLOCK must be substantively different from every item in PRIOR FAILED BLOCKS.
+- Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::=
@@ -784,21 +784,21 @@ _BLOCK_USER = """WHAT FAILED:
 GOAL:
 {goal}
 
+LOCAL_CONTEXT (state before the hole):
+{state_block}
+
 ISABELLE_ERRORS:
 {errors}
 
 COUNTEREXAMPLE_HINTS (bindings / *_def you may unfold or add to simp):
 {ce_hints}
 
-PRIOR FAILED BLOCKS (same-type; produce a substantively different structure and tactic sequence):
-<<<FAILS
+PRIOR FAILED BLOCKS (do **not** repeat these ideas/structures; these are bad examples, not templates):
+<<<FAILED_PROOFS
 {prior_failed_blocks}
-FAILS
+FAILED_PROOFS
 
-LOCAL_CONTEXT (state before the hole):
-{state_block}
-
-ORIGINAL BLOCK:
+ORIGINAL BLOCK TO REPLACE:
 <<<BLOCK
 {block_text}
 BLOCK
@@ -1233,14 +1233,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
 
-    # Prepare "prior failed blocks" (same block_type) from shared store
-    prior_blocks_for_type: List[str] = []
-    if isinstance(prior_store, dict):
-        prior_blocks_for_type = list(prior_store.get(block_type, []))
-    if block and (not prior_blocks_for_type):
-        # Optionally seed with the ORIGINAL BLOCK to encourage change
-        pass
-
+    # Build proposals in a few rounds; track failures and surface them to the LLM
     for rr in range(rounds):
         if left() <= 3.0:
             break
@@ -1248,8 +1241,17 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         why = f"Previous {block_type}-block attempt did not solve the goal; try a different strategy."
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
         # Build prior failed blocks text (trim + separators)
-        # Always include the ORIGINAL BLOCK as the first 'failed' reference to force change
-        seed_list = [block] + prior_blocks_for_type
+        # Always include: ORIGINAL block, then failures from this call, then shared store
+        prior_blocks_for_type = list(prior_store.get(block_type, [])) if isinstance(prior_store, dict) else []
+        seed_list = [block] + mem.prev_blocks + prior_blocks_for_type
+        # De-dup while preserving order (by fingerprint)
+        seen: Set[str] = set()
+        uniq: List[str] = []
+        for b in seed_list:
+            fpb = _fingerprint_block(b)
+            if fpb and fpb not in seen:
+                seen.add(fpb); uniq.append(b)
+        seed_list = uniq
         if seed_list:
             fails_txt = ("\n---\n".join(_trim_block_for_prompt(b) for b in seed_list[:_MAX_PREV_BLOCKS])) or "(none)"
             _log("repair", "prior_block_failures (LLM input)", fails_txt, trace=trace)
