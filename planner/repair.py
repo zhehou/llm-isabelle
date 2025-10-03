@@ -96,8 +96,31 @@ def _sanitize_llm_block(text: str) -> str:
         r"^\s*<<<\s*$",
         r"^\s*>>>\s*$",
     ]
-    compiled = [re.compile(p) for p in patterns]
+    # Also drop accidental headers LLMs sometimes leak mid-repair
+    header_patterns = [
+        r"^\s*lemma\b.*$",
+        r"^\s*theorem\b.*$",
+        r"^\s*corollary\b.*$",
+        r"^\s*proposition\b.*$",
+        r"^\s*---\s*$",
+    ]
+    compiled = [re.compile(p) for p in (patterns + header_patterns)]
     lines = [l for l in text.splitlines() if not any(p.match(l) for p in compiled)]
+
+    # Balance 'proof'/'qed' and cut off any text after the final balanced 'qed'
+    balance = 0
+    last_closed_idx = -1
+    for i, l in enumerate(lines):
+        if re.match(r"^\s*proof\b", l):
+            balance += 1
+        elif re.match(r"^\s*qed\b", l):
+            if balance > 0:
+                balance -= 1
+                if balance == 0:
+                    last_closed_idx = i
+    if last_closed_idx != -1 and last_closed_idx + 1 < len(lines):
+        lines = lines[: last_closed_idx + 1]
+
     return "\n".join(lines).strip()
 
 def _is_effective_block(text: str) -> bool:
