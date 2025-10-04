@@ -676,6 +676,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=1 block:have-show"
+            return current_text, True, "stage=1 partial-progress"
         lines = current_text.splitlines()
         state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
@@ -691,6 +692,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=2 block:case"
+            return current_text, True, "stage=2 partial-progress"
     
     # Stage 2b: Subproof
     ps, pe = _enclosing_subproof(lines, focus_line)
@@ -704,12 +706,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=2 block:subproof"
-    
-    # (No stage 3 here anymore; whole-proof regeneration is performed by the driver via regenerate_whole_proof)
-    
-    # Strict policy for the caller: if no stage produced a compiling patch,
-    # do not return a modified text. Signal only that we made partial progress.
-    return full_text, False, f"stage={resume_stage} " + ("partial-progress" if current_text != full_text else "cegis-nohelp")
+            return current_text, True, "stage=2 partial-progress"
+    if current_text != full_text:
+        return current_text, True, f"stage={resume_stage} partial-progress"
+    return full_text, False, f"stage={resume_stage} cegis-nohelp"
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 
                  state0: str, isabelle, session: str, model: Optional[str], left, trace: bool, 
