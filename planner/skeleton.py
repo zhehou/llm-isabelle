@@ -5,7 +5,7 @@ import json
 import os
 import re
 from functools import lru_cache
-
+from planner.prompts import SKELETON_PROMPT
 import requests
 
 # Pull defaults from your existing prover/config.py
@@ -27,93 +27,6 @@ from planner.repair import _facts_from_state as _facts_from_state
 
 # One HTTP session (keep-alive)
 _SESSION = requests.Session()
-
-# -----------------------------------------------------------------------------
-# Prompt for OUTLINES  (nudged with ?case and calculational patterns)
-# -----------------------------------------------------------------------------
-SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
-
-TASK
-Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and compiles. Leave nontrivial reasoning steps as `sorry`.
-
-HARD OUTPUT RULES
-- Output ONLY Isabelle/Isar (no prose, no code fences).
-- Begin at (or immediately after) the exact header:
-  lemma "{goal}"
-- Produce exactly ONE lemma..qed block.
-- Prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
-- Use the right shell:
-  • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
-  • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
-  • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`. Otherwise leave `sorry`.
-- Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
-- Avoid one-liner “by …” closings if any nontrivial step remains.
-
-LIGHT GRAMMAR (allowed shapes)
-lemma "{goal}"
-<refine>* <proof>
-<refine> ::= using <thms> | unfolding <thms> | apply <method>
-<proof>  ::= proof [<method>] <stmts>* qed | by <method> | sorry | done
-<stmts>  ::= fix <vars> | assume <n>: "<prop>" | have "<prop>" <proof>
-             | show ?case <proof> | show ?thesis <proof> | then <goal_stmt>
-             | from <thms> <goal_stmt> | with <thms> <goal_stmt>
-             | also | moreover | finally <goal_stmt> | next
-<goal_stmt> ::= have "<prop>" <proof> | show "<prop>" <proof>
-<method> ::= "induction" <var> ["arbitrary:" <vars>] | "cases" <expr> | "-"
-             | "simp" ["add:" <thms>] ["only:" <thms>] | "auto" | "blast"
-             | "fastforce" | "clarsimp" | "intro" <thms> | "elim" <thms>
-             | "rule" <thm> | "metis" [<thms>] | "(" <method> ")"
-
-STYLE EXAMPLES
-lemma "{goal}"
-proof (induction xs)
-  case Nil
-  have f1: "…"
-    using Nil.prems
-    sorry
-  show ?case
-    using f1
-    sorry
-next
-  case (Cons x xs)
-  have f1: "…"
-    using Cons.prems
-    sorry
-  have f2: "…"
-    using Cons.IH f1
-    sorry
-  show ?case
-    using f2
-    sorry
-qed
-
-lemma "{goal}"
-proof (cases b)
-  case True
-  have f1: "…"
-    sorry
-  show ?thesis
-    using f1
-    sorry
-next
-  case False
-  have f2: "…"
-    sorry
-  show ?thesis
-    using f2
-    sorry
-qed
-
-lemma "{goal}"
-proof -
-  have f1: "A = B"  sorry
-  have f2: "B = C"  using f1  sorry
-  also have "... = D"  sorry
-  finally show ?thesis  using f2  sorry
-qed
-"""
-
 
 @dataclass(slots=True)
 class Skeleton:
