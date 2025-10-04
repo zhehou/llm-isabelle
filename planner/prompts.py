@@ -1,0 +1,212 @@
+# ========== Prompt Templates for Repair ==========
+_REPAIR_SYSTEM = """You are an Isabelle/HOL expert.
+You repair ONLY the local Isar SNIPPET around a failing hole.
+Do NOT regenerate the whole proof. Return a JSON array (≤3) of patch operations.
+
+ALLOWED OPS (SCHEMA EXACTLY):
+1) {"insert_before_hole": "<ONE LINE>"}
+2) {"replace_in_snippet": {"find": "<EXACT LINE>", "replace": "<NEW LINE>"}}
+3) {"insert_have_block": {"label":"H","statement":"<FORMULA>","after_line_matching":"<LINE>","body_hint":"<ONE LINE>"}}
+
+STRICT RULES
+- Edit ONLY inside the given SNIPPET; keep all surrounding text verbatim.
+- Do NOT change lemma headers, case labels, indentation, or add/remove 'qed'.
+- Do NOT reinsert any line already present in SNIPPET or RECENT_STEPS.
+- Use ONLY identifiers present in STATE_BEFORE_HOLE, SNIPPET, or FACTS_CANDIDATES.
+- In `using`, reference named facts only; never paste raw propositions or quoted goals.
+- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
+- Prefer small, compile-friendly steps: automation (`simp/auto/fastforce`), rule/intro/elim, or a tiny `have … qed` with `sorry`.
+- Each op must embody a different strategy family (e.g., automation vs rule vs micro-have).
+- Output MUST be valid JSON (no comments, no code fences, no trailing commas).
+"""
+
+_REPAIR_USER = """WHAT FAILED:
+{why}
+
+GOAL:
+{goal}
+
+STATE_BEFORE_HOLE:
+{state_block}
+
+ISABELLE_ERRORS:
+{errors}
+
+COUNTEREXAMPLE_HINTS (bindings/defs you may unfold or use in simp sets):
+{ce_hints}
+
+FACTS_CANDIDATES (named thms you may cite in 'using'/'simp add:'):
+{facts_list}
+
+NEAREST_HEADER:
+{nearest_header}
+
+RECENT_STEPS (avoid near-duplicates):
+{recent_steps}
+
+SNIPPET:
+<<<SNIPPET
+{block_snippet}
+SNIPPET
+
+Return ONLY the JSON array of patch ops."""
+
+_BLOCK_SYSTEM = """You are an Isabelle/HOL expert.
+You propose a replacement for the provided Isabelle/Isar BLOCK.
+Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
+
+EDIT SCOPE
+- Edit ONLY inside this BLOCK; keep lemma header and outer structure unchanged EXCEPT:
+  • You MAY change the opening `proof (…)`/`induction …`/`cases …` if needed to avoid repeating a failed approach.
+- Keep case names/labels stable; close every branch; do not add/remove ‘lemma’/‘qed’.
+- Maintain indentation and whitespace style of the original.
+
+STRICT RULES
+- In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
+- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
+- Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
+
+LIGHT GRAMMAR (allowed shapes)
+<stmt> ::=
+  "using" <thms>
+| "unfolding" <thms>
+| "have" "<prop>" <proof>
+| "show ?case" <proof>        // inside induction branches
+| "show ?thesis" <proof>      // other branches
+| "from" <thms> <goalstmt>
+| "with" <thms> <goalstmt>
+| "also" | "moreover" | "finally" <goalstmt>
+| "next"                       // to separate branches
+| "let" <pat> "=" <expr> | "define" <name> "where" "<eqn>"
+
+<goalstmt> ::= "have" "<prop>" <proof> | "show" "<prop>" <proof>
+
+<proof> ::=
+  "by" <method>
+| "proof" ["(" <method> ")"] <stmts>* "qed"
+| "sorry"
+
+<method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
+           | "auto" | "blast" | "fastforce" | "clarsimp"
+           | "intro" <thms> | "elim" <thms> | "rule" <thm>
+           | "cases" <expr> | "induction" <var> ["arbitrary:" <vars>]
+           | "subst" <thm> | "-"
+
+OUTPUT
+- Keep branch structure intact; every opened branch must end with a `show` and close.
+- Do NOT invent new constants or fact names; use only identifiers in LOCAL_CONTEXT or the original BLOCK.
+- Output ONLY the revised BLOCK (no fences).
+"""
+
+_BLOCK_USER = """WHAT FAILED:
+{why}
+
+GOAL:
+{goal}
+
+LOCAL_CONTEXT (state before the hole):
+{state_block}
+
+ISABELLE_ERRORS:
+{errors}
+
+COUNTEREXAMPLE_HINTS (bindings / *_def you may unfold or add to simp):
+{ce_hints}
+
+PRIOR FAILED BLOCKS (do **not** repeat these ideas/structures; these are bad examples, not templates):
+<<<FAILED_PROOFS
+{prior_failed_blocks}
+FAILED_PROOFS
+
+ORIGINAL BLOCK TO REPLACE:
+<<<BLOCK
+{block_text}
+BLOCK
+
+Return ONLY the new BLOCK text (no fences)."""
+
+# -----------------------------------------------------------------------------
+# Prompt for OUTLINES  (nudged with ?case and calculational patterns)
+# -----------------------------------------------------------------------------
+SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
+
+TASK
+Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and compiles. Leave nontrivial reasoning steps as `sorry`.
+
+HARD OUTPUT RULES
+- Output ONLY Isabelle/Isar (no prose, no code fences).
+- Begin at (or immediately after) the exact header:
+  lemma "{goal}"
+- Produce exactly ONE lemma..qed block.
+- Prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
+- Use the right shell:
+  • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
+  • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
+  • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`. Otherwise leave `sorry`.
+- Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
+- Avoid one-liner “by …” closings if any nontrivial step remains.
+
+LIGHT GRAMMAR (allowed shapes)
+lemma "{goal}"
+<refine>* <proof>
+<refine> ::= using <thms> | unfolding <thms> | apply <method>
+<proof>  ::= proof [<method>] <stmts>* qed | by <method> | sorry | done
+<stmts>  ::= fix <vars> | assume <n>: "<prop>" | have "<prop>" <proof>
+             | show ?case <proof> | show ?thesis <proof> | then <goal_stmt>
+             | from <thms> <goal_stmt> | with <thms> <goal_stmt>
+             | also | moreover | finally <goal_stmt> | next
+<goal_stmt> ::= have "<prop>" <proof> | show "<prop>" <proof>
+<method> ::= "induction" <var> ["arbitrary:" <vars>] | "cases" <expr> | "-"
+             | "simp" ["add:" <thms>] ["only:" <thms>] | "auto" | "blast"
+             | "fastforce" | "clarsimp" | "intro" <thms> | "elim" <thms>
+             | "rule" <thm> | "metis" [<thms>] | "(" <method> ")"
+
+STYLE EXAMPLES
+lemma "{goal}"
+proof (induction xs)
+  case Nil
+  have f1: "…"
+    using Nil.prems
+    sorry
+  show ?case
+    using f1
+    sorry
+next
+  case (Cons x xs)
+  have f1: "…"
+    using Cons.prems
+    sorry
+  have f2: "…"
+    using Cons.IH f1
+    sorry
+  show ?case
+    using f2
+    sorry
+qed
+
+lemma "{goal}"
+proof (cases b)
+  case True
+  have f1: "…"
+    sorry
+  show ?thesis
+    using f1
+    sorry
+next
+  case False
+  have f2: "…"
+    sorry
+  show ?thesis
+    using f2
+    sorry
+qed
+
+lemma "{goal}"
+proof -
+  have f1: "A = B"  sorry
+  have f2: "B = C"  using f1  sorry
+  also have "... = D"  sorry
+  finally show ?thesis  using f2  sorry
+qed
+"""
