@@ -29,10 +29,10 @@ GOAL:
 STATE_BEFORE_HOLE:
 {state_block}
 
-ISABELLE_ERRORS:
+ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that have similar errors):
 {errors}
 
-COUNTEREXAMPLE_HINTS (bindings/defs you may unfold or use in simp sets):
+COUNTEREXAMPLE_HINTS (learn from counterexamples of previous goals and avoid generating goals based on the counterexamples):
 {ce_hints}
 
 FACTS_CANDIDATES (named thms you may cite in 'using'/'simp add:'):
@@ -107,10 +107,10 @@ GOAL:
 LOCAL_CONTEXT (state before the hole):
 {state_block}
 
-ISABELLE_ERRORS:
+ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that have similar errors):
 {errors}
 
-COUNTEREXAMPLE_HINTS (bindings / *_def you may unfold or add to simp):
+COUNTEREXAMPLE_HINTS (learn from counterexamples of previous goals and avoid generating goals based on the counterexamples):
 {ce_hints}
 
 PRIOR FAILED BLOCKS (do **not** repeat these ideas/structures; these are bad examples, not templates):
