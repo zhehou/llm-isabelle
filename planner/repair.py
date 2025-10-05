@@ -18,6 +18,7 @@ from prover.isabelle_api import build_theory, run_theory, last_print_state_block
 _ISA_FAST_TIMEOUT_S = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
 _ISA_VERIFY_TIMEOUT_S = int(os.getenv("ISABELLE_VERIFY_TIMEOUT_S", "30"))
 _SESSION = requests.Session()
+_REPAIR_RULES_JSON = os.getenv("REPAIR_RULES_JSON", "").strip()  # optional, declarative fallback rules
 
 # ========== Regex Patterns ==========
 _CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
@@ -336,24 +337,82 @@ def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, L
 #     # Ban list is outline-only; local step edits are never filtered by it.
 #     return _parse_repair_ops(ops_json_text)
 
-def _heuristic_fallback_ops(goal_text: str, state_block: str, header: str, facts: List[str]) -> List[RepairOp]:
-    ops = []
-    if "Let " in state_block or "Let_def" in facts:
-        ops.append(("insert_before_hole", InsertBeforeHole("apply (unfolding Let_def)")))
-    g = goal_text
-    if ("map" in g and "@" in g) or ("map_append" in facts):
-        ops.append(("insert_before_hole", InsertBeforeHole("apply (simp add: map_append)")))
-    if ("length" in g and "@" in g) or ("length_append" in facts):
-        ops.append(("insert_before_hole", InsertBeforeHole("apply (simp add: length_append)")))
-    if "@" in g or "append_assoc" in facts:
-        ops.append(("insert_before_hole", InsertBeforeHole("apply (simp add: append_assoc)")))
-    if header.startswith("proof (induction") and "arbitrary:" not in header:
-        for v in ("ys", "zs"):
-            if v in g:
-                new_header = header.rstrip(")") + f" arbitrary: {v})"
-                ops.append(("replace_in_snippet", ReplaceInSnippet(header, new_header)))
-                break
-    return ops[:3]
+def propose_rule_based_repairs(goal_text: str, state_block: str, header: str, facts: List[str]) -> List[RepairOp]:
+    """
+    Declarative, data-driven fallback:
+    - If REPAIR_RULES_JSON is set to a JSON file, load rules and emit ops that match.
+    - Otherwise return [] (i.e., no ad-hoc heuristics).
+    Rule schema (list):
+      {
+        "when": {
+          "goal_contains_any": ["@", "map"],
+          "goal_regex": "length\\s",
+          "facts_contains_any": ["append_assoc"],
+          "state_contains_any": ["Let "],
+          "header_startswith": "proof (induction",
+          "header_regex": "proof \\(induction.*\\)"
+        },
+        "op": { "insert_before_hole": "apply (simp add: append_assoc)" }
+      }
+      or
+      {
+        "when": { "header_startswith": "proof (induction", "not_header_contains": ["arbitrary:"] },
+        "op": { "replace_in_snippet": { "find": "proof (induction xs)", "replace": "proof (induction xs arbitrary: ys)" } }
+      }
+    """
+    path = _REPAIR_RULES_JSON
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rules = json.load(f)
+    except Exception:
+        return []
+    def _match(rule) -> Optional[RepairOp]:
+        cond = rule.get("when", {}) or {}
+        op   = rule.get("op", {}) or {}
+        g, st, hd = goal_text or "", state_block or "", header or ""
+        fs = facts or []
+        import re as _re
+        def contains_any(text, keys): return any(k in text for k in keys)
+        def not_contains(text, keys): return not any(k in text for k in keys)
+        # boolean guards (all must pass if present)
+        checks = [
+            ("goal_contains_any", lambda v: contains_any(g, v)),
+            ("state_contains_any", lambda v: contains_any(st, v)),
+            ("facts_contains_any", lambda v: any(x in fs for x in v)),
+            ("goal_regex",        lambda v: bool(_re.search(v, g))),
+            ("header_startswith", lambda v: hd.startswith(v)),
+            ("header_regex",      lambda v: bool(_re.search(v, hd))),
+            ("not_header_contains", lambda v: not_contains(hd, v)),
+        ]
+        for key, pred in checks:
+            if key in cond:
+                val = cond[key]
+                if isinstance(val, list) and not val: 
+                    continue
+                if not pred(val):
+                    return None
+        # build op
+        if "insert_before_hole" in op and isinstance(op["insert_before_hole"], str):
+            return ("insert_before_hole", InsertBeforeHole(op["insert_before_hole"].strip()))
+        if "replace_in_snippet" in op and isinstance(op["replace_in_snippet"], dict):
+            fnd = (op["replace_in_snippet"].get("find") or "").strip()
+            rep = (op["replace_in_snippet"].get("replace") or "").strip()
+            if fnd and rep:
+                return ("replace_in_snippet", ReplaceInSnippet(fnd, rep))
+        if "insert_have_block" in op and isinstance(op["insert_have_block"], dict):
+            v = op["insert_have_block"]; lab=v.get("label","H"); stmt=v.get("statement",""); aft=v.get("after_line_matching","then show ?thesis"); hint=v.get("body_hint","apply simp")
+            if stmt.strip() and aft.strip():
+                return ("insert_have_block", InsertHaveBlock(lab.strip(), stmt.strip(), aft.strip(), hint.strip()))
+        return None
+    out: List[RepairOp] = []
+    for r in rules if isinstance(rules, list) else []:
+        rop = _match(r)
+        if rop: out.append(rop)
+        if len(out) >= 3:
+            break
+    return out
 
 # ========== Region Analysis ==========
 def _enclosing_case_block(lines: List[str], hole_line: int) -> Tuple[int, int]:
@@ -605,7 +664,7 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     
     ops = _parse_repair_ops(raw)
     if not ops:
-        ops = _heuristic_fallback_ops(goal_text, state0, header, facts)
+        ops = propose_rule_based_repairs(goal_text, state0, header, facts)
     
     for kind, payload in ops[:max_ops_to_try]:
         if left() <= 0:
