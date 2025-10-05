@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple, Set, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 import requests
 from typing import Callable
-from planner.repair_inputs import _find_first_hole, _hole_line_bounds, _APPLY_OR_BY, _snippet_window, _clamp_line_index, _quick_state_and_errors, _extract_error_lines, _run_theory_with_timeout, _run_nitpick_at_line, _print_state_before_hole, _nearest_header, _recent_steps, _normalize_error_texts, _facts_from_state, _counterexample_hints_precise, _earliest_failure_anchor
+from planner.repair_inputs import _find_first_hole, _hole_line_bounds, _APPLY_OR_BY, _snippet_window, _clamp_line_index, _quick_state_and_errors, _extract_error_lines, _run_theory_with_timeout, _print_state_before_hole, _nearest_header, _recent_steps, _normalize_error_texts, _facts_from_state, get_counterexample_hints_for_repair, _earliest_failure_anchor
 from planner.prompts import _REPAIR_SYSTEM, _REPAIR_USER, _BLOCK_SYSTEM, _BLOCK_USER
 from prover.config import MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S, OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
@@ -544,15 +544,15 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
         # --- Diagnostics before modifying the block ---
         # Run Quickcheck/Nitpick on the exact failing tactic line, so we capture
         # a counterexample on the subgoal that is about to fail.
-        try:
-            diag_txt = _run_nitpick_at_line(
-                isabelle, session, full_text_lines,
-                inject_before_1based=start_line + cand
-            )
-            if diag_txt:
-                _log("repair", "nitpick (pre-sorry)", diag_txt, trace=trace)
-        except Exception:
-            pass
+        # try:
+        #     diag_txt = _run_nitpick_at_line(
+        #         isabelle, session, full_text_lines,
+        #         inject_before_1based=start_line + cand
+        #     )
+        #     if diag_txt:
+        #         _log("repair", "nitpick (pre-sorry)", diag_txt, trace=trace)
+        # except Exception:
+        #     pass
 
         indent = block_lines[cand][:len(block_lines[cand]) - len(block_lines[cand].lstrip())]
         if block_lines[cand].lstrip().startswith("apply"):
@@ -583,8 +583,8 @@ def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     header = _nearest_header(lines, hole_line)
     rsteps = _recent_steps(lines, hole_line)
     facts = _facts_from_state(state0, limit=8)
-    ce = _counterexample_hints_precise(isabelle, session, full_text, hole_span)
-    if ce.get("def_hints"):
+    ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
+    if isinstance(ce, dict) and ce.get("def_hints"):
         facts = list(dict.fromkeys(ce["def_hints"] + facts))[:12]
     
     mem = _RepairMemory()
@@ -716,13 +716,13 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
                  block_type: str, stage: int, *, prior_store: Optional[Dict[str, List[str]]] = None) -> str:
     _, errs = _quick_state_and_errors(isabelle, session, current_text)
     err_texts = _normalize_error_texts(errs)
-    ce = _counterexample_hints_precise(isabelle, session, current_text, (0, 0))
+    ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
     block = "\n".join(lines[start:end])
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
     # Log what we send to the LLM for transparency
     _log("repair", "errors (LLM input)", "\n".join(err_texts) or "(none)", trace=trace)
-    _log("repair", "counterexamples (LLM input)", "\n".join(ce.get("bindings", []) + ce.get("def_hints", [])) or "(none)", trace=trace)    
-    
+    ce_list = ce.get("bindings", []) + ce.get("def_hints", []) if isinstance(ce, dict) else []  
+    _log("repair", "counterexamples (LLM input)", "\n".join(ce_list) or "(none)", trace=trace)
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
 

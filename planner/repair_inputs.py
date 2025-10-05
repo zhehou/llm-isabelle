@@ -35,27 +35,6 @@ def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_
                     pass
             raise TimeoutError("isabelle_run_timeout")
 
-def _earliest_failing_anchor_or_hole(isabelle, session: str, full_text: str, hole_span):
-    try:
-        line_idx, err_excerpt = _earliest_failure_anchor(isabelle, session, full_text,
-                                                         default_line_0=full_text.count("\n"))
-        if isinstance(line_idx, int) and line_idx >= 0:
-            return ("line", line_idx, err_excerpt)
-    except Exception:
-        pass
-    return ("hole", hole_span, "")
-
-def _counterexample_hints_precise(isabelle, session: str, full_text: str, hole_span):
-    kind, at, _ = _earliest_failing_anchor_or_hole(isabelle, session, full_text, hole_span)
-    if kind == "line":
-        lines = full_text.splitlines()
-        nit = _run_nitpick_at_line(isabelle, session, lines,
-                                   inject_before_1based=at + 1,
-                                   qc_timeout_s=3, nitpick_timeout_s=5)
-    else:
-        nit = _run_nitpick_at_hole(isabelle, session, full_text, hole_span, timeout_s=3)
-    return _nitpick_state_hints_from_text(nit)
-
 def _earliest_failure_anchor(isabelle, session: str, full_text: str, *, default_line_0: int) -> Tuple[int, str]:
     try:
         lines = full_text.splitlines()
@@ -89,46 +68,11 @@ def _nearest_structural_head_before(lines: List[str], idx: int) -> int:
             return j
     return i
 
-def _run_nitpick_at_line(
-    isabelle,
-    session: str,
-    full_text_lines: List[str],
-    inject_before_1based: int,
-    qc_timeout_s: int = 3,
-    nitpick_timeout_s: int = 5,
-) -> str:
-    """
-    Build a transient doc variant that inserts Quickcheck/Nitpick *before* the
-    earliest failing tactic line, so diagnostics run on the exact subgoal that
-    was about to fail. Returns concatenated Isabelle response text.
-    """
-    i0 = max(0, inject_before_1based - 1)
-    pad = ""
-    if 0 <= i0 < len(full_text_lines):
-        ln = full_text_lines[i0]
-        pad = ln[: len(ln) - len(ln.lstrip(" "))]
-    injected = [
-        f"{pad}prefer 1",
-        f"{pad}quickcheck[timeout={max(1, qc_timeout_s)}]",
-        f"{pad}nitpick[timeout={max(1, nitpick_timeout_s)}]",
-    ]
-    variant = "\n".join(full_text_lines[:i0] + injected + full_text_lines[i0:])
-    try:
-        thy = build_theory(variant.splitlines(), add_print_state=True, end_with=None)
-        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=max(3, qc_timeout_s + nitpick_timeout_s + 2))
-        return "\n".join(
-            getattr(r, "response_body", b"").decode(errors="replace")
-            if isinstance(getattr(r, "response_body", None), (bytes, bytearray))
-            else str(getattr(r, "response_body", ""))
-            for r in resps or []
-        )
-    except Exception:
-        return ""
-    
 # ========== Isabelle Interaction ==========
+
 def _extract_print_state_from_responses(resps: List) -> str:
     standard = last_print_state_block(resps) or ""
-    llm_lines = []
+    llm_lines: List[str] = []
     for resp in (resps or []):
         if str(getattr(resp, "response_type", "")).upper() != "FINISHED":
             continue
@@ -159,7 +103,7 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
         thy = build_theory(full_text.splitlines(), add_print_state=True, end_with=None)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state = _extract_print_state_from_responses(resps)
-        errors = []
+        errors: List[dict] = []
         
         for r in resps or []:
             raw = getattr(r, "response_body", None)
@@ -174,7 +118,7 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
                         for msg in node.get("messages", []):
                             if str(msg.get("kind", "")).lower() == "error":
                                 txt = str(msg.get("message", "") or "").strip()
-                                if txt:  # Only add non-empty errors
+                                if txt:
                                     errors.append({"text": txt, "line": msg.get("line")})
             except (json.JSONDecodeError, TypeError, AttributeError):
                 pass
@@ -183,7 +127,6 @@ def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str
             if isinstance(raw, str):
                 for pattern in ["*** Error:", "*** Outer syntax error", "*** Failed"]:
                     if pattern in raw:
-                        # Extract the actual error message
                         for line in raw.split('\n'):
                             if pattern in line:
                                 errors.append({"text": line.strip()})
@@ -221,58 +164,290 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
         return ""
 
 # ========== Counterexample Hints ==========
-def _run_nitpick_at_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], timeout_s: int = 3) -> str:
-    hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
-    if not (0 <= hole_line < len(lines) and "sorry" in lines[hole_line]):
-        nearest = _find_first_hole(lines)
-        if nearest is not None:
-            hole_line = nearest
-            indent = len(lines[hole_line]) - len(lines[hole_line].lstrip(" "))
-    pad = " " * max(2, indent)
-    injected = [f"{pad}prefer 1", f"{pad}nitpick [timeout={max(1, timeout_s)}]", f"{pad}(* REPAIR-NITPICK *)"]
-    variant_lines = lines[:hole_line] + injected + lines[hole_line:]
-    variant = "\n".join(variant_lines) + ("\n" if full_text.endswith("\n") else "")
-    try:
-        thy = build_theory(variant.splitlines(), add_print_state=True, end_with=None)
-        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=max(3, timeout_s + 2))
-        return "\n".join(getattr(r, "response_body", b"").decode(errors="replace") if isinstance(getattr(r, "response_body", None), bytes) else str(getattr(r, "response_body", "")) for r in resps or [])
-    except Exception:
+
+def _normalize_isabelle_symbols(s: str) -> str:
+    """Make Isabelle symbols friendlier in short snippets (e.g., a\<^sub>1 → a_1)."""
+    if not s:
+        return s
+    # subscripts: x\<^sub>12 → x_12
+    s = re.sub(r"\\<\^sub>(\d+)", lambda m: "_" + m.group(1), s)
+    # superscripts: x\<^sup>2 → x^2
+    s = re.sub(r"\\<\^sup>(\d+)", lambda m: "^" + m.group(1), s)
+    # collapse extra spaces
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def _extract_nitpick_text_from_responses(resps_text: str) -> str:
+    """Extract Nitpick/Quickcheck output from mixed JSON/plain-text logs."""
+    if not resps_text:
         return ""
+    messages: List[str] = []
+    for line in resps_text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("{"):
+            try:
+                data = json.loads(s)
+                if isinstance(data, dict):
+                    msg = data.get("message")
+                    if isinstance(msg, str) and msg.strip():
+                        messages.append(msg)
+                    for node in data.get("nodes", []):
+                        for m in node.get("messages", []):
+                            if isinstance(m, dict):
+                                t = m.get("message", "")
+                                if isinstance(t, str) and t:
+                                    messages.append(t)
+                    for err in data.get("errors", []):
+                        if isinstance(err, dict):
+                            t = err.get("message", "")
+                            if isinstance(t, str) and t:
+                                messages.append(t)
+                continue
+            except json.JSONDecodeError:
+                pass
+        # plain text fallback
+        messages.append(s)
+    return "\n".join(messages)
+
+# --- helpers for parsing bindings ---
+_BINDING_RE = re.compile(
+    # var = value (value may include type annotation :: ...; stop before comma/semicolon/paren or EOL)
+    r"\b([A-Za-z][A-Za-z0-9_']*)\s*=\s*([^,;\)\n]+)")
+_TRAIL_PUNCT_RE = re.compile(r"[:\s]+$")
+
+_CEX_MARKERS = (
+    "nitpick found a counterexample",
+    "nitpick found a potential counterexample",
+    "quickcheck found a counterexample",
+    "quickcheck found a potential counterexample",
+    # extra robustness
+    "counterexample:",
+    "counterexample found",
+    "falsified",
+)
 
 def _nitpick_state_hints_from_text(text: str) -> Dict[str, List[str]]:
+    """Extract counterexample info; stitch multi-line values; normalize symbols."""
+    import sys
     if not text:
         return {"bindings": [], "def_hints": []}
-    
-    t_lower = text.lower()
-    has_cex = any(marker in t_lower for marker in [
-        "nitpick found a counterexample",
-        "nitpick found a potential counterexample",
-        "quickcheck found a counterexample",
-        "model found"
-    ])
-    
+
+    extracted_text = _extract_nitpick_text_from_responses(text) or text
+    t_lower = extracted_text.lower()
+    has_cex = any(m in t_lower for m in _CEX_MARKERS)
     if not has_cex:
         return {"bindings": [], "def_hints": []}
+
+    #print("[DEBUG] Found counterexample in output", file=sys.stderr)
+
+    # Prefer the region starting at the first marker
+    start_idx = min((t_lower.find(m) for m in _CEX_MARKERS if m in t_lower), default=-1)
+    scan_region = extracted_text[start_idx:] if start_idx >= 0 else extracted_text
+
+    lines = scan_region.split("\n")
+    bindings: List[str] = []
+    seen_vars: Set[str] = set()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        m = _BINDING_RE.search(line)
+        if not m:
+            i += 1
+            continue
+        var, head = m.groups()
+        val = head
+
+        # stitch continuation if we started a composite value
+        opener = val.lstrip()[:1]
+        closer = {"[": "]", "(": ")", "{": "}"} .get(opener)
+        if closer and closer not in val:
+            j = i + 1
+            while j < len(lines) and not re.match(r"^\s*\w+\s*=\s*", lines[j]):
+                piece = lines[j].strip()
+                if piece:
+                    val += " " + piece
+                if closer in lines[j]:
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            i += 1
+
+        val = _TRAIL_PUNCT_RE.sub('', val.strip())
+        var_n = _normalize_isabelle_symbols(var)
+        val_n = _normalize_isabelle_symbols(val)
+        if var_n not in {"line", "offset", "file", "kind", "message"} and var_n not in seen_vars:
+            seen_vars.add(var_n)
+            bindings.append(f"{var_n} = {val_n}")
+        if len(bindings) >= 8:
+            break
+
+    # Fallback: scan whole text if nothing found
+    if not bindings:
+        for m in re.finditer(r"\b([A-Za-z][A-Za-z0-9_']*)\s*=\s*(.+)", extracted_text):
+            var, val = m.groups()
+            var_n = _normalize_isabelle_symbols(var)
+            val_n = _normalize_isabelle_symbols(_TRAIL_PUNCT_RE.sub('', val.strip()))
+            if var_n not in seen_vars:
+                seen_vars.add(var_n)
+                bindings.append(f"{var_n} = {val_n}")
+            if len(bindings) >= 8:
+                break
+
+    # *_def unfolding hints
+    defs: List[str] = []
+    seen_defs: Set[str] = set()
+    for match in re.finditer(r"\b([A-Za-z_]\w*'*)_def\b", extracted_text):
+        name = match.group(1)
+        if name not in seen_defs:
+            seen_defs.add(name)
+            defs.append(name)
+            if len(defs) >= 12:
+                break
+    def_hints = [f"unfolding {d}_def" for d in defs]
+
+    result = {"bindings": bindings[:8], "def_hints": def_hints[:12]}
+    #print(f"[DEBUG] Extracted counterexample hints: {result}", file=sys.stderr)
+    return result
+
+# --- state parsing ---
+
+def _parse_goal_from_state(state_block: str) -> Optional[str]:
+    """Extract the primary goal from a state block."""
+    if not state_block:
+        return None
+    goal_match = re.search(r'goal\s*\([^)]+\):\s*\d+\.\s*(.+?)(?:\n\s*\d+\.|$)', state_block, re.DOTALL)
+    if goal_match:
+        goal = goal_match.group(1).strip()
+        goal = re.sub(r'\s+', ' ', goal)
+        return goal
+    return None
+
+def _parse_assumptions_from_state(state_block: str) -> List[str]:
+    """Extract assumptions from "using this:" section of state block."""
+    if not state_block:
+        return []
+    using_match = re.search(r'using this:\s*(.+?)(?=goal|\Z)', state_block, re.DOTALL)
+    if not using_match:
+        return []
+    assumptions: List[str] = []
+    for line in using_match.group(1).split('\n'):
+        line = line.strip()
+        if line and not line.startswith(('goal', 'proof')):
+            assumptions.append(line)
+    return assumptions[:5]
+
+def _strip_all_forall_prefixes(prop: str) -> str:
+    """Remove leading ⋀x y z. / \<And>x y. prefixes (possibly many)."""
+    if not prop:
+        return prop
+    # Match one or more names (incl. type/commas) up to the first dot after a ⋀/\<And>
+    q = re.compile(r'^(?:\\<And>|⋀)\s*[^.]*\.\s*')
+    while True:
+        m = q.match(prop)
+        if not m:
+            break
+        prop = prop[m.end():]
+    return prop
+
+
+def _counterexample_hints_from_state(
+    isabelle, 
+    session: str, 
+    state_block: str,
+    timeout_s: int = 10
+) -> Dict[str, List[str]]:
+    """
+    Extract counterexample hints by recreating the failing goal in a clean context.
+    """
+    import sys
     
-    # Extract bindings more carefully
-    bindings = []
-    for line in text.split('\n'):
-        # Match "var = value" patterns
-        match = re.match(r'\s*([a-z][A-Za-z0-9_\']*)\s*=\s*(.+)', line)
-        if match:
-            var, val = match.groups()
-            # Clean up value (remove trailing punctuation/whitespace)
-            val = re.sub(r'[,;.\s]+$', '', val.strip())
-            if val:
-                bindings.append(f"{var} = {val}")
+    goal = _parse_goal_from_state(state_block)
+    if not goal:
+        #print("[DEBUG] Could not extract goal from state block", file=sys.stderr)
+        return {"bindings": [], "def_hints": []}
     
-    # Extract definition names
-    defs = list(dict.fromkeys(re.findall(r"\b([A-Za-z_]\w*'*)_def\b", text)))
-    def_hints = [f"unfolding {d}_def" for d in defs]  # Use more specific syntax
+    #print(f"[DEBUG] Extracted goal: {goal[:100]}...", file=sys.stderr)
     
-    return {"bindings": bindings[:8], "def_hints": def_hints[:12]}
+    assumptions = _parse_assumptions_from_state(state_block)
+    
+    assumes_clause = ""
+    if assumptions:
+        clean_assumptions = []
+        for i, assum in enumerate(assumptions):
+            assum = re.sub(r'^\s*\d+\.\s*', '', assum).strip()
+            if assum:
+                clean_assumptions.append(f'A{i}: "{assum}"')
+        if clean_assumptions:
+            assumes_clause = f"assumes {' and '.join(clean_assumptions)}\n  "
+    
+    clean_goal = _strip_all_forall_prefixes(goal)
+    
+    test_theory = f"""
+theory CounterexampleTest
+imports Main Nitpick
+begin
+
+lemma counterexample_test:
+  {assumes_clause}shows "{clean_goal}"
+  quickcheck[timeout={max(1, timeout_s//3)}]
+  nitpick[timeout={max(1, timeout_s)}, verbose, show_all]
+  oops
+
+end
+"""
+    
+    #print(f"[DEBUG] Testing with simplified theory", file=sys.stderr)
+    
+    try:
+        thy = build_theory(test_theory.splitlines(), add_print_state=False, end_with=None)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=timeout_s + 5)
+        
+        full_output: List[str] = []
+        for r in resps or []:
+            body = getattr(r, "response_body", None)
+            if isinstance(body, (bytes, bytearray)):
+                body = body.decode(errors="replace")
+            elif body is None:
+                continue
+            full_output.append(str(body))
+        
+        result = "\n".join(full_output)
+        #print(f"[DEBUG] Counterexample check output: {len(result)} chars", file=sys.stderr)
+        
+        hints = _nitpick_state_hints_from_text(result)
+        return hints
+        
+    except Exception as e:
+        #print(f"[DEBUG] Counterexample check failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return {"bindings": [], "def_hints": []}
+
+
+def get_counterexample_hints_for_repair(
+    isabelle,
+    session: str,
+    state_block: str,
+    full_text: str = None,
+    hole_span: Tuple[int, int] = None,
+    timeout_s: int = 10
+) -> Dict[str, List[str]]:
+    """
+    Main entry point for getting counterexample hints during repair.
+    Returns dict with 'bindings' and 'def_hints' keys.
+    """
+    return _counterexample_hints_from_state(
+        isabelle, 
+        session, 
+        state_block,
+        timeout_s=timeout_s
+    )
 
 # ========== Context Analysis ==========
+
 def _hole_line_bounds(full_text: str, hole_span: Tuple[int, int]) -> Tuple[int, int, List[str]]:
     lines = full_text.splitlines()
     hole_line = full_text[:hole_span[0]].count("\n")
@@ -292,7 +467,8 @@ def _snippet_window(lines: List[str], hole_line: int, radius: int = 12) -> Tuple
 def _facts_from_state(state_block: str, limit: int = 16) -> List[str]:
     if not state_block:
         return []
-    facts, seen = [], set()
+    facts: List[str] = []
+    seen: Set[str] = set()
     # Priority 1: propositions under "using this:"
     m = re.search(r"using this:\n((?:[ \t].*\n)+)", state_block)
     if m:
@@ -327,7 +503,7 @@ def _nearest_header(lines: List[str], hole_line: int) -> str:
     return ""
 
 def _recent_steps(lines: List[str], hole_line: int, max_lines: int = 5) -> List[str]:
-    steps = []
+    steps: List[str] = []
     for i in range(hole_line - 1, -1, -1):
         if _APPLY_OR_BY.match(lines[i]):
             steps.append(lines[i].strip())
@@ -338,7 +514,7 @@ def _recent_steps(lines: List[str], hole_line: int, max_lines: int = 5) -> List[
     return list(reversed(steps))
 
 def _extract_error_lines(errs) -> list[int]:
-    out = []
+    out: List[int] = []
     for e in errs:
         ln = e.get("line") if isinstance(e, dict) else getattr(e, "line", None)
         if isinstance(ln, int):
@@ -346,4 +522,6 @@ def _extract_error_lines(errs) -> list[int]:
     return out
 
 def _normalize_error_texts(errs) -> List[str]:
-    return [str(e.get("text", "") if isinstance(e, dict) else e).strip() for e in (errs or []) if str(e.get("text", "") if isinstance(e, dict) else e).strip()][:8]
+    return [str(e.get("text", "") if isinstance(e, dict) else e).strip() 
+            for e in (errs or []) 
+            if str(e.get("text", "") if isinstance(e, dict) else e).strip()][:8]

@@ -39,7 +39,7 @@ SUBGOALS_PATTERNS = (
 #     return None
 
 def parse_subgoals(block: str) -> Optional[int]:
-    print(f"DEBUG: Parsing block: {repr(block[:200])}")  # First 200 chars
+    #print(f"DEBUG: Parsing block: {repr(block[:200])}")  # First 200 chars
     if not block:
         return None
     
