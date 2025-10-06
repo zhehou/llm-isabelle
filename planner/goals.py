@@ -57,8 +57,6 @@ def _cleanup_resources(isa, proc) -> None:
 # === Utilities =================================================================
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_SCHEM = re.compile(r"\?([a-z][A-Za-z0-9_']*)")
-_IDENT = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b")
 
 
 def _strip(txt: str) -> str:
@@ -66,7 +64,14 @@ def _strip(txt: str) -> str:
 
 
 def _looks_truncated(txt: str) -> bool:
-    return bool(txt and ("…" in txt or " ..." in txt or any(re.search(r"\\<[^>]*$", l.strip()) for l in txt.splitlines())))
+    return bool(
+        txt
+        and (
+            "…" in txt
+            or " ..." in txt
+            or any(re.search(r"\\<[^>]*$", l.strip()) for l in txt.splitlines())
+        )
+    )
 
 
 def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
@@ -77,7 +82,7 @@ def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
     print(b if b.strip() else "  (empty or whitespace only)")
 
 
-# === Goal extraction ===========================================================
+# === Goal extraction (Isabelle-markers only; no heuristics) ====================
 
 def _extract_goal_from_lemma_line(lemma_line: str) -> str:
     q1, q2 = lemma_line.find('"'), lemma_line.rfind('"')
@@ -90,73 +95,20 @@ def _first_lemma_line(full_text: str) -> str:
     return next((ln for ln in (full_text or "").splitlines() if ln.strip().startswith("lemma ")), "")
 
 
-def _extract_subgoal(lines: List[str], m_llm) -> Optional[str]:
-    if m_llm:
-        return m_llm.group(1).strip()
-    for i, ln in enumerate(lines):
-        m = re.match(r"\s*\d+\.\s*(\S.*)$", ln)
-        if not m:
-            continue
-        parts = [m.group(1).strip()]
-        j = i + 1
-        while j < len(lines):
-            lj = lines[j]
-            if re.match(r"\s*\d+\.\s", lj) or lj.lstrip().startswith(("goal", "using this:")):
-                break
-            if lj.startswith(" "):
-                parts.append(lj.strip()); j += 1; continue
-            break
-        sub = re.sub(r"\s+", " ", " ".join(parts)).strip()
-        return re.sub(r"\\<[^>]*$", "", sub.replace("…", "")).rstrip()
+def _extract_subgoal_from_markers(clean_state: str) -> Optional[str]:
+    """Return subgoal text strictly from Isabelle writeln markers.
+    Prefers RAW (internal names) then pretty form. No textual parsing fallbacks.
+    """
+    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean_state, flags=re.M)
+    if m:
+        return m.group(1).strip()
+    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean_state, flags=re.M)
+    if m:
+        return m.group(1).strip()
     return None
 
 
-# === Using facts parsing =======================================================
-
-def _extract_using_facts(lines: List[str]) -> List[str]:
-    for i, ln in enumerate(lines):
-        if ln.strip() != "using this:":
-            continue
-        raw, i = [], i + 1
-        while i < len(lines):
-            s = lines[i].strip()
-            if not s or s.startswith("goal") or s.startswith("using this:"):
-                break
-            raw.append(lines[i]); i += 1
-        return _process_using_block(raw)
-    return []
-
-
-def _process_using_block(raw_block: List[str]) -> List[str]:
-    if not raw_block:
-        return []
-    INFIX_TAIL = re.compile(r"(=|⟹|⇒|->|→|<->|↔|⟷|∧|∨|@|::|≤|≥|≠|,)\s*$")
-
-    def lead(s: str) -> int: return len(s) - len(s.lstrip(" "))
-    def bal(s: str) -> int: return s.count("(") + s.count("[") + s.count("{") - s.count(")") - s.count("]") - s.count("}")
-
-    items, cur, head_indent, paren, infix = [], [], 0, 0, False
-
-    def flush():
-        nonlocal cur
-        if cur:
-            txt = re.sub(r"\s+", " ", " ".join(x.strip() for x in cur)).strip()
-            txt = re.sub(r"\\<[^>]*$", "", txt.replace("…", "")).rstrip()
-            if txt:
-                items.append(txt)
-        cur = []
-
-    for r in raw_block:
-        ind, delta, has_infix = lead(r), bal(r), bool(INFIX_TAIL.search(r))
-        if not cur:
-            cur = [r.strip()]; head_indent, paren, infix = ind, delta, has_infix; continue
-        if ind > head_indent or paren > 0 or infix:
-            cur.append(r.strip()); paren += delta; infix = has_infix; continue
-        flush(); cur = [r.strip()]; head_indent, paren, infix = ind, delta, has_infix
-    flush(); return items
-
-
-# === Variable information ======================================================
+# === Variable information (Isabelle-markers only; no heuristics) ===============
 
 def _extract_fixes(state_block: str) -> List[str]:
     m = re.search(r"^\[LLM_FIXES\]\s+(.*)$", state_block, flags=re.M)
@@ -166,76 +118,78 @@ def _extract_fixes(state_block: str) -> List[str]:
 
 
 def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List[str]]:
-    """Parse "[LLM_VARS] params: ... | frees: ... | schematics: ...".
-    Falls back to lightweight heuristics if the marker is absent.
+    """Parse "[LLM_VARS] params: ... | frees: ... | schematics: ..." strictly.
+    If missing, return empty lists (we do NOT guess heuristically).
     """
     if not state_block:
         return [], [], []
-
-    # Preferred: explicit ML markers
     m = re.search(rf"^{re.escape(_LLM_VARS_MARK)}\s+(.*)$", state_block, flags=re.M)
-    if m:
-        line = m.group(1)
-        get = lambda k: (re.search(k + r"\s*([^|]*)", line) or [None, ""]) [1].strip().split()
-        params, frees, schems = get("params:"), get("frees:"), get("schematics:")
-        fixes = _extract_fixes(state_block)
-        if fixes:
-            seen, merged = set(), []
-            for v in fixes + frees:
-                if v and v not in seen:
-                    seen.add(v); merged.append(v)
-            frees = merged
-        return params, frees, schems
+    if not m:
+        return [], [], []
 
-    # Heuristic fallback (no ML markers): infer from "using this:" and the first subgoal
-    clean = _strip(state_block)
-    lines = clean.splitlines()
-    sub = _extract_subgoal(lines, None) or ""
-    using = set(_IDENT.findall("\n".join(_extract_using_facts(lines))))
-    ids = set(_IDENT.findall(sub))
-    for kw in {"in","if","then","else","let","case","of","where","and","or","not","set","True","False","Nil","Cons"}:
-        using.discard(kw); ids.discard(kw)
-    schems = list(set(_SCHEM.findall(sub)))
-    frees = list(using & ids)
-    params = list(ids - using - set(schems))
+    line = m.group(1)
+    def get(tag: str) -> List[str]:
+        mm = re.search(tag + r"\s*([^|]*)", line)
+        return (mm.group(1).strip().split() if mm else [])
+
+    params, frees, schems = get("params:"), get("frees:"), get("schematics:")
+
+    # Merge in fixes (Isabelle context) without duplication; still Isabelle-provided
+    fixes = _extract_fixes(state_block)
+    if fixes:
+        seen, merged = set(), []
+        for v in fixes + frees:
+            if v and v not in seen:
+                seen.add(v)
+                merged.append(v)
+        frees = merged
     return params, frees, schems
 
 
 # === Building the effective goal ==============================================
 
-def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: str = "", 
-                               hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+def _effective_goal_from_state(
+    state_block: str,
+    fallback_goal: str,
+    full_text: str = "",
+    hole_span: Tuple[int, int] = (0, 0),
+    trace: bool = False,
+) -> str:
+    """Build an effective goal using ONLY Isabelle-provided markers.
+    - Subgoal comes from [LLM_SUBGOAL_RAW]/[LLM_SUBGOAL].
+    - Bound / free / schematic vars come from [LLM_VARS] (and [LLM_FIXES]).
+    - We do NOT parse numbered goals or "using this:" lines heuristically.
+    """
     if not state_block or not state_block.strip():
         return fallback_goal
 
     clean = _strip(state_block)
-    # Prefer RAW (internal names), then pretty-print variant
-    m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean, flags=re.M) or \
-            re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
-
-    lines = clean.splitlines()
-    using_facts = _extract_using_facts(lines)
-    subgoal = _extract_subgoal(lines, m_llm)
+    subgoal = _extract_subgoal_from_markers(clean)
     if not subgoal:
         return fallback_goal
 
     params, frees, schems = _extract_variable_info(state_block)
+
     if trace:
         print("\n" + "=" * 60)
         print(f"DEBUG params={params}, frees={frees}, schematics={schems}")
         print(f"DEBUG subgoal= {subgoal}")
 
-    # (optionally) insert explicit binders if Isabelle provided params
+    # Insert explicit binders if Isabelle provided params and subgoal is not already bound
     core = f"⋀{' '.join(params)}. {subgoal}" if params and not subgoal.strip().startswith("⋀") else subgoal
-    facts = [f"({f.strip()})" for f in using_facts] if using_facts else []
-    result = " ⟹ ".join(facts + [f"({core})"]) if facts else f"({core})"
+
+    # No heuristic 'using facts' insertion: keep the core goal only
+    result = f"({core})"
 
     # Attach a compact variable summary for downstream prompts
     if params or frees or schems:
         parts = []
-        if params: parts.append("BOUND:" + ",".join(params))
-        if frees: parts.append("FREE:" + ",".join(frees))
-        if schems: parts.append("SCHEM:" + ",".join(schems))
+        if params:
+            parts.append("BOUND:" + ",".join(params))
+        if frees:
+            parts.append("FREE:" + ",".join(frees))
+        if schems:
+            parts.append("SCHEM:" + ",".join(schems))
         result = f"{result}\n[VAR_TYPES: {' | '.join(parts)}]"
 
     if trace:
@@ -248,17 +202,27 @@ def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: 
 def _annotate_goal_with_var_types(goal: str, params: set, frees: set, schematics: set) -> str:
     if not (params or frees or schematics):
         return goal
+
     def repl(m):
         v = m.group(1)
-        if v in params: return f"[BOUND:{v}]"
-        if v in frees: return f"[FREE:{v}]"
-        if (v in schematics) or (f"?{v}" in schematics): return f"[SCHEM:{v}]"
+        if v in params:
+            return f"[BOUND:{v}]"
+        if v in frees:
+            return f"[FREE:{v}]"
+        if (v in schematics) or (f"?{v}" in schematics):
+            return f"[SCHEM:{v}]"
         return v
+
     return re.sub(r"\b([a-z][A-Za-z0-9_']*)\b", repl, goal)
 
 
-def _effective_goal_from_state_with_types(state_block: str, fallback_goal: str, full_text: str = "", 
-                                          hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+def _effective_goal_from_state_with_types(
+    state_block: str,
+    fallback_goal: str,
+    full_text: str = "",
+    hole_span: Tuple[int, int] = (0, 0),
+    trace: bool = False,
+) -> str:
     goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
     params, frees, schems = _extract_variable_info(state_block)
     return _annotate_goal_with_var_types(goal, set(params), set(frees), set(schems))
@@ -268,14 +232,22 @@ def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: s
     if not (params or frees or schematics):
         return goal
     meta = []
-    if params: meta.append(f"- Bound (∀-quantified): {', '.join(sorted(params))}")
-    if frees: meta.append(f"- Free (from context): {', '.join(sorted(frees))}")
-    if schematics: meta.append(f"- Schematic (unification vars): {', '.join(sorted(schematics))}")
+    if params:
+        meta.append(f"- Bound (∀-quantified): {', '.join(sorted(params))}")
+    if frees:
+        meta.append(f"- Free (from context): {', '.join(sorted(frees))}")
+    if schematics:
+        meta.append(f"- Schematic (unification vars): {', '.join(sorted(schematics))}")
     return f"{goal}\n\nVariable types:\n" + "\n".join(meta)
 
 
-def _effective_goal_from_state_alt(state_block: str, fallback_goal: str, full_text: str = "", 
-                                   hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+def _effective_goal_from_state_alt(
+    state_block: str,
+    fallback_goal: str,
+    full_text: str = "",
+    hole_span: Tuple[int, int] = (0, 0),
+    trace: bool = False,
+) -> str:
     params, frees, schems = _extract_variable_info(state_block)
     goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
     return _format_goal_with_metadata(goal, set(params), set(frees), set(schems))
@@ -416,8 +388,13 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
 
 # --- Legacy helpers retained (lightweight wrappers / no-ops) ------------------
 
-def _original_goal_from_state(state_block: str, fallback_goal: Optional[str] = None, full_text: str = "", 
-                               hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+def _original_goal_from_state(
+    state_block: str,
+    fallback_goal: Optional[str] = None,
+    full_text: str = "",
+    hole_span: Tuple[int, int] = (0, 0),
+    trace: bool = False,
+) -> str:
     """Legacy alias for compatibility with older driver imports.
     Accepts the old single-argument call form. If fallback_goal is omitted,
     default to an empty string.
