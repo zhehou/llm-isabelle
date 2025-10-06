@@ -196,38 +196,6 @@ def _effective_goal_from_state(
         print(f"DEBUG final goal: {result[:150]}…\n" + "=" * 60 + "\n")
     return result
 
-
-# Convenience variants kept for backwards compatibility ------------------------
-
-def _annotate_goal_with_var_types(goal: str, params: set, frees: set, schematics: set) -> str:
-    if not (params or frees or schematics):
-        return goal
-
-    def repl(m):
-        v = m.group(1)
-        if v in params:
-            return f"[BOUND:{v}]"
-        if v in frees:
-            return f"[FREE:{v}]"
-        if (v in schematics) or (f"?{v}" in schematics):
-            return f"[SCHEM:{v}]"
-        return v
-
-    return re.sub(r"\b([a-z][A-Za-z0-9_']*)\b", repl, goal)
-
-
-def _effective_goal_from_state_with_types(
-    state_block: str,
-    fallback_goal: str,
-    full_text: str = "",
-    hole_span: Tuple[int, int] = (0, 0),
-    trace: bool = False,
-) -> str:
-    goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
-    params, frees, schems = _extract_variable_info(state_block)
-    return _annotate_goal_with_var_types(goal, set(params), set(frees), set(schems))
-
-
 def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set) -> str:
     if not (params or frees or schematics):
         return goal
@@ -402,14 +370,3 @@ def _original_goal_from_state(
     if fallback_goal is None:
         fallback_goal = ""
     return _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
-
-
-
-def _inject_ml_in_proof(proof_lines: List[str]) -> List[str]:
-    """Legacy alias: previous variant attempted extra ML; now identical to _inject_var_extraction."""
-    return _inject_var_extraction(proof_lines)
-
-
-def _print_state_before_hole_with_ml(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
-    """Legacy alias for compatibility; delegates to _print_state_before_hole."""
-    return _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
