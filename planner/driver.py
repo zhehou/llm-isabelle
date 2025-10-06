@@ -17,7 +17,7 @@ from prover.isabelle_api import (
     build_theory, get_isabelle_client, last_print_state_block, start_isabelle_server,
 )
 from prover.prover import prove_goal
-from planner.goals import _print_state_before_hole, _log_state_block, _original_goal_from_state, _effective_goal_from_state, _first_lemma_line, _extract_goal_from_lemma_line, _cleanup_resources, _verify_full_proof, _run_theory_with_timeout
+from planner.goals import _print_state_before_hole, _log_state_block, _original_goal_from_state, _effective_goal_from_state_alt, _first_lemma_line, _extract_goal_from_lemma_line, _cleanup_resources, _verify_full_proof, _run_theory_with_timeout
 
 def _hole_fingerprint(full_text: str, span: tuple[int, int], context: int = 80) -> str:
     """Stable key for a hole: hash a small window around the 'sorry'."""
@@ -66,7 +66,7 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
     _log_state_block("fill", state_block, trace=trace)
     
     orig_goal = _original_goal_from_state(state_block)
-    eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
+    eff_goal = _effective_goal_from_state_alt(state_block, goal_text, full_text, hole_span, trace)
     
     if trace:
         if orig_goal:
@@ -177,7 +177,7 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
     while i < len(t_spans) and left_s() > 3.0:
         span = t_spans[i]
         st = _print_state_before_hole(isa, session, full, span, trace)
-        eff_goal = _effective_goal_from_state(st, goal_text, full, span, trace)
+        eff_goal = _effective_goal_from_state_alt(st, goal_text, full, span, trace)
         per_budget = min(30.0, max(15.0, left_s() * 0.33))
         
         patched, applied, _ = try_cegis_repairs(
@@ -371,7 +371,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
             # Try CEGIS repairs (possibly starting at an escalated stage)
             if repairs and left_s() > 6:
                 state = _print_state_before_hole(isa, session, full, span, trace)
-                eff_goal = _effective_goal_from_state(state, goal_text, full, span, trace)
+                eff_goal = _effective_goal_from_state_alt(state, goal_text, full, span, trace)
                 
                 patched, applied, _ = try_cegis_repairs(
                     full_text=full, hole_span=span, goal_text=eff_goal, model=model,

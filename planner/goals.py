@@ -8,6 +8,7 @@ from prover.isabelle_api import (
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 
 _LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
+_LLM_SUBGOAL_RAW_MARK = "[LLM_SUBGOAL_RAW]"
 _LLM_VARS_MARK = "[LLM_VARS]"
 _ISA_FAST_TIMEOUT_S = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
 _ISA_VERIFY_TIMEOUT_S = int(os.getenv("ISABELLE_VERIFY_TIMEOUT_S", "30"))
@@ -60,102 +61,41 @@ def _cleanup_resources(isa, proc):
 # Proof State Extraction
 # ============================================================================
 
-def _extract_print_state_from_responses(resps: List) -> str:
-    """Extract print_state output from Isabelle responses."""
-    standard = last_print_state_block(resps) or ""
-    llm_lines = []
+def _inject_ml_in_proof(proof_lines: List[str]) -> List[str]:
+    """Inject ML code to extract variables at the proof point.
     
-    for resp in (resps or []):
-        if str(getattr(resp, "response_type", "")).upper() != "FINISHED":
-            continue
-        
-        body = getattr(resp, "response_body", None)
-        if isinstance(body, bytes):
-            body = body.decode(errors="replace")
-        
-        try:
-            data = json.loads(body) if isinstance(body, str) and body.strip().startswith("{") else body
-            if not isinstance(data, dict):
-                continue
-        except (json.JSONDecodeError, TypeError):
-            continue
-        
-        for node in data.get("nodes", []):
-            for msg in node.get("messages", []) or []:
-                if msg.get("kind") != "writeln":
-                    continue
-                text = msg.get("message", "") or ""
-                if any(mark in text for mark in [_LLM_SUBGOAL_MARK, _LLM_VARS_MARK]) or \
-                   ("goal" in text and "subgoal" in text and not standard):
-                    llm_lines.append(text)
-                    if "goal" in text and "subgoal" in text:
-                        standard = text
+    This adds an ML command right before 'sorry' that will execute
+    in the proof context and extract variable information.
+    """
+    # Find where to inject (right before sorry/qed/done)
+    injection_point = len(proof_lines)
     
-    return (standard + "\n" + "\n".join(llm_lines)) if (llm_lines and standard) else (standard or "\n".join(llm_lines))
-
-
-def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
-    """Capture proof state before hole."""
-    s, _ = hole_span
-    lines = full_text[:s].rstrip().splitlines()
-    lemma_start = next((i for i, line in enumerate(lines) if line.strip().startswith('lemma ')), -1)
-    
-    if lemma_start == -1:
-        return ""
-    
-    proof_lines = lines[lemma_start:]
-    
-    try:
-        prolog = _build_ml_prolog()
-        thy = build_theory(prolog + proof_lines, add_print_state=True, end_with="sorry")
-        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
-        state_block = _extract_print_state_from_responses(resps)
-        
-        if _looks_truncated(state_block):
-            thy2 = build_theory(prolog + proof_lines + ["ML ‹Pretty.setmargin 100000›"], 
-                              add_print_state=True, end_with="sorry")
-            resps2 = _run_theory_with_timeout(isabelle, session, thy2, timeout_s=_ISA_FAST_TIMEOUT_S)
-            state_block2 = _extract_print_state_from_responses(resps2)
-            if state_block2:
-                state_block = state_block2
-        
-        return state_block
-    except Exception:
-        return ""
-
-
-def _build_ml_prolog() -> List[str]:
-    """Build ML prolog for state capture."""
-    return [
-        "declare [[show_question_marks = true]]",
-        "declare [[show_types = false, show_sorts = false]]",
-        "ML ‹",
-        "  Pretty.setmargin 100000;",
-        "  let",
-        "    val st = Toplevel.proof_of @{Isar.state};",
-        "    val th = #goal (Proof.goal st);",
-        "    val sg = Thm.cprem_of th 1;",
-        "    val t = Thm.term_of sg;",
-        "    val ctxt = Proof.context_of st;",
-        "    val frees = Term.add_frees t [] |> map #1;",
-        "    val (params, _) = Logic.strip_params t;",
-        "    val pnames = map (fn ((n,_),_) => n) params;",
-        "    val ctx0 = Name.make_context (frees @ pnames);",
-        "    val (new_names, _) = fold_map Name.variant pnames ctx0;",
-        "    val t' = Logic.list_rename_params new_names t;",
-        "    val s = Syntax.string_of_term ctxt t';",
-        "    val schem_vnames = Term.add_vars t [] |> map #1;",
-        "    fun string_of_vname (x, i) = if i = 0 then \"?\" ^ x else \"?\" ^ x ^ Int.toString i;",
-        "    val s_params = String.concatWith \" \" new_names;",
-        "    val s_frees = String.concatWith \" \" frees;",
-        "    val s_schems = String.concatWith \" \" (map string_of_vname schem_vnames);",
-        "  in",
-        f"    writeln (\"{_LLM_SUBGOAL_MARK} \" ^ s);",
-        f"    writeln (\"{_LLM_VARS_MARK} params: \" ^ s_params ^ \" | frees: \" ^ s_frees ^ \" | schematics: \" ^ s_schems)",
-        "  end",
-        "›",
+    ml_extract = [
+        "  ML_val ‹",
+        "    let",
+        "      val state = Proof.assert_backward (Toplevel.proof_of @{Isar.state});",
+        "      val {context = ctxt, goal = goal_thm, ...} = Proof.goal state;",
+        "      val subgoal = Thm.cprem_of goal_thm 1;",
+        "      val term = Thm.term_of subgoal;",
+        "      val frees = Term.add_frees term [] |> map fst;",
+        "      val (params, _) = Logic.strip_params term;",
+        "      val param_names = map (fst o fst) params;",
+        "      val vars = Term.add_vars term [];",
+        "      fun fmt_var (n, 0) = \"?\" ^ n | fmt_var (n, i) = \"?\" ^ n ^ Int.toString i;",
+        "      val ctx = Name.make_context (frees @ param_names);",
+        "      val (renamed, _) = fold_map Name.variant param_names ctx;",
+        "      val renamed_term = Logic.list_rename_params renamed term;",
+        "      val term_str = Syntax.string_of_term ctxt renamed_term;",
+        "    in",
+        "      writeln (\"[LLM_SUBGOAL] \" ^ term_str);",
+        "      writeln (\"[LLM_VARS] params: \" ^ (space_implode \" \" renamed) ^",
+        "               \" | frees: \" ^ (space_implode \" \" frees) ^",
+        "               \" | schematics: \" ^ (space_implode \" \" (map fmt_var vars)))",
+        "    end",
+        "  ›",
     ]
-
+    
+    return proof_lines[:injection_point] + ml_extract + proof_lines[injection_point:]
 
 def _looks_truncated(txt: str) -> bool:
     """Check if text appears truncated."""
@@ -201,31 +141,93 @@ def _first_lemma_line(full_text: str) -> str:
     """Find first lemma line."""
     return next((line for line in full_text.splitlines() if line.strip().startswith("lemma ")), "")
 
-
-def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: str = "", 
-                              hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
-    """Build goal from local print_state."""
-    if not state_block or not state_block.strip():
-        return fallback_goal
+def _extract_vars_from_term_analysis(state_block: str, subgoal: str) -> Tuple[List[str], List[str], List[str]]:
+    """Extract variable type information by analyzing the proof state.
     
+    Since the ML approach isn't working, use heuristics based on:
+    1. Variables in 'using this:' facts are likely free
+    2. Variables only in the subgoal are likely bound
+    3. Variables with ? are schematic
+    
+    Returns: (params, frees, schematics)
+    """
+    if not state_block or not subgoal:
+        return [], [], []
+    
+    # Extract identifiers from subgoal
+    ID_PATTERN = re.compile(r'\b([a-z][A-Za-z0-9_\']*)\b')
+    subgoal_vars = set(ID_PATTERN.findall(subgoal))
+    
+    # Extract variables from 'using this:' facts
+    using_vars = set()
     clean = re.sub(r"\x1b\[[0-9;]*m", "", state_block).replace("\u00A0", " ")
-    m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
-    
     lines = clean.splitlines()
-    using_facts = _extract_using_facts(lines)
-    subgoal = _extract_subgoal(lines, m_llm)
     
-    if subgoal:
-        facts = [f"({f.strip()})" for f in using_facts] if using_facts else []
-        
-        if m_llm:
-            return " ⟹ ".join(facts + [f"({subgoal})"]) if facts else f"({subgoal})"
-        
-        subgoal = _recover_binders(subgoal)
-        return " ⟹ ".join(facts + [f"({subgoal})"]) if facts else f"({subgoal})"
+    in_using = False
+    for line in lines:
+        if line.strip() == "using this:":
+            in_using = True
+            continue
+        if in_using:
+            if line.strip().startswith("goal") or not line.strip():
+                break
+            # Extract variables from this line
+            using_vars.update(ID_PATTERN.findall(line))
     
-    return fallback_goal
+    # Filter out common keywords and type constructors
+    KEYWORDS = {"in", "if", "then", "else", "let", "case", "of", "where", "and", "or", "not", 
+                "set", "True", "False", "Nil", "Cons"}
+    subgoal_vars -= KEYWORDS
+    using_vars -= KEYWORDS
+    
+    # Extract schematics (variables starting with ?)
+    SCHEM_PATTERN = re.compile(r'\?([a-z][A-Za-z0-9_\']*)')
+    schematics = list(set(SCHEM_PATTERN.findall(subgoal)))
+    
+    # Heuristic: variables in both using and subgoal are likely free
+    # Variables only in subgoal are likely params (bound)
+    frees = list(using_vars & subgoal_vars)
+    params = list(subgoal_vars - using_vars - set(schematics))
+    
+    return params, frees, schematics
 
+
+def _print_state_before_hole_with_ml(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
+    """Capture proof state WITH ML-based variable extraction.
+    
+    This version attempts to inject ML code to extract variable information.
+    """
+    s, _ = hole_span
+    lines = full_text[:s].rstrip().splitlines()
+    lemma_start = next((i for i, line in enumerate(lines) if line.strip().startswith('lemma ')), -1)
+    
+    if lemma_start == -1:
+        return ""
+    
+    proof_lines = lines[lemma_start:]
+    
+    ml_code = [
+        "apply -",  # Dummy apply to ensure we're in proof mode
+        "apply (print_state)",  # This doesn't exist, we'll handle it differently
+    ]
+    
+    try:
+        # Standard approach
+        thy = build_theory(proof_lines, add_print_state=True, end_with="sorry")
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
+        state_block = _extract_print_state_from_responses(resps)
+        
+        if _looks_truncated(state_block):
+            thy2 = build_theory(proof_lines + ["ML ‹Pretty.setmargin 100000›"], 
+                              add_print_state=True, end_with="sorry")
+            resps2 = _run_theory_with_timeout(isabelle, session, thy2, timeout_s=_ISA_FAST_TIMEOUT_S)
+            state_block2 = _extract_print_state_from_responses(resps2)
+            if state_block2:
+                state_block = state_block2
+        
+        return state_block
+    except Exception:
+        return ""
 
 def _extract_using_facts(lines: List[str]) -> List[str]:
     """Extract 'using this:' facts."""
@@ -314,29 +316,408 @@ def _extract_subgoal(lines: List[str], m_llm) -> Optional[str]:
     
     return None
 
+# ============================================================================
+# Alternative variable type detection approach
+# ============================================================================
 
-def _recover_binders(subgoal: str) -> str:
-    """Recover binders for subgoal."""
-    ID = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b")
-    HEAD_APP = re.compile(r"\b([a-z][A-Za-z0-9_']*)\b\s*(?=\(|[A-Za-z])")
-    KEYWORDS = {"in", "if", "then", "else", "let", "case", "of", "where", "and", "or", "not"}
+def _extract_variable_types(state_block: str) -> Tuple[set, set, set]:
+    """Extract sets of bound parameters, free variables, and schematic variables.
     
-    def idents(s):
-        seen, out = set(), []
-        for m in ID.finditer(s):
-            v = m.group(1)
-            if v not in seen:
-                seen.add(v)
-                out.append(v)
-        return out
+    Returns:
+        (params_set, frees_set, schematics_set)
+    """
+    if not state_block:
+        return set(), set(), set()
     
-    m_bind = re.match(r"\s*⋀\s*([A-Za-z0-9_'\s]+)\.\s*(.*)$", subgoal)
-    if m_bind:
-        params = m_bind.group(1).strip().split()
-        sub_core = m_bind.group(2).strip()
+    # Look for [LLM_VARS] line
+    m = re.search(rf"^{re.escape(_LLM_VARS_MARK)}\s+(.*)$", state_block, flags=re.M)
+    if not m:
+        return set(), set(), set()
+    
+    vars_line = m.group(1)
+    
+    # Parse: "params: x y | frees: a b | schematics: ?z"
+    params, frees, schematics = set(), set(), set()
+    
+    # Extract params
+    m_params = re.search(r"params:\s*([^|]*)", vars_line)
+    if m_params:
+        params = set(m_params.group(1).strip().split())
+    
+    # Extract frees
+    m_frees = re.search(r"frees:\s*([^|]*)", vars_line)
+    if m_frees:
+        frees = set(m_frees.group(1).strip().split())
+    
+    # Extract schematics
+    m_schems = re.search(r"schematics:\s*([^|]*)", vars_line)
+    if m_schems:
+        schematics = set(m_schems.group(1).strip().split())
+    
+    return params, frees, schematics
+
+
+def _annotate_goal_with_var_types(goal: str, params: set, frees: set, schematics: set) -> str:
+    """Annotate goal string to distinguish variable types.
+    
+    Example output:
+        "⋀x_bound xs_bound. x_free ∈ set ((x_bound # xs_bound) @ ys_free)"
+    """
+    if not (params or frees or schematics):
+        return goal
+    
+    # We'll use a simple suffix approach: _bound, _free, _schem
+    # More sophisticated: use special markers like [BOUND:x] that LLM can understand
+    
+    def replace_var(match):
+        var = match.group(1)
+        if var in params:
+            return f"[BOUND:{var}]"
+        elif var in frees:
+            return f"[FREE:{var}]"
+        elif f"?{var}" in schematics or var in schematics:
+            return f"[SCHEM:{var}]"
+        return var
+    
+    # Match identifiers (simplified - may need refinement for Isabelle syntax)
+    # This pattern matches variable names, being careful about word boundaries
+    pattern = r'\b([a-z][A-Za-z0-9_\']*)\b'
+    
+    annotated = re.sub(pattern, replace_var, goal)
+    return annotated
+
+
+def _effective_goal_from_state_with_types(state_block: str, fallback_goal: str, 
+                                          full_text: str = "", 
+                                          hole_span: Tuple[int, int] = (0, 0), 
+                                          trace: bool = False) -> str:
+    """Build goal from local print_state with variable type annotations."""
+    if not state_block or not state_block.strip():
+        return fallback_goal
+    
+    # Extract variable type information
+    params, frees, schematics = _extract_variable_types(state_block)
+    
+    # Get the base goal (existing logic)
+    goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
+    
+    # Annotate with variable types
+    if params or frees or schematics:
+        goal = _annotate_goal_with_var_types(goal, params, frees, schematics)
+    
+    return goal
+
+
+# Alternative: Add variable type info as metadata
+def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set) -> str:
+    """Format goal with explicit variable type metadata.
+    
+    Example:
+        Goal: x ∈ set ((x # xs) @ ys)
+        Variable types:
+        - Bound (∀-quantified): x, xs
+        - Free (from context): ys
+    """
+    if not (params or frees or schematics):
+        return goal
+    
+    metadata = []
+    if params:
+        metadata.append(f"- Bound (∀-quantified): {', '.join(sorted(params))}")
+    if frees:
+        metadata.append(f"- Free (from context): {', '.join(sorted(frees))}")
+    if schematics:
+        metadata.append(f"- Schematic (unification vars): {', '.join(sorted(schematics))}")
+    
+    return f"{goal}\n\nVariable types:\n" + "\n".join(metadata)
+
+def _effective_goal_from_state_alt(state_block: str, fallback_goal: str, full_text: str = "", 
+                              hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+    params, frees, schematics = _extract_variable_types(state_block)
+    goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
+    return _format_goal_with_metadata(goal, params, frees, schematics)
+
+# ============================================================================
+# Debug code
+# ============================================================================
+
+def _build_ml_prolog() -> List[str]:
+    """Build ML prolog that sets up variable extraction method.
+    
+    IMPORTANT: build_theory only keeps the FIRST line unindented.
+    Uses ‹ › (cartouche) delimiters which are the modern Isabelle standard.
+    """
+    prolog_text = """declare [[show_question_marks = true]]
+declare [[show_types = false, show_sorts = false]]
+
+(* Custom method to extract variable information *)
+method_setup llm_print_vars = ‹
+  Scan.succeed (fn ctxt =>
+    SIMPLE_METHOD' (fn i => fn st =>
+      if Thm.nprems_of st < i orelse i <= 0 then (
+        (* changed tag so parser can ignore this safely *)
+        writeln "[LLM_NOSUBGOAL]";
+        Seq.single st
+      ) else let
+        val subgoal_term = Thm.term_of (Thm.cprem_of st i);
+        val frees = Term.add_frees subgoal_term [] |> map (fn (n, _) => n);
+        val param_list = Logic.strip_params subgoal_term;
+        val param_names = map fst param_list;
+        val vars = Term.add_vars subgoal_term [] |> map (fn ((n, j), _) => (n, j));
+        fun fmt_var (n, 0) = "?" ^ n | fmt_var (n, j) = "?" ^ n ^ Int.toString j;
+
+        (* NEW: fixed variables from the proof context (Isar “case” fixes) *)
+        val fixes = Variable.dest_fixes ctxt |> map #1;
+
+        (* pretty print subgoal with renamed params (unchanged) *)
+        val name_ctx = Name.make_context (frees @ param_names);
+        val (renamed_params, _) = fold_map Name.variant param_names name_ctx;
+        val renamed_term = Logic.list_rename_params renamed_params subgoal_term;
+        val term_str = Syntax.string_of_term ctxt renamed_term;
+
+        (* NEW: also print the subgoal from a RAW global context, which preserves internal names like xa__/xsa__ *)
+        val thy = Proof_Context.theory_of ctxt;
+        val ctxt_raw = Proof_Context.init_global thy;
+        val term_raw_str = Syntax.string_of_term ctxt_raw subgoal_term;        
+
+        val params_str = space_implode " " renamed_params;
+        val frees_str  = space_implode " " frees;
+        val fixes_str  = space_implode " " fixes;
+        val vars_str   = space_implode " " (map fmt_var vars);
+
+        val _ = writeln ("[LLM_SUBGOAL] " ^ term_str);
+        val _ = writeln ("[LLM_SUBGOAL_RAW] " ^ term_raw_str);
+        val _ = writeln ("[LLM_VARS] params: " ^ params_str ^ " | frees: " ^ frees_str ^ " | schematics: " ^ vars_str);
+        (* NEW: separate line for fixes so Python can prefer these names *)
+        val _ = writeln ("[LLM_FIXES] " ^ fixes_str);
+      in Seq.single st end))
+› "extract variable information for LLM"
+"""
+    return [prolog_text.strip()]
+
+
+def _inject_var_extraction(proof_lines: List[str]) -> List[str]:
+    """Inject variable extraction method call."""
+    result = proof_lines[:]
+    result.append("  apply llm_print_vars")
+    return result
+
+
+def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int, int], trace: bool = False) -> str:
+    """Capture proof state before hole with ML-extracted variable info."""
+    s, _ = hole_span
+    lines = full_text[:s].rstrip().splitlines()
+    lemma_start = next((i for i, line in enumerate(lines) if line.strip().startswith('lemma ')), -1)
+    
+    if lemma_start == -1:
+        return ""
+    
+    proof_lines = lines[lemma_start:]
+    
+    try:
+        prolog = _build_ml_prolog()
+        enhanced_proof = _inject_var_extraction(proof_lines)
+        
+        thy = build_theory(prolog + enhanced_proof, add_print_state=True, end_with="sorry")
+        
+        if trace:
+            print("[DEBUG] Theory text being sent to Isabelle:")
+            print("=" * 60)
+            # Print first 30 lines and last 10 lines
+            thy_lines = thy.splitlines()
+            for i, line in enumerate(thy_lines[:30]):
+                print(f"{i:3d}: {line}")
+            if len(thy_lines) > 40:
+                print("  ...")
+                for i, line in enumerate(thy_lines[-10:], start=len(thy_lines)-10):
+                    print(f"{i:3d}: {line}")
+            print("=" * 60)
+        
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
+        state_block = _extract_print_state_from_responses(resps)
+        
+        if trace:
+            print(f"[DEBUG] State block contains [LLM_VARS]: {_LLM_VARS_MARK in state_block}")
+        
+        if _looks_truncated(state_block):
+            margin_prolog = ["ML ‹Pretty.setmargin 100000›"] + prolog
+            thy2 = build_theory(margin_prolog + _inject_var_extraction(proof_lines), add_print_state=True, end_with="sorry")
+            resps2 = _run_theory_with_timeout(isabelle, session, thy2, timeout_s=_ISA_FAST_TIMEOUT_S)
+            state_block2 = _extract_print_state_from_responses(resps2)
+            if state_block2 and len(state_block2) > len(state_block):
+                state_block = state_block2
+        
+        return state_block
+    except Exception as e:
+        if trace:
+            print(f"[DEBUG] Exception: {e}")
+        return ""
+
+
+def _extract_print_state_from_responses(resps: List) -> str:
+    """Extract print_state output INCLUDING our LLM markers from Isabelle responses."""
+    standard = last_print_state_block(resps) or ""
+    llm_lines = []
+    
+    debug_writeln_count = 0
+    debug_llm_found = False
+    
+    for resp in (resps or []):
+        resp_type = str(getattr(resp, "response_type", "")).upper()
+
+        # Handle NOTE (where writeln usually appears)
+        if resp_type == "NOTE":
+            try:
+                body = json.loads(getattr(resp, "response_body", "") or "{}")
+            except Exception:
+                body = {}
+            if isinstance(body, dict) and body.get("kind") == "writeln":
+                text = str(body.get("message", "") or "")
+                debug_writeln_count += 1
+                print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
+                if any(m in text for m in (_LLM_SUBGOAL_MARK, _LLM_SUBGOAL_RAW_MARK, _LLM_VARS_MARK, "[LLM_FIXES]", "[LLM_TEST]")):
+                    debug_llm_found = True
+                    print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
+                    if text.strip() != "[LLM_NOSUBGOAL]":
+                        llm_lines.append(text)
+                elif ("goal" in text and "subgoal" in text and not standard):
+                    llm_lines.append(text)
+                    standard = text
+            continue
+                
+        body = getattr(resp, "response_body", None)
+        if isinstance(body, bytes):
+            body = body.decode(errors="replace")
+        
+        try:
+            data = json.loads(body) if isinstance(body, str) and body.strip().startswith("{") else body
+            if not isinstance(data, dict):
+                continue
+        except (json.JSONDecodeError, TypeError):
+            continue
+        
+        for node in data.get("nodes", []):
+            for msg in node.get("messages", []) or []:
+                kind = msg.get("kind")
+                text = msg.get("message", "") or ""
+                
+                if kind == "writeln":
+                    debug_writeln_count += 1
+                    print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
+                    
+                    if _LLM_SUBGOAL_MARK in text or _LLM_VARS_MARK in text or "[LLM_TEST]" in text:
+                        debug_llm_found = True
+                        print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
+                        llm_lines.append(text)
+                    elif ("goal" in text and "subgoal" in text and not standard):
+                        llm_lines.append(text)
+                        standard = text
+                        
+                elif kind == "error":
+                    # Print ALL errors, not just llm_print_vars
+                    print(f"[DEBUG ERROR]: {text[:300]}")
+    
+    print(f"[DEBUG] Total writeln messages: {debug_writeln_count}, LLM markers found: {debug_llm_found}")
+    
+    return (standard + "\n" + "\n".join(llm_lines)) if (llm_lines and standard) else (standard or "\n".join(llm_lines))
+
+
+def _effective_goal_from_state(state_block: str, fallback_goal: str, full_text: str = "", 
+                              hole_span: Tuple[int, int] = (0, 0), trace: bool = False) -> str:
+    """Build goal from local print_state with proper variable handling."""
+    if not state_block or not state_block.strip():
+        return fallback_goal
+    
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", state_block).replace("\u00A0", " ")
+    # Prefer RAW (internal names), then pretty
+    m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean, flags=re.M)
+    if not m_llm:
+        m_llm = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean, flags=re.M)
+    
+    lines = clean.splitlines()
+    using_facts = _extract_using_facts(lines)
+    subgoal = _extract_subgoal(lines, m_llm)
+    
+    if not subgoal:
+        return fallback_goal
+    
+    # Extract variable information
+    params, frees, schematics = _extract_variable_info(state_block)
+    
+    if trace:
+        print(f"\n{'='*60}")
+        print(f"DEBUG: Extracted from Isabelle:")
+        print(f"  params (bound): {params}")
+        print(f"  frees (context): {frees}")
+        print(f"  schematics: {schematics}")
+        print(f"DEBUG: subgoal: {subgoal}")
+    
+    # Build goal
+    facts = [f"({f.strip()})" for f in using_facts] if using_facts else []
+    
+    # Add binders only if we have params from Isabelle
+    if params and not subgoal.strip().startswith("⋀"):
+        goal_core = f"⋀{' '.join(params)}. {subgoal}"
     else:
-        sub_core = subgoal.strip()
-        head_syms = {m.group(1) for m in HEAD_APP.finditer(sub_core)}
-        params = [v for v in idents(sub_core) if v not in head_syms and v not in KEYWORDS]
+        goal_core = subgoal
     
-    return f"⋀{' '.join(params)}. {sub_core}" if params else sub_core
+    result = " ⟹ ".join(facts + [f"({goal_core})"]) if facts else f"({goal_core})"
+    
+    # Add variable type annotations for LLM
+    if params or frees or schematics:
+        var_info = []
+        if params:
+            var_info.append(f"BOUND: {','.join(params)}")
+        if frees:
+            var_info.append(f"FREE: {','.join(frees)}")
+        if schematics:
+            var_info.append(f"SCHEM: {','.join(schematics)}")
+        result = f"{result}\n[VAR_TYPES: {' | '.join(var_info)}]"
+    
+    if trace:
+        print(f"DEBUG: Final goal: {result[:150]}...")
+        print(f"{'='*60}\n")
+    
+    return result
+
+def _extract_fixes(state_block: str) -> List[str]:
+    m = re.search(r"^\[LLM_FIXES\]\s+(.*)$", state_block, flags=re.M)
+    if not m:
+        return []
+    raw = m.group(1).strip()
+    return [t for t in raw.split() if t]
+
+def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List[str]]:
+    """Extract variable information from [LLM_VARS] line."""
+    if not state_block:
+        return [], [], []
+    
+    m = re.search(rf"^{re.escape(_LLM_VARS_MARK)}\s+(.*)$", state_block, flags=re.M)
+    if not m:
+        return [], [], []
+    
+    vars_line = m.group(1)
+    params, frees, schematics = [], [], []
+    
+    m_params = re.search(r"params:\s*([^|]*)", vars_line)
+    if m_params and m_params.group(1).strip():
+        params = m_params.group(1).strip().split()
+    
+    m_frees = re.search(r"frees:\s*([^|]*)", vars_line)
+    if m_frees and m_frees.group(1).strip():
+        frees = m_frees.group(1).strip().split()
+    
+    m_schems = re.search(r"schematics:\s*([^|]*)", vars_line)
+    if m_schems and m_schems.group(1).strip():
+        schematics = m_schems.group(1).strip().split()
+    
+    # Prefer FIXES for display-stable “context frees”
+    fixes = _extract_fixes(state_block)
+    if fixes:
+        seen, merged = set(), []
+        for v in fixes + frees:
+            if v and v not in seen:
+                seen.add(v); merged.append(v)
+        frees = merged
+    return params, frees, schematics
+
