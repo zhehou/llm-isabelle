@@ -74,14 +74,6 @@ def _looks_truncated(txt: str) -> bool:
     )
 
 
-def _looks_truncated_goal_line(s: str) -> bool:
-    """Detect obvious mid-chop goal strings (no Isabelle guessing)."""
-    if not s:
-        return True
-    s = s.rstrip()
-    return s.endswith("⟹") or s.endswith("[") or s.endswith("(")
-
-
 def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
     if not trace:
         return
@@ -103,32 +95,36 @@ def _first_lemma_line(full_text: str) -> str:
     return next((ln for ln in (full_text or "").splitlines() if ln.strip().startswith("lemma ")), "")
 
 
-def _extract_marker_span(clean_state: str, mark: str) -> Optional[str]:
-    """Extract multi-line payload after a specific LLM marker.
-    Stops at the next *known* boundary, not at any '[' which can appear in pretty output.
-    """
-    m = re.search(rf"^{re.escape(mark)}\s+(.*)$", clean_state, flags=re.M)
-    if not m:
-        return None
-    start_pos = m.end()
-    tail = clean_state[start_pos:]
-    # Next boundary: another LLM marker, or start of a standard print-state block
-    nb = re.search(r"^(?:\[LLM_[A-Z_]+\]|\s*proof\b|\s*goal\b)", tail, flags=re.M)
-    end_pos = start_pos + (nb.start() if nb else len(tail))
-    return clean_state[m.start(1):end_pos].strip()
-
-
 def _extract_subgoal_from_markers(clean_state: str) -> Optional[str]:
     """Return subgoal text strictly from Isabelle writeln markers.
-    Prefer RAW, but fall back to pretty if RAW looks truncated.
+    Prefers RAW (internal names) then pretty form. No textual parsing fallbacks.
+    Handles multi-line subgoals by reading until the next marker or end of marker section.
     """
-    raw = _extract_marker_span(clean_state, _LLM_SUBGOAL_RAW_MARK)
-    if raw and not _looks_truncated_goal_line(raw):
-        return raw
-    pretty = _extract_marker_span(clean_state, _LLM_SUBGOAL_MARK)
-    if pretty and (not raw or len(pretty) >= len(raw) or _looks_truncated_goal_line(raw)):
-        return pretty
-    return raw or pretty
+    # Find [LLM_SUBGOAL_RAW] marker - read until next [ or end
+    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean_state, flags=re.M)
+    if m:
+        start_pos = m.end()
+        # Find the next line that starts with [ or end of string
+        next_marker = re.search(r"^\[", clean_state[start_pos:], flags=re.M)
+        if next_marker:
+            end_pos = start_pos + next_marker.start()
+            return clean_state[m.start(1):end_pos].strip()
+        else:
+            return clean_state[m.start(1):].strip()
+    
+    # Find [LLM_SUBGOAL] marker - read until next marker
+    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean_state, flags=re.M)
+    if m:
+        start_pos = m.end()
+        # Find the next line that starts with [ or end of string
+        next_marker = re.search(r"^\[", clean_state[start_pos:], flags=re.M)
+        if next_marker:
+            end_pos = start_pos + next_marker.start()
+            return clean_state[m.start(1):end_pos].strip()
+        else:
+            return clean_state[m.start(1):].strip()
+    
+    return None
 
 
 # === Variable information (Isabelle-markers only; no heuristics) ===============
@@ -140,15 +136,17 @@ def _extract_fixes(state_block: str) -> List[str]:
     return [t for t in m.group(1).strip().split() if t]
 
 
-def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List[str]]:
+def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List[str], List[str]]:
     """Parse "[LLM_VARS] params: ... | frees: ... | schematics: ..." strictly.
+    Returns (params, frees, schems, skolems) where skolems are identified by __ suffix.
+    Skolem names have the __ suffix removed for presentation.
     If missing, return empty lists (we do NOT guess heuristically).
     """
     if not state_block:
-        return [], [], []
+        return [], [], [], []
     m = re.search(rf"^{re.escape(_LLM_VARS_MARK)}\s+(.*)$", state_block, flags=re.M)
     if not m:
-        return [], [], []
+        return [], [], [], []
 
     line = m.group(1)
     def get(tag: str) -> List[str]:
@@ -166,7 +164,13 @@ def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List
                 seen.add(v)
                 merged.append(v)
         frees = merged
-    return params, frees, schems
+    
+    # Separate Skolem variables (ending with __) from truly free variables
+    # Remove the __ suffix from Skolem names for presentation
+    skolems = [v.rstrip('_') for v in frees if v.endswith('__')]
+    true_frees = [v for v in frees if not v.endswith('__')]
+    
+    return params, true_frees, schems, skolems
 
 
 # === Building the effective goal ==============================================
@@ -183,8 +187,9 @@ def _effective_goal_from_state(
     The subgoal from [LLM_SUBGOAL] has the form: f1 ⟹ f2 ⟹ ... ⟹ fn ⟹ g
     where f1...fn are chained facts and g is the conclusion.
     
-    We keep it as-is since all variables are already alpha-renamed and
-    properly scoped. The [LLM_VARS] tells us which are free variables.
+    Skolem variables (ending with __) get meta-level quantification ⋀,
+    and have their __ suffix removed for presentation.
+    Truly free variables remain free.
     """
     if not state_block or not state_block.strip():
         return fallback_goal
@@ -196,26 +201,42 @@ def _effective_goal_from_state(
     if not renamed_subgoal:
         return fallback_goal
 
-    params, frees, schems = _extract_variable_info(state_block)
+    params, frees, schems, skolems = _extract_variable_info(state_block)  # <-- THIS LINE MUST HAVE 4 VARIABLES
+
+    # Replace __ suffixes in the subgoal text with clean names
+    clean_subgoal = renamed_subgoal
+    for orig_name in [v for v in (clean.split()) if v.endswith('__')]:
+        clean_name = orig_name.rstrip('_')
+        clean_subgoal = re.sub(r'\b' + re.escape(orig_name) + r'\b', clean_name, clean_subgoal)
 
     if trace:
         print("\n" + "=" * 60)
-        print(f"DEBUG params={params}, frees={frees}, schematics={schems}")
+        print(f"DEBUG params={params}, frees={frees}, schems={schems}, skolems={skolems}")
         print(f"DEBUG renamed_subgoal= {renamed_subgoal}")
+        print(f"DEBUG clean_subgoal= {clean_subgoal}")
 
-    # Wrap params if present
-    if params and not renamed_subgoal.strip().startswith("∀"):
-        result = f"(∀{' '.join(params)}. {renamed_subgoal})"
+    # Build the goal with meta-level quantification for Skolems
+    core = clean_subgoal
+    
+    # Add meta-level quantification for Skolem variables (with clean names)
+    if skolems:
+        core = f"⋀{' '.join(skolems)}. {core}"
+    
+    # Wrap params if present (object-level quantification)
+    if params and not core.strip().startswith("∀"):
+        result = f"(∀{' '.join(params)}. {core})"
     else:
-        result = f"({renamed_subgoal})"
+        result = f"({core})"
 
     # Attach variable summary
-    if params or frees or schems:
+    if params or frees or schems or skolems:
         parts = []
         if params:
             parts.append("BOUND:" + ",".join(params))
         if frees:
             parts.append("FREE:" + ",".join(frees))
+        if skolems:
+            parts.append("SKOLEM:" + ",".join(skolems))
         if schems:
             parts.append("SCHEM:" + ",".join(schems))
         result = f"{result}\n[VAR_TYPES: {' | '.join(parts)}]"
@@ -224,13 +245,16 @@ def _effective_goal_from_state(
         print(f"DEBUG final goal: {result[:200]}…\n" + "=" * 60 + "\n")
     return result
 
-
-def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set) -> str:
-    if not (params or frees or schematics):
+def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set, skolems: set = None) -> str:
+    if skolems is None:
+        skolems = set()
+    if not (params or frees or schematics or skolems):
         return goal
     meta = []
     if params:
         meta.append(f"- Bound (∀-quantified): {', '.join(sorted(params))}")
+    if skolems:
+        meta.append(f"- Skolem (⋀-quantified): {', '.join(sorted(skolems))}")
     if frees:
         meta.append(f"- Free (from context): {', '.join(sorted(frees))}")
     if schematics:
@@ -245,9 +269,9 @@ def _effective_goal_from_state_alt(
     hole_span: Tuple[int, int] = (0, 0),
     trace: bool = False,
 ) -> str:
-    params, frees, schems = _extract_variable_info(state_block)
+    params, frees, schems, skolems = _extract_variable_info(state_block)
     goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
-    return _format_goal_with_metadata(goal, set(params), set(frees), set(schems))
+    return _format_goal_with_metadata(goal, set(params), set(frees), set(schems), set(skolems))
 
 
 # === Printing state before a hole (ML-assisted) ================================
