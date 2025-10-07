@@ -74,6 +74,14 @@ def _looks_truncated(txt: str) -> bool:
     )
 
 
+def _looks_truncated_goal_line(s: str) -> bool:
+    """Detect obvious mid-chop goal strings (no Isabelle guessing)."""
+    if not s:
+        return True
+    s = s.rstrip()
+    return s.endswith("⟹") or s.endswith("[") or s.endswith("(")
+
+
 def _log_state_block(prefix: str, block: str, trace: bool = True) -> None:
     if not trace:
         return
@@ -95,17 +103,32 @@ def _first_lemma_line(full_text: str) -> str:
     return next((ln for ln in (full_text or "").splitlines() if ln.strip().startswith("lemma ")), "")
 
 
+def _extract_marker_span(clean_state: str, mark: str) -> Optional[str]:
+    """Extract multi-line payload after a specific LLM marker.
+    Stops at the next *known* boundary, not at any '[' which can appear in pretty output.
+    """
+    m = re.search(rf"^{re.escape(mark)}\s+(.*)$", clean_state, flags=re.M)
+    if not m:
+        return None
+    start_pos = m.end()
+    tail = clean_state[start_pos:]
+    # Next boundary: another LLM marker, or start of a standard print-state block
+    nb = re.search(r"^(?:\[LLM_[A-Z_]+\]|\s*proof\b|\s*goal\b)", tail, flags=re.M)
+    end_pos = start_pos + (nb.start() if nb else len(tail))
+    return clean_state[m.start(1):end_pos].strip()
+
+
 def _extract_subgoal_from_markers(clean_state: str) -> Optional[str]:
     """Return subgoal text strictly from Isabelle writeln markers.
-    Prefers RAW (internal names) then pretty form. No textual parsing fallbacks.
+    Prefer RAW, but fall back to pretty if RAW looks truncated.
     """
-    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean_state, flags=re.M)
-    if m:
-        return m.group(1).strip()
-    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean_state, flags=re.M)
-    if m:
-        return m.group(1).strip()
-    return None
+    raw = _extract_marker_span(clean_state, _LLM_SUBGOAL_RAW_MARK)
+    if raw and not _looks_truncated_goal_line(raw):
+        return raw
+    pretty = _extract_marker_span(clean_state, _LLM_SUBGOAL_MARK)
+    if pretty and (not raw or len(pretty) >= len(raw) or _looks_truncated_goal_line(raw)):
+        return pretty
+    return raw or pretty
 
 
 # === Variable information (Isabelle-markers only; no heuristics) ===============
@@ -155,17 +178,22 @@ def _effective_goal_from_state(
     hole_span: Tuple[int, int] = (0, 0),
     trace: bool = False,
 ) -> str:
-    """Build an effective goal using ONLY Isabelle-provided markers.
-    - Subgoal comes from [LLM_SUBGOAL_RAW]/[LLM_SUBGOAL].
-    - Bound / free / schematic vars come from [LLM_VARS] (and [LLM_FIXES]).
-    - We do NOT parse numbered goals or "using this:" lines heuristically.
+    """Build effective goal from alpha-renamed subgoal.
+    
+    The subgoal from [LLM_SUBGOAL] has the form: f1 ⟹ f2 ⟹ ... ⟹ fn ⟹ g
+    where f1...fn are chained facts and g is the conclusion.
+    
+    We keep it as-is since all variables are already alpha-renamed and
+    properly scoped. The [LLM_VARS] tells us which are free variables.
     """
     if not state_block or not state_block.strip():
         return fallback_goal
 
     clean = _strip(state_block)
-    subgoal = _extract_subgoal_from_markers(clean)
-    if not subgoal:
+
+    # Extract alpha-renamed subgoal (multi-line safe)
+    renamed_subgoal = _extract_subgoal_from_markers(clean) or ""
+    if not renamed_subgoal:
         return fallback_goal
 
     params, frees, schems = _extract_variable_info(state_block)
@@ -173,15 +201,15 @@ def _effective_goal_from_state(
     if trace:
         print("\n" + "=" * 60)
         print(f"DEBUG params={params}, frees={frees}, schematics={schems}")
-        print(f"DEBUG subgoal= {subgoal}")
+        print(f"DEBUG renamed_subgoal= {renamed_subgoal}")
 
-    # Insert explicit binders if Isabelle provided params and subgoal is not already bound
-    core = f"⋀{' '.join(params)}. {subgoal}" if params and not subgoal.strip().startswith("⋀") else subgoal
+    # Wrap params if present
+    if params and not renamed_subgoal.strip().startswith("∀"):
+        result = f"(∀{' '.join(params)}. {renamed_subgoal})"
+    else:
+        result = f"({renamed_subgoal})"
 
-    # No heuristic 'using facts' insertion: keep the core goal only
-    result = f"({core})"
-
-    # Attach a compact variable summary for downstream prompts
+    # Attach variable summary
     if params or frees or schems:
         parts = []
         if params:
@@ -193,8 +221,9 @@ def _effective_goal_from_state(
         result = f"{result}\n[VAR_TYPES: {' | '.join(parts)}]"
 
     if trace:
-        print(f"DEBUG final goal: {result[:150]}…\n" + "=" * 60 + "\n")
+        print(f"DEBUG final goal: {result[:200]}…\n" + "=" * 60 + "\n")
     return result
+
 
 def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set) -> str:
     if not (params or frees or schematics):
@@ -235,23 +264,34 @@ method_setup llm_print_vars = ‹
         writeln "[LLM_NOSUBGOAL]"; Seq.single st
       ) else let
         val subgoal_term = Thm.term_of (Thm.cprem_of st i);
-        val frees = Term.add_frees subgoal_term [] |> map (fn (n, _) => n);
+        val frees_with_types = Term.add_frees subgoal_term [];
+        val frees = map fst frees_with_types;
         val param_list = Logic.strip_params subgoal_term;
         val param_names = map fst param_list;
         val vars = Term.add_vars subgoal_term [] |> map (fn ((n, j), _) => (n, j));
         fun fmt_var (n, 0) = "?" ^ n | fmt_var (n, j) = "?" ^ n ^ Int.toString j;
         val fixes = Variable.dest_fixes ctxt |> map #1;
+        
+        (* Create name context and rename both params and frees *)
         val name_ctx = Name.make_context (frees @ param_names);
-        val (renamed_params, _) = fold_map Name.variant param_names name_ctx;
-        val renamed_term = Logic.list_rename_params renamed_params subgoal_term;
-        val term_str = Syntax.string_of_term ctxt renamed_term;
+        val (renamed_params, name_ctx2) = fold_map Name.variant param_names name_ctx;
+        val (renamed_frees, _) = fold_map Name.variant frees name_ctx2;
+        
+        (* Alpha-rename the term: first params, then frees *)
+        val term_params_renamed = Logic.list_rename_params renamed_params subgoal_term;
+        (* Build substitution with actual types from frees_with_types *)
+        val free_subst = map2 (fn (old, ty) => fn new => (Free (old, ty), Free (new, ty))) 
+                              frees_with_types renamed_frees;
+        val fully_renamed_term = Term.subst_free free_subst term_params_renamed;
+        
+        val term_str = Syntax.string_of_term ctxt fully_renamed_term;
         val thy = Proof_Context.theory_of ctxt;
         val ctxt_raw = Proof_Context.init_global thy;
         val term_raw_str = Syntax.string_of_term ctxt_raw subgoal_term;
         val _ = writeln ("[LLM_SUBGOAL] " ^ term_str);
         val _ = writeln ("[LLM_SUBGOAL_RAW] " ^ term_raw_str);
         val _ = writeln ("[LLM_VARS] params: " ^ (space_implode " " renamed_params) ^
-                         " | frees: " ^ (space_implode " " frees) ^
+                         " | frees: " ^ (space_implode " " renamed_frees) ^
                          " | schematics: " ^ (space_implode " " (map fmt_var vars)));
         val _ = writeln ("[LLM_FIXES] " ^ (space_implode " " fixes));
       in Seq.single st end))
