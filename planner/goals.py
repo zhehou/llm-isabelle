@@ -97,40 +97,21 @@ def _first_lemma_line(full_text: str) -> str:
 
 def _extract_subgoal_from_markers(clean_state: str) -> Optional[str]:
     """Return subgoal text strictly from Isabelle writeln markers.
-    Prefers RAW (internal names) then pretty form. No textual parsing fallbacks.
-    Handles multi-line subgoals by reading until the next marker or end of marker section.
+    Prefers RAW (internal names) then pretty form. Multi-line safe: capture
+    until the next marker line that begins with '[' or EOF.
     """
-    # Find [LLM_SUBGOAL_RAW] marker - read until next [ or end
-    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_RAW_MARK)}\s+(.*)$", clean_state, flags=re.M)
-    if m:
-        start_pos = m.end()
-        # Find the next line that starts with [ or end of string
-        next_marker = re.search(r"^\[", clean_state[start_pos:], flags=re.M)
-        if next_marker:
-            end_pos = start_pos + next_marker.start()
-            return clean_state[m.start(1):end_pos].strip()
-        else:
-            return clean_state[m.start(1):].strip()
-    
-    # Find [LLM_SUBGOAL] marker - read until next marker
-    m = re.search(rf"^{re.escape(_LLM_SUBGOAL_MARK)}\s+(.*)$", clean_state, flags=re.M)
-    if m:
-        start_pos = m.end()
-        # Find the next line that starts with [ or end of string
-        next_marker = re.search(r"^\[", clean_state[start_pos:], flags=re.M)
-        if next_marker:
-            end_pos = start_pos + next_marker.start()
-            return clean_state[m.start(1):end_pos].strip()
-        else:
-            return clean_state[m.start(1):].strip()
-    
+    for tag in (_LLM_SUBGOAL_RAW_MARK, _LLM_SUBGOAL_MARK):
+        pat = re.compile(rf"^{re.escape(tag)}\s+(.*?)(?=^\[|\Z)", re.M | re.S)
+        m = pat.search(clean_state or "")
+        if m:
+            return m.group(1).strip()
     return None
 
 
 # === Variable information (Isabelle-markers only; no heuristics) ===============
 
 def _extract_fixes(state_block: str) -> List[str]:
-    m = re.search(r"^\[LLM_FIXES\]\s+(.*)$", state_block, flags=re.M)
+    m = re.search(r"^\[LLM_FIXES\]\s+(.*)$", state_block or "", flags=re.M)
     if not m:
         return []
     return [t for t in m.group(1).strip().split() if t]
@@ -138,9 +119,8 @@ def _extract_fixes(state_block: str) -> List[str]:
 
 def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List[str], List[str]]:
     """Parse "[LLM_VARS] params: ... | frees: ... | schematics: ..." strictly.
-    Returns (params, frees, schems, skolems) where skolems are identified by __ suffix.
-    Skolem names have the __ suffix removed for presentation.
-    If missing, return empty lists (we do NOT guess heuristically).
+    Returns (params, frees, schems, skolems) where skolems are identified by the
+    '__' suffix (from ML alpha-renaming). We DO NOT guess if markers are absent.
     """
     if not state_block:
         return [], [], [], []
@@ -149,13 +129,14 @@ def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List
         return [], [], [], []
 
     line = m.group(1)
+
     def get(tag: str) -> List[str]:
         mm = re.search(tag + r"\s*([^|]*)", line)
         return (mm.group(1).strip().split() if mm else [])
 
     params, frees, schems = get("params:"), get("frees:"), get("schematics:")
 
-    # Merge in fixes (Isabelle context) without duplication; still Isabelle-provided
+    # Merge in fixes (context-fixed names) without duplication
     fixes = _extract_fixes(state_block)
     if fixes:
         seen, merged = set(), []
@@ -164,12 +145,11 @@ def _extract_variable_info(state_block: str) -> Tuple[List[str], List[str], List
                 seen.add(v)
                 merged.append(v)
         frees = merged
-    
-    # Separate Skolem variables (ending with __) from truly free variables
-    # Remove the __ suffix from Skolem names for presentation
+
+    # Skolems are the names ending with '__' (strip the suffix for presentation)
     skolems = [v.rstrip('_') for v in frees if v.endswith('__')]
     true_frees = [v for v in frees if not v.endswith('__')]
-    
+
     return params, true_frees, schems, skolems
 
 
@@ -182,14 +162,15 @@ def _effective_goal_from_state(
     hole_span: Tuple[int, int] = (0, 0),
     trace: bool = False,
 ) -> str:
-    """Build effective goal from alpha-renamed subgoal.
-    
-    The subgoal from [LLM_SUBGOAL] has the form: f1 ⟹ f2 ⟹ ... ⟹ fn ⟹ g
-    where f1...fn are chained facts and g is the conclusion.
-    
-    Skolem variables (ending with __) get meta-level quantification ⋀,
-    and have their __ suffix removed for presentation.
-    Truly free variables remain free.
+    """Build effective goal from the alpha-renamed subgoal reported by Isabelle.
+
+    The subgoal printed under [LLM_SUBGOAL*] has the form: f1 ⟹ … ⟹ fn ⟹ g.
+    We reconstruct a single meta-level goal and annotate variable classes.
+
+    Design choices (systematic, non-heuristic):
+    - Use Isabelle-provided markers only; no textual guessing.
+    - Treat *both* case-parameters (params) and skolemised names as meta-parameters:
+      we introduce leading ⋀-quantifiers for them. Context frees stay free.
     """
     if not state_block or not state_block.strip():
         return fallback_goal
@@ -201,38 +182,36 @@ def _effective_goal_from_state(
     if not renamed_subgoal:
         return fallback_goal
 
-    params, frees, schems, skolems = _extract_variable_info(state_block)  # <-- THIS LINE MUST HAVE 4 VARIABLES
+    params, frees, schems, skolems = _extract_variable_info(state_block)
 
-    # Replace __ suffixes in the subgoal text with clean names
+    # Replace any skolemised tokens ending with '__' in the *subgoal text* itself
     clean_subgoal = renamed_subgoal
-    for orig_name in [v for v in (clean.split()) if v.endswith('__')]:
-        clean_name = orig_name.rstrip('_')
-        clean_subgoal = re.sub(r'\b' + re.escape(orig_name) + r'\b', clean_name, clean_subgoal)
+    for tok in sorted(set(re.findall(r"\b([A-Za-z0-9_]+__)\b", renamed_subgoal))):
+        clean_subgoal = re.sub(r"\b" + re.escape(tok) + r"\b", tok.rstrip('_'), clean_subgoal)
 
-    if trace:
-        print("\n" + "=" * 60)
-        print(f"DEBUG params={params}, frees={frees}, schems={schems}, skolems={skolems}")
-        print(f"DEBUG renamed_subgoal= {renamed_subgoal}")
-        print(f"DEBUG clean_subgoal= {clean_subgoal}")
+    # if trace:
+    #     print("\n" + "=" * 60)
+    #     print(f"DEBUG params={params}, frees={frees}, schems={schems}, skolems={skolems}")
+    #     print(f"DEBUG renamed_subgoal= {renamed_subgoal}")
+    #     print(f"DEBUG clean_subgoal= {clean_subgoal}")
 
-    # Build the goal with meta-level quantification for Skolems
+    # Build the goal with meta-level quantification for params and skolems
     core = clean_subgoal
-    
-    # Add meta-level quantification for Skolem variables (with clean names)
-    if skolems:
-        core = f"⋀{' '.join(skolems)}. {core}"
-    
-    # Wrap params if present (object-level quantification)
-    if params and not core.strip().startswith("∀"):
-        result = f"(∀{' '.join(params)}. {core})"
-    else:
-        result = f"({core})"
+    meta_binders: List[str] = []
+    # Preserve order, dedup: params first, then skolems
+    for v in list(dict.fromkeys((params or []) + (skolems or []))):
+        if v:
+            meta_binders.append(v)
+    if meta_binders:
+        core = f"⋀{' '.join(meta_binders)}. {core}"
 
-    # Attach variable summary
+    result = f"({core})"
+
+    # Attach variable summary (purely informational)
     if params or frees or schems or skolems:
         parts = []
         if params:
-            parts.append("BOUND:" + ",".join(params))
+            parts.append("BOUND(⋀-params):" + ",".join(params))
         if frees:
             parts.append("FREE:" + ",".join(frees))
         if skolems:
@@ -241,9 +220,10 @@ def _effective_goal_from_state(
             parts.append("SCHEM:" + ",".join(schems))
         result = f"{result}\n[VAR_TYPES: {' | '.join(parts)}]"
 
-    if trace:
-        print(f"DEBUG final goal: {result[:200]}…\n" + "=" * 60 + "\n")
+    # if trace:
+    #     print(f"DEBUG final goal: {result[:200]}…\n" + "=" * 60 + "\n")
     return result
+
 
 def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set, skolems: set = None) -> str:
     if skolems is None:
@@ -252,7 +232,7 @@ def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: s
         return goal
     meta = []
     if params:
-        meta.append(f"- Bound (∀-quantified): {', '.join(sorted(params))}")
+        meta.append(f"- Bound (⋀-parameters): {', '.join(sorted(params))}")
     if skolems:
         meta.append(f"- Skolem (⋀-quantified): {', '.join(sorted(skolems))}")
     if frees:
@@ -341,10 +321,10 @@ def _extract_print_state_from_responses(resps: List) -> str:
                 body = {}
             if isinstance(body, dict) and body.get("kind") == "writeln":
                 text = str(body.get("message", "") or ""); debug_writeln_count += 1
-                print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
+                # print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
                 if any(m in text for m in (_LLM_SUBGOAL_MARK, _LLM_SUBGOAL_RAW_MARK, _LLM_VARS_MARK, "[LLM_FIXES]", "[LLM_TEST]")):
                     debug_llm_found = True
-                    print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
+                    # print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
                     if text.strip() != "[LLM_NOSUBGOAL]":
                         llm_lines.append(text)
                 elif ("goal" in text and "subgoal" in text and not standard):
@@ -366,17 +346,23 @@ def _extract_print_state_from_responses(resps: List) -> str:
                 kind, text = msg.get("kind"), msg.get("message", "") or ""
                 if kind == "writeln":
                     debug_writeln_count += 1
-                    print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
+                    # print(f"[DEBUG writeln #{debug_writeln_count}]: {text[:100]}")
                     if any(m in text for m in (_LLM_SUBGOAL_MARK, _LLM_VARS_MARK, "[LLM_TEST]")):
                         debug_llm_found = True
-                        print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
+                        # print(f"[DEBUG] *** FOUND LLM MARKER in writeln #{debug_writeln_count}: {text[:150]}")
                         llm_lines.append(text)
                     elif ("goal" in text and "subgoal" in text and not standard):
                         llm_lines.append(text); standard = text
                 elif kind == "error":
-                    print(f"[DEBUG ERROR]: {text[:300]}")
+                    benign = (
+                        'Bad context for command "end"' in text
+                        or text.strip().startswith('Undefined fact: "assms"')
+                        or text.strip().startswith('Undefined fact: "set_empty_conv"')
+                    )
+                    if not benign:
+                        print(f"[DEBUG ERROR]: {text[:300]}")
 
-    print(f"[DEBUG] Total writeln messages: {debug_writeln_count}, LLM markers found: {debug_llm_found}")
+    # print(f"[DEBUG] Total writeln messages: {debug_writeln_count}, LLM markers found: {debug_llm_found}")
     return (standard + "\n" + "\n".join(llm_lines)) if (llm_lines and standard) else (standard or "\n".join(llm_lines))
 
 
@@ -389,24 +375,24 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
 
     proof_lines = lines[lemma_start:]
     try:
-        thy = build_theory(_build_ml_prolog() + _inject_var_extraction(proof_lines), add_print_state=True, end_with="sorry")
-        if trace:
-            print("[DEBUG] Theory text being sent to Isabelle:")
-            print("=" * 60)
-            for i, ln in enumerate(thy.splitlines()[:30]):
-                print(f"{i:3d}: {ln}")
-            tl = thy.splitlines()
-            if len(tl) > 40:
-                print("  …")
-                for i, ln in enumerate(tl[-10:], start=len(tl) - 10):
-                    print(f"{i:3d}: {ln}")
-            print("=" * 60)
+        thy = build_theory(_build_ml_prolog() + _inject_var_extraction(proof_lines), add_print_state=True, end_with="oops")
+        # if trace:
+        #     print("[DEBUG] Theory text being sent to Isabelle:")
+        #     print("=" * 60)
+        #     for i, ln in enumerate(thy.splitlines()[:30]):
+        #         print(f"{i:3d}: {ln}")
+        #     tl = thy.splitlines()
+        #     if len(tl) > 40:
+        #         print("  …")
+        #         for i, ln in enumerate(tl[-10:], start=len(tl) - 10):
+        #             print(f"{i:3d}: {ln}")
+        #     print("=" * 60)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state = _extract_print_state_from_responses(resps)
-        if trace:
-            print(f"[DEBUG] State block contains [LLM_VARS]: {_LLM_VARS_MARK in state}")
+        # if trace:
+        #     print(f"[DEBUG] State block contains [LLM_VARS]: {_LLM_VARS_MARK in state}")
         if _looks_truncated(state):
-            thy2 = build_theory(["ML ‹Pretty.setmargin 100000›"] + _build_ml_prolog() + _inject_var_extraction(proof_lines), add_print_state=True, end_with="sorry")
+            thy2 = build_theory(["ML ‹Pretty.setmargin 100000›"] + _build_ml_prolog() + _inject_var_extraction(proof_lines), add_print_state=True, end_with="oops")
             resps2 = _run_theory_with_timeout(isabelle, session, thy2, timeout_s=_ISA_FAST_TIMEOUT_S)
             state2 = _extract_print_state_from_responses(resps2)
             if state2 and len(state2) > len(state):
