@@ -1,6 +1,6 @@
 # ========== Prompt Templates for Repair ==========
 _REPAIR_SYSTEM = """You are an Isabelle/HOL expert.
-You repair ONLY the local Isar SNIPPET around a failing hole.
+You repair ONLY the local Isar SNIPPET around a failing hole to make it verfiable in Isabelle/HOL.
 Do NOT regenerate the whole proof. Return a JSON array (≤3) of patch operations.
 
 ALLOWED OPS (SCHEMA EXACTLY):
@@ -13,10 +13,9 @@ STRICT RULES
 - Do NOT change lemma headers, case labels, indentation, or add/remove 'qed'.
 - Do NOT reinsert any line already present in SNIPPET or RECENT_STEPS.
 - Use ONLY identifiers present in STATE_BEFORE_HOLE, SNIPPET, or FACTS_CANDIDATES.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
 - In `using`, reference named facts only; never paste raw propositions or quoted goals.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Prefer small, compile-friendly steps: automation (`simp/auto/fastforce`), rule/intro/elim, or a tiny `have … qed` with `sorry`.
-- Each op must embody a different strategy family (e.g., automation vs rule vs micro-have).
 - Output MUST be valid JSON (no comments, no code fences, no trailing commas).
 """
 
@@ -52,7 +51,7 @@ SNIPPET
 Return ONLY the JSON array of patch ops."""
 
 _BLOCK_SYSTEM = """You are an Isabelle/HOL expert.
-You propose a replacement for the provided Isabelle/Isar BLOCK.
+You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be verified in Isabelle/HOL.
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
@@ -65,6 +64,7 @@ STRICT RULES
 - In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::=
@@ -131,7 +131,7 @@ Return ONLY the new BLOCK text (no fences)."""
 SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
 
 TASK
-Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and compiles. Leave nontrivial reasoning steps as `sorry`.
+Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and is verifiable in Isabelle/HOL. Leave nontrivial reasoning steps as `sorry`.
 
 HARD OUTPUT RULES
 - Output ONLY Isabelle/Isar (no prose, no code fences).
@@ -143,9 +143,8 @@ HARD OUTPUT RULES
   • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
   • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
   • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`. Otherwise leave `sorry`.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
 - Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
-- Avoid one-liner “by …” closings if any nontrivial step remains.
 
 LIGHT GRAMMAR (allowed shapes)
 lemma "{goal}"

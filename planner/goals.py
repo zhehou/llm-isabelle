@@ -206,53 +206,7 @@ def _effective_goal_from_state(
         core = f"⋀{' '.join(meta_binders)}. {core}"
 
     result = f"({core})"
-
-    # Attach variable summary (purely informational)
-    if params or frees or schems or skolems:
-        parts = []
-        if params:
-            parts.append("BOUND(⋀-params):" + ",".join(params))
-        if frees:
-            parts.append("FREE:" + ",".join(frees))
-        if skolems:
-            parts.append("SKOLEM:" + ",".join(skolems))
-        if schems:
-            parts.append("SCHEM:" + ",".join(schems))
-        result = f"{result}\n[VAR_TYPES: {' | '.join(parts)}]"
-
-    # if trace:
-    #     print(f"DEBUG final goal: {result[:200]}…\n" + "=" * 60 + "\n")
     return result
-
-
-def _format_goal_with_metadata(goal: str, params: set, frees: set, schematics: set, skolems: set = None) -> str:
-    if skolems is None:
-        skolems = set()
-    if not (params or frees or schematics or skolems):
-        return goal
-    meta = []
-    if params:
-        meta.append(f"- Bound (⋀-parameters): {', '.join(sorted(params))}")
-    if skolems:
-        meta.append(f"- Skolem (⋀-quantified): {', '.join(sorted(skolems))}")
-    if frees:
-        meta.append(f"- Free (from context): {', '.join(sorted(frees))}")
-    if schematics:
-        meta.append(f"- Schematic (unification vars): {', '.join(sorted(schematics))}")
-    return f"{goal}\n\nVariable types:\n" + "\n".join(meta)
-
-
-def _effective_goal_from_state_alt(
-    state_block: str,
-    fallback_goal: str,
-    full_text: str = "",
-    hole_span: Tuple[int, int] = (0, 0),
-    trace: bool = False,
-) -> str:
-    params, frees, schems, skolems = _extract_variable_info(state_block)
-    goal = _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
-    return _format_goal_with_metadata(goal, set(params), set(frees), set(schems), set(skolems))
-
 
 # === Printing state before a hole (ML-assisted) ================================
 
@@ -402,21 +356,3 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
         if trace:
             print(f"[DEBUG] Exception: {e}")
         return ""
-
-
-# --- Legacy helpers retained (lightweight wrappers / no-ops) ------------------
-
-def _original_goal_from_state(
-    state_block: str,
-    fallback_goal: Optional[str] = None,
-    full_text: str = "",
-    hole_span: Tuple[int, int] = (0, 0),
-    trace: bool = False,
-) -> str:
-    """Legacy alias for compatibility with older driver imports.
-    Accepts the old single-argument call form. If fallback_goal is omitted,
-    default to an empty string.
-    """
-    if fallback_goal is None:
-        fallback_goal = ""
-    return _effective_goal_from_state(state_block, fallback_goal, full_text, hole_span, trace)
