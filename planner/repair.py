@@ -846,15 +846,23 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
                 if fp not in [_fingerprint_block(x) for x in lst]:
                     lst.insert(0, blk_with_sorry)
                     del lst[_MAX_PREV_BLOCKS:]        
-        patched = "\n".join(lines[:start] + [blk_with_sorry] + lines[end:])
+        
+        # FIX: Properly replace the block by splitting into lines
+        new_block_lines = blk_with_sorry.splitlines()
+        patched_lines = lines[:start] + new_block_lines + lines[end:]
+        patched = "\n".join(patched_lines)
         
         thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
         ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
         
         if ok:
             return patched
+        
+        # Update for next iteration - recalculate indices based on new block size
         current_text = patched
-        lines = current_text.splitlines()
+        lines = patched_lines  # Use the already-split lines
+        # Adjust end index: new_end = start + len(new_block_lines)
+        end = start + len(new_block_lines)
     
     return current_text
 
