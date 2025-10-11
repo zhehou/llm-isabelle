@@ -4,7 +4,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 from typing import Iterable, List, Optional, Tuple
 
-from prover.isabelle_api import build_theory, last_print_state_block, run_theory
+from prover.isabelle_api import build_theory, last_print_state_block, run_theory, finished_ok
 
 # --- Constants ----------------------------------------------------------------
 _LLM_SUBGOAL_MARK = "[LLM_SUBGOAL]"
@@ -34,8 +34,9 @@ def _verify_full_proof(isabelle, session: str, text: str) -> bool:
     """Return True iff the full Isar text checks under _ISA_VERIFY_TIMEOUT_S."""
     try:
         thy = build_theory(text.splitlines(), add_print_state=False, end_with=None)
-        _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
-        return True
+        result = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
+        ok, _ = finished_ok(result)
+        return ok
     except Exception:
         return False
 

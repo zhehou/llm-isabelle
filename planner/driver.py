@@ -188,11 +188,18 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
         )
         
         if applied and patched != full:
-            full = patched
-            if _verify_full_proof(isa, session, full):
+            if _verify_full_proof(isa, session, patched):
+                full = patched
                 return full, True
-            t_spans = _tactic_spans_topdown(full)
-            continue
+            # FIX 3: Open sorries on unverified partial progress
+            if trace:
+                print("[repair] Partial progress in topdown repair (unverified). Opening sorries...")
+            full = patched
+            full2, opened = _open_minimal_sorries(isa, session, full)
+            if opened:
+                full = full2
+                t_spans = _tactic_spans_topdown(full)
+                continue
         i += 1
     
     return full, False
@@ -327,49 +334,89 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         
         goal_text = _extract_goal_from_lemma_line(lemma_line)
         fills, failed = [], []
-        # map from stable hole key (byte offset of the hole start) -> resume stage (0..3)
         repair_progress: dict[int, int] = {}
-        # track attempts per (hole, stage) so we can cap stage-2 and trigger regeneration
         stage_tries: dict[Tuple[int, int], int] = {}
-        STAGE2_CAP = 3  # after 3 failed stage-2 attempts, regenerate whole proof
-        # log de-dup for "Skipping fill..." so we don't spam
-        _skip_fill_logged_once: set[Tuple[str, int]] = set()       
+        STAGE2_CAP = 3
+        _skip_fill_logged_once: set[Tuple[str, int]] = set()
+        
+        # NEW: Track which hole we're currently focusing on to ensure we don't skip ahead
+        focused_hole_key: Optional[int] = None
         
         while "sorry" in full and left_s() > 0:
             spans = find_sorry_spans(full)
             if not spans:
                 break
             
-            span = spans[0]
-            hole_key = _hole_fingerprint(full, span)  # stable identity across minor shifts
+            # NEW: If we have a focused hole, find it. Otherwise take the first.
+            span = None
+            if focused_hole_key is not None:
+                for s in spans:
+                    if _hole_fingerprint(full, s) == focused_hole_key:
+                        span = s
+                        break
+                if span is None:
+                    # Focused hole was closed! Clear focus and take first hole.
+                    if trace:
+                        print(f"[fill] Focused hole @{focused_hole_key} was closed. Moving to first hole.")
+                    focused_hole_key = None
+            
+            if span is None:
+                span = spans[0]
+            
+            hole_key = _hole_fingerprint(full, span)
             per_hole_budget = int(max(5, left_s() / max(1, len(spans))))
 
-            # If this hole already entered repair escalation, skip fill and go straight to repairs.
             start_stage = repair_progress.get(hole_key, 0)
+            
+            # Always try fill first unless we're in escalated repair stages
             if start_stage == 0:
-                # Try to fill this hole once.
                 full2, ok, script = _fill_one_hole(
                     isa, session, full, span, goal_text, model,
                     per_hole_timeout=per_hole_budget, trace=trace
                 )
 
-                # Strict policy: commit only verified changes (ok=True).
                 if ok and full2 != full:
+                    # Fill succeeded and verified!
                     full = full2
                     fills.append(script)
-                    # hole consumed; forget its progress and re-scan from the top
                     repair_progress.pop(hole_key, None)
+                    focused_hole_key = None  # Clear focus, move to next hole
                     continue
+                elif not ok and full2 != full:
+                    # Fill made partial progress but didn't verify
+                    if trace:
+                        print(f"[fill] Partial progress from fill (unverified). Opening sorries and staying focused on this block...")
+                    full = full2
+                    full2, opened = _open_minimal_sorries(isa, session, full)
+                    if opened:
+                        full = full2
+                        # CRITICAL: Stay focused on this hole (or the first sorry in this block)
+                        # Don't reset progress - keep trying to fill the newly opened sorries
+                        focused_hole_key = hole_key  # Keep working on this area
+                        continue
+                    else:
+                        # Couldn't open sorries - escalate to repair
+                        if trace:
+                            print(f"[fill] Could not open sorries. Escalating to repair stage 1...")
+                        repair_progress[hole_key] = 1
+                        focused_hole_key = hole_key
+                        # Fall through to repair
+                else:
+                    # Fill made no progress - escalate to repair
+                    if trace:
+                        print(f"[fill] Fill made no progress. Escalating to repair stage 1...")
+                    repair_progress[hole_key] = 1
+                    focused_hole_key = hole_key
+                    # Fall through to repair
             else:
-                # Only print this once per (hole,stage) to avoid log spam
                 if trace and (hole_key, start_stage) not in _skip_fill_logged_once:
                     print(
-                        f"[fill] Skipping fill for hole @{hole_key}; escalate repairs from stage {start_stage}"
+                        f"[fill] Skipping fill for hole @{hole_key}; running repairs at stage {start_stage}"
                     )
                     _skip_fill_logged_once.add((hole_key, start_stage))
 
-            # Try CEGIS repairs (possibly starting at an escalated stage)
-            if repairs and left_s() > 6:
+            # Try CEGIS repairs (only if we're in repair mode for this hole)
+            if repair_progress.get(hole_key, 0) > 0 and repairs and left_s() > 6:
                 state = _print_state_before_hole(isa, session, full, span, trace)
                 eff_goal = _effective_goal_from_state(state, goal_text, full, span, trace)
                 
@@ -378,23 +425,47 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                     isabelle=isa, session=session, 
                     repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
                     max_ops_to_try=max_repairs_per_hole, beam_k=2, 
-                    allow_whole_fallback=False,  # <-- remove stage-3 from the inner loop
+                    allow_whole_fallback=False,
                     trace=trace, resume_stage=start_stage,
                 )
-                # Commit only verified patches; otherwise escalate stage.
+                
                 if applied and patched != full:
-                    full = patched
-                    repair_progress.clear()   # restart top-down after accepting a repair
-                    stage_tries.clear()
-                    continue
-                # No commit → count this attempt at the current stage
+                    if _verify_full_proof(isa, session, patched):
+                        # Repair succeeded and verified!
+                        if trace:
+                            print(f"[repair] Stage {start_stage} repair verified! Clearing progress and moving on.")
+                        full = patched
+                        repair_progress.clear()
+                        stage_tries.clear()
+                        focused_hole_key = None  # Clear focus, move to next hole
+                        continue
+                    else:
+                        # Repair made progress but didn't verify - open sorries and retry fill
+                        if trace:
+                            print(f"[repair] Stage {start_stage} partial progress (unverified). Opening sorries and retrying fill...")
+                        full = patched
+                        full2, opened = _open_minimal_sorries(isa, session, full)
+                        if opened:
+                            full = full2
+                            # CRITICAL: Reset to stage 0 (fill) and stay focused on this block
+                            repair_progress[hole_key] = 0
+                            stage_tries.pop((hole_key, start_stage), None)
+                            focused_hole_key = hole_key
+                            continue
+                        else:
+                            # Couldn't open sorries - escalate stage
+                            if trace:
+                                print(f"[repair] Could not open sorries; escalating stage...")
+                
+                # Repair didn't help or couldn't open sorries → count attempt and escalate
                 key = (hole_key, start_stage)
                 stage_tries[key] = stage_tries.get(key, 0) + 1
-                # If we are at stage < 2, escalate within local/subproof track
+                
                 if start_stage < 2:
                     repair_progress[hole_key] = min(start_stage + 1, 2)
+                    focused_hole_key = hole_key  # Stay focused
                 else:
-                    # We are at stage==2 (case/subproof track). If cap reached → whole regeneration.
+                    # Stage 2 cap reached → regenerate whole proof
                     if stage_tries.get((hole_key, 2), 0) >= STAGE2_CAP:
                         if trace:
                             print(f"[repair] Stage-2 cap reached for hole @{hole_key}. Regenerating whole proof…")
@@ -406,11 +477,12 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                         )
                         if ok_re and new_full != full:
                             full = new_full
-                            # Restart everything from top after replacement
                             repair_progress.clear()
                             stage_tries.clear()
+                            focused_hole_key = None
                             continue
-                        # If regeneration didn’t yield a verified patch, fall back to a BRAND-NEW outline
+                        
+                        # Regeneration failed → fresh outline
                         if trace:
                             print("[repair] Whole regeneration failed to verify; proposing a fresh outline…")
                         temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
@@ -424,12 +496,11 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                         full = best.text
                         repair_progress.clear()
                         stage_tries.clear()
+                        focused_hole_key = None
                         continue
-                    # else: stay on stage 2 and try again (bounded by the cap)
+                    
                     repair_progress[hole_key] = 2
-            
-            # Keep focusing on the same top hole unless it was actually removed.
-            # (No hole_idx increment; re-enter loop to either escalate further or try next strategy.)
+                    focused_hole_key = hole_key  # Stay focused
         
         # Final verification
         success = ("sorry" not in full)

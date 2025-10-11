@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeo
 import requests
 from typing import Callable
 from planner.repair_inputs import _find_first_hole, _hole_line_bounds, _APPLY_OR_BY, _snippet_window, _clamp_line_index, _quick_state_and_errors, _extract_error_lines, _run_theory_with_timeout, _print_state_before_hole, _nearest_header, _recent_steps, _normalize_error_texts, _facts_from_state, get_counterexample_hints_for_repair, _earliest_failure_anchor
-from planner.prompts import _REPAIR_SYSTEM, _REPAIR_USER, _BLOCK_SYSTEM, _BLOCK_USER
+from planner.prompts import _BLOCK_SYSTEM, _BLOCK_USER
 from prover.config import MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S, OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
 
@@ -298,24 +298,6 @@ def _apply_insert_have_block(full_text: str, hole_span: Tuple[int, int], label: 
     block = [f'{pad}have {label}: "{statement}"', f"{pad}  proof -", f"{pad}    sorry", f"{pad}  qed"]
     new_lines = lines[:anchor_idx] + block + lines[anchor_idx:]
     return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
-
-# ========== Repair Proposal Functions ==========
-def propose_local_repairs(*, goal: str, state_block: str, errors: List[str], ce_hints: Dict[str, List[str]], 
-                         block_snippet: str, nearest_header: str, recent_steps: List[str], facts: List[str],
-                         model: Optional[str], timeout_s: int, 
-                         why: str = "Previous attempt failed; propose a new approach.") -> str:
-    ce_list = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
-    prompt = _REPAIR_SYSTEM + "\n\n" + _REPAIR_USER.format(
-        goal=goal, state_block=(state_block or "").strip(),
-        errors="\n".join(f"- {e}" for e in errors) or "(none)",
-        ce_hints="\n".join(ce_list) or "(none)", block_snippet=block_snippet.rstrip(),
-        nearest_header=nearest_header.strip(), recent_steps="\n".join(recent_steps) or "(none)",
-        facts_list=", ".join(facts) or "(none)", why=why
-    )
-    try:
-        return _generate_simple(prompt, model=model, timeout_s=timeout_s)
-    except Exception:
-        return "[]"
 
 def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], state_block: str, 
                          block_text: str, model: Optional[str], timeout_s: int,
@@ -627,62 +609,6 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
     
     return "\n".join(block_lines)
 
-# ========== Main Repair Functions ==========
-def try_local_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: str, model: Optional[str], 
-                     isabelle, session: str, repair_budget_s: float = 12.0, max_ops_to_try: int = 2, 
-                     beam_k: int = 1, trace: bool = False) -> Tuple[str, bool, str]:
-    start = time.monotonic()
-    left = lambda: max(0.0, repair_budget_s - (time.monotonic() - start))
-    
-    state0 = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=False)
-    _, errs0 = _quick_state_and_errors(isabelle, session, full_text)
-    hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
-    s, e = _snippet_window(lines, hole_line, radius=12)
-    snippet = "\n".join(lines[s:e])
-    header = _nearest_header(lines, hole_line)
-    rsteps = _recent_steps(lines, hole_line)
-    facts = _facts_from_state(state0, limit=8)
-    ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
-    if isinstance(ce, dict) and ce.get("def_hints"):
-        facts = list(dict.fromkeys(ce["def_hints"] + facts))[:12]
-    
-    mem = _RepairMemory()
-    
-    remaining = left()
-    propose_timeout = int(max(2, min(45, (remaining - 3) * 0.6)))
-    err_texts = _normalize_error_texts(errs0)
-    why_msg = "Previous attempt failed; propose a corrected, different strategy." if err_texts else "Previous attempt did not close the subgoal; propose NEW strategies."
-    
-    raw = "[]"
-    if propose_timeout >= 3:
-        try:
-            raw = propose_local_repairs(goal=goal_text, state_block=state0, errors=err_texts, ce_hints=ce, 
-                                       block_snippet=snippet, nearest_header=header, recent_steps=rsteps, 
-                                       facts=facts, model=model, timeout_s=propose_timeout, why=why_msg)
-        except Exception:
-            pass
-    
-    ops = _parse_repair_ops(raw)
-    if not ops:
-        ops = propose_rule_based_repairs(goal_text, state0, header, facts)
-    
-    for kind, payload in ops[:max_ops_to_try]:
-        if left() <= 0:
-            break
-        if kind == "insert_before_hole":
-            cand, decisive = _apply_insert_before_hole(full_text, hole_span, payload.line), payload.line
-        elif kind == "replace_in_snippet":
-            cand, decisive = _apply_replace_in_snippet(full_text, hole_span, payload.find, payload.replace), payload.replace
-        elif kind == "insert_have_block":
-            cand = _apply_insert_have_block(full_text, hole_span, payload.label, payload.statement, payload.after_line_matching, payload.body_hint)
-            decisive = payload.body_hint or f'have "{payload.statement}"'
-        else:
-            continue
-        if cand != full_text:
-            return cand, False, f"beam:{kind or 'local'}(partial)"
-    
-    return full_text, False, "repairs-did-not-help"
-
 def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: str, model: Optional[str], 
                      isabelle, session: str, repair_budget_s: float = 15.0, max_ops_to_try: int = 3, 
                      beam_k: int = 1, allow_whole_fallback: bool = False, trace: bool = False, 
@@ -692,28 +618,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     current_text = full_text
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     _log("repair", "State block", state0, trace=trace)
-    # Deprecate the old "whole-proof fallback" inside CEGIS. The driver now owns whole regeneration.
-    if allow_whole_fallback and trace:
-        print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")    
     
-    # Stage 0: Local repair
-    if resume_stage <= 0 and left() > 5.0:
-        eff_k = 1 if left() < 15.0 else max(1, beam_k)
-        if trace:
-            print("[repair] Trying local proof step repair…")
-        patched, ok, tag = try_local_repairs(full_text=current_text, hole_span=hole_span, goal_text=goal_text, 
-                                            model=model, isabelle=isabelle, session=session, 
-                                            repair_budget_s=min(12.0, max(8.0, left() * 0.4)), 
-                                            max_ops_to_try=max_ops_to_try, beam_k=eff_k, trace=trace)
-        if ok and patched != current_text:
-            if trace:
-                print(f"[cegis] local repair accepted")
-            return patched, True, f"stage=0 local:{tag}"
-        elif patched != current_text:
-            current_text = patched
-            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+    if allow_whole_fallback and trace:
+        print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")        
 
-    # Shared prior-failure store (per hole) used across block kinds
     prior_store: Dict[str, List[str]] = {}
 
     # Stage 1: have/show/obtain micro-block
@@ -735,7 +643,8 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=1 block:have-show"
-            return current_text, True, "stage=1 partial-progress"
+            # FIX: Return False for unverified changes
+            return current_text, False, "stage=1 partial-progress"
         lines = current_text.splitlines()
         state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
@@ -751,7 +660,8 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=2 block:case"
-            return current_text, True, "stage=2 partial-progress"
+            # FIX: Return False for unverified changes
+            return current_text, False, "stage=2 partial-progress"
     
     # Stage 2b: Subproof
     ps, pe = _enclosing_subproof(lines, focus_line)
@@ -765,9 +675,11 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=2 block:subproof"
-            return current_text, True, "stage=2 partial-progress"
+            # FIX: Return False for unverified changes
+            return current_text, False, "stage=2 partial-progress"
+    
     if current_text != full_text:
-        return current_text, True, f"stage={resume_stage} partial-progress"
+        return current_text, False, f"stage={resume_stage} partial-progress"
     return full_text, False, f"stage={resume_stage} cegis-nohelp"
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 

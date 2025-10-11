@@ -1,62 +1,13 @@
 # ========== Prompt Templates for Repair ==========
-_REPAIR_SYSTEM = """You are an Isabelle/HOL expert.
-You repair ONLY the local Isar SNIPPET around a failing hole to make it verfiable in Isabelle/HOL.
-Do NOT regenerate the whole proof. Return a JSON array (≤3) of patch operations.
-
-ALLOWED OPS (SCHEMA EXACTLY):
-1) {"insert_before_hole": "<ONE LINE>"}
-2) {"replace_in_snippet": {"find": "<EXACT LINE>", "replace": "<NEW LINE>"}}
-3) {"insert_have_block": {"label":"H","statement":"<FORMULA>","after_line_matching":"<LINE>","body_hint":"<ONE LINE>"}}
-
-STRICT RULES
-- Edit ONLY inside the given SNIPPET; keep all surrounding text verbatim.
-- Do NOT change lemma headers, case labels, indentation, or add/remove 'qed'.
-- Do NOT reinsert any line already present in SNIPPET or RECENT_STEPS.
-- Use ONLY identifiers present in STATE_BEFORE_HOLE, SNIPPET, or FACTS_CANDIDATES.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
-- In `using`, reference named facts only; never paste raw propositions or quoted goals.
-- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Output MUST be valid JSON (no comments, no code fences, no trailing commas).
-"""
-
-_REPAIR_USER = """WHAT FAILED:
-{why}
-
-GOAL:
-{goal}
-
-STATE_BEFORE_HOLE:
-{state_block}
-
-ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that have similar errors):
-{errors}
-
-COUNTEREXAMPLE_HINTS (learn from counterexamples of previous goals and avoid generating goals based on the counterexamples):
-{ce_hints}
-
-FACTS_CANDIDATES (named thms you may cite in 'using'/'simp add:'):
-{facts_list}
-
-NEAREST_HEADER:
-{nearest_header}
-
-RECENT_STEPS (avoid near-duplicates):
-{recent_steps}
-
-SNIPPET:
-<<<SNIPPET
-{block_snippet}
-SNIPPET
-
-Return ONLY the JSON array of patch ops."""
 
 _BLOCK_SYSTEM = """You are an Isabelle/HOL expert.
 You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be verified in Isabelle/HOL.
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
-- Edit ONLY inside this BLOCK; keep lemma header and outer structure unchanged EXCEPT:
-  • You MAY change the opening `proof (…)`/`induction …`/`cases …` if needed to avoid repeating a failed approach.
+- Edit ONLY inside this BLOCK; keep lemma header unchanged if it's present.
+- If BLOCK starts with a line that contains "... have ...", then that's the local goal line and keep it exactly as is. Only repair the proof in the following lines to prove the local goal. Don't create new chained goals using "... have/show ..." in this case. 
+- If BLOCK doesn't start with a line that contains "... have ...", then it's a larger block, and you MAY change the opening `proof (…)`/`induction …`/`cases …` if needed to avoid repeating a failed approach, repair the entire block, as long as you aim to prove the GOAL.
 - Keep case names/labels stable; close every branch; do not add/remove ‘lemma’/‘qed’.
 - Maintain indentation and whitespace style of the original.
 
@@ -65,6 +16,7 @@ STRICT RULES
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
 - When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
+- Don't add "qed" if there isn't a matching "proof".
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::=
