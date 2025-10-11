@@ -5,10 +5,10 @@ You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
-- Edit ONLY inside this BLOCK; keep lemma header unchanged if it's present.
-- If BLOCK starts with a line that contains "... have ...", then that's the local goal line and keep it exactly as is. Only repair the proof in the following lines to prove the local goal. Don't create new chained goals using "... have/show ..." in this case. 
-- If BLOCK doesn't start with a line that contains "... have ...", then it's a larger block, and you MAY change the opening `proof (…)`/`induction …`/`cases …` if needed to avoid repeating a failed approach, repair the entire block, as long as you aim to prove the GOAL.
-- Keep case names/labels stable; close every branch; do not add/remove ‘lemma’/‘qed’.
+- Edit ONLY inside the BLOCK; keep lemma header unchanged if it's present.
+- Case 1: If BLOCK starts with a line that contains "... have ...", then that's the local goal line and keep it exactly as is. Only repair the proof in the following lines to prove the local goal. Don't create new chained goals like "... have/show ..." in this case. 
+- Case 2: If BLOCK doesn't start with a line that contains "... have ...", then it's a larger block, and you MAY change the opening `proof (…)`/`induction …`/`cases …` for a different proof strategy, repair the entire block, as long as you aim to prove the GOAL.
+- Keep case names/labels stable; do not add/remove ‘lemma’/‘qed’.
 - Maintain indentation and whitespace style of the original.
 
 STRICT RULES
@@ -56,8 +56,10 @@ _BLOCK_USER = """WHAT FAILED:
 GOAL:
 {goal}
 
-LOCAL_CONTEXT (state before the hole):
-{state_block}
+PROOF_CONTEXT (lemma header and all proven statements before the BLOCK - you can reference any named facts from here):
+<<<CONTEXT
+{proof_context}
+CONTEXT
 
 ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that have similar errors):
 {errors}

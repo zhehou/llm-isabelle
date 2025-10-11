@@ -108,6 +108,29 @@ def _trim_block_for_prompt(text: str, max_chars: int = 800) -> str:
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
 
+def _extract_proof_context(full_text: str, block_start_line: int) -> str:
+    """
+    Extract the lemma header and all proof content before the block.
+    Returns everything from the lemma line up to (but not including) the block.
+    """
+    lines = full_text.splitlines()
+    
+    # Find the lemma/theorem header
+    lemma_line = -1
+    for i in range(min(block_start_line, len(lines) - 1), -1, -1):
+        if re.match(r"^\s*(?:lemma|theorem|corollary|proposition)\b", lines[i]):
+            lemma_line = i
+            break
+    
+    if lemma_line < 0:
+        # No lemma found, return a small window before the block
+        start = max(0, block_start_line - 10)
+        return "\n".join(lines[start:block_start_line]).strip()
+    
+    # Return from lemma header to just before the block
+    context_lines = lines[lemma_line:block_start_line]
+    return "\n".join(context_lines).strip()
+
 # ========== LLM Generation ==========
 def _generate_simple(prompt: str, model: Optional[str] = None, *, timeout_s: Optional[int] = None) -> str:
     m = model or DEFAULT_MODEL
@@ -299,14 +322,16 @@ def _apply_insert_have_block(full_text: str, hole_span: Tuple[int, int], label: 
     new_lines = lines[:anchor_idx] + block + lines[anchor_idx:]
     return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
 
-def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], state_block: str, 
+def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], 
+                         proof_context: str,  # Changed from state_block
                          block_text: str, model: Optional[str], timeout_s: int,
                          why: str = "Previous attempt failed; propose a different block-level change.",
                          prior_failed_blocks: Optional[str] = None) -> str:
     ce = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
     prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
         goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
-        ce_hints="\n".join(ce) or "(none)", state_block=(state_block or "").strip(),
+        ce_hints="\n".join(ce) or "(none)", 
+        proof_context=(proof_context or "").strip(),  # Changed from state_block
         block_text=block_text.rstrip(), why=why,
         prior_failed_blocks=(prior_failed_blocks or "(none)")
     )
@@ -689,8 +714,12 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     err_texts = _normalize_error_texts(errs)
     ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
     block = "\n".join(lines[start:end])
+    
+    # NEW: Extract proof context instead of using state block
+    proof_context = _extract_proof_context(current_text, start)
+    
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
-    # Log what we send to the LLM for transparency
+    _log("repair", "proof_context (LLM input)", proof_context, trace=trace)  # Changed log
     _log("repair", "errors (LLM input)", "\n".join(err_texts) or "(none)", trace=trace)
     ce_list = ce.get("bindings", []) + ce.get("def_hints", []) if isinstance(ce, dict) else []  
     _log("repair", "counterexamples (LLM input)", "\n".join(ce_list) or "(none)", trace=trace)
@@ -704,10 +733,11 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         mem.rounds = rr + 1
         why = f"Previous {block_type}-block attempt did not solve the goal; try a different strategy."
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
+        
         # Build prior failed blocks text (trim + separators)
-        # Always include: ORIGINAL block, then failures from this call, then shared store
         prior_blocks_for_type = list(prior_store.get(block_type, [])) if isinstance(prior_store, dict) else []
         seed_list = [block] + mem.prev_blocks + prior_blocks_for_type
+        
         # De-dup while preserving order (by fingerprint)
         seen: Set[str] = set()
         uniq: List[str] = []
@@ -716,6 +746,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             if fpb and fpb not in seen:
                 seen.add(fpb); uniq.append(b)
         seed_list = uniq
+        
         if seed_list:
             fails_txt = ("\n---\n".join(_trim_block_for_prompt(b) for b in seed_list[:_MAX_PREV_BLOCKS])) or "(none)"
             _log("repair", "prior_block_failures (LLM input)", fails_txt, trace=trace)
@@ -723,14 +754,26 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             fails_txt = "(none)"        
         
         try:
-            blk = _propose_block_repair(goal=goal_text, errors=err_texts, ce_hints=ce, state_block=state0, 
-                                       block_text=block, model=model, timeout_s=timeout, why=why,
-                                       prior_failed_blocks=fails_txt)
+            blk = _propose_block_repair(
+                goal=goal_text, errors=err_texts, ce_hints=ce, 
+                proof_context=proof_context,  # Changed from state_block=state0
+                block_text=block, model=model, timeout_s=timeout, why=why,
+                prior_failed_blocks=fails_txt
+            )
         except Exception:
             blk = ""
         
         if not _is_effective_block(blk):
             continue
+        
+        # STRICT DEDUP: If this block matches ANY prior failure, skip it immediately
+        fp_new = _fingerprint_block(blk)
+        all_prior_fps = set([_fingerprint_block(b) for b in (mem.prev_blocks + prior_blocks_for_type)])
+        
+        if fp_new in all_prior_fps:
+            if trace:
+                print(f"[repair] Skipping duplicate block (fingerprint: {fp_new[:8]}...)")
+            continue  # Don't even try to verify, just skip
         
         before = blk
         if block_type == "case":
@@ -746,6 +789,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
                                                              end_line=end + 1, isabelle=isabelle, 
                                                              session=session, trace=trace)
         _log("repair", f"{block_type}-block (output)", blk_with_sorry, trace=trace)
+        
         # Record this failed candidate into local and shared stores (so next round tries differ)
         fp = _fingerprint_block(blk_with_sorry)
         if fp and fp not in mem.prev_fps:
@@ -775,6 +819,8 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         lines = patched_lines  # Use the already-split lines
         # Adjust end index: new_end = start + len(new_block_lines)
         end = start + len(new_block_lines)
+        # Update proof context for next round too
+        proof_context = _extract_proof_context(current_text, start)
     
     return current_text
 
