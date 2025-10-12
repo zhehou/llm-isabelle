@@ -256,44 +256,48 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
     
     return full, False
 
-
 def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]:
     """Localize failing finisher with minimal opening."""
+    # First check if the whole thing passes
     def runs(ts):
         try:
-            thy = build_theory(ts, add_print_state=True, end_with="sorry")
+            thy = build_theory(ts, add_print_state=False, end_with=None)
             _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
             return True
         except Exception:
             return False
     
-    lines = text.splitlines()
+    if runs(text.splitlines()):
+        return (text if text.endswith("\n") else text + "\n"), False
     
-    # Try whole-line tactics
-    for i, line in enumerate(lines):
-        if not (_TACTIC_LINE_RE.match(line) or line.strip() == "done" or _BARE_DOT.match(line)):
-            continue
-        
-        indent = line[:len(line) - len(line.lstrip(" "))]
-        if runs(lines[:i] + [f"{indent}sorry"] + lines[i + 1:]):
+    # Document fails - find the first failing tactic line
+    _, errs = _quick_state_and_errors(isabelle, session, text)
+    err_lines = _extract_error_lines(errs)
+    if not err_lines:
+        return (text if text.endswith("\n") else text + "\n"), False
+    
+    failing_line_1based = min(err_lines)
+    lines = text.splitlines()
+    failing_idx = failing_line_1based - 1
+    
+    # Find the tactic line at or before the error
+    for i in range(min(failing_idx, len(lines) - 1), -1, -1):
+        line = lines[i]
+        if _TACTIC_LINE_RE.match(line) or line.strip() == "done" or _BARE_DOT.match(line):
+            indent = line[:len(line) - len(line.lstrip(" "))]
             lines[i] = f"{indent}sorry"
             return "\n".join(lines) + ("" if text.endswith("\n") else "\n"), True
-    
-    # Try inline 'by TACTIC' patterns
-    for i, line in enumerate(lines):
-        m = _INLINE_BY_TAIL.search(line) if line else None
-        if not m:
-            continue
         
-        indent = line[:len(line) - len(line.lstrip(" "))]
-        header = line[:m.start()].rstrip()
-        if runs(lines[:i] + [header, f"{indent}sorry"] + lines[i + 1:]):
+        # Handle inline 'by'
+        m = _INLINE_BY_TAIL.search(line)
+        if m:
+            indent = line[:len(line) - len(line.lstrip(" "))]
+            header = line[:m.start()].rstrip()
             lines[i] = header
             lines.insert(i + 1, f"{indent}sorry")
             return "\n".join(lines) + ("" if text.endswith("\n") else "\n"), True
     
     return (text if text.endswith("\n") else text + "\n"), False
-
 
 # ============================================================================
 # Public API
