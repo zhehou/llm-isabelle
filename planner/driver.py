@@ -257,46 +257,55 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
     return full, False
 
 def _open_minimal_sorries(isabelle, session: str, text: str) -> Tuple[str, bool]:
-    """Localize failing finisher with minimal opening."""
+    """
+    Localize failing finisher with minimal opening.
+    Finds the first tactic that fails verification and replaces it with sorry.
+    """
     # First check if the whole thing passes
-    def runs(ts):
-        try:
-            thy = build_theory(ts, add_print_state=False, end_with=None)
-            _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
-            return True
-        except Exception:
-            return False
-    
-    if runs(text.splitlines()):
+    try:
+        thy = build_theory(text.splitlines(), add_print_state=False, end_with=None)
+        _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
+        print("[_open_minimal_sorries] Document already passes, nothing to open")  # DEBUG
         return (text if text.endswith("\n") else text + "\n"), False
+    except Exception:
+        print("[_open_minimal_sorries] Document fails, looking for failing tactic")  # DEBUG
+        pass
     
-    # Document fails - find the first failing tactic line
+    # Get error information
     _, errs = _quick_state_and_errors(isabelle, session, text)
     err_lines = _extract_error_lines(errs)
+    
     if not err_lines:
+        print("[_open_minimal_sorries] No error lines found")  # DEBUG
         return (text if text.endswith("\n") else text + "\n"), False
     
-    failing_line_1based = min(err_lines)
     lines = text.splitlines()
+    failing_line_1based = min(err_lines)
     failing_idx = failing_line_1based - 1
     
-    # Find the tactic line at or before the error
+    print(f"[_open_minimal_sorries] First error at line {failing_line_1based}: {lines[failing_idx] if 0 <= failing_idx < len(lines) else 'N/A'}")  # DEBUG
+    
+    # Search backwards from error
     for i in range(min(failing_idx, len(lines) - 1), -1, -1):
         line = lines[i]
+        
+        # Check for tactics
         if _TACTIC_LINE_RE.match(line) or line.strip() == "done" or _BARE_DOT.match(line):
+            print(f"[_open_minimal_sorries] Found tactic at line {i+1}: {line}")  # DEBUG
             indent = line[:len(line) - len(line.lstrip(" "))]
             lines[i] = f"{indent}sorry"
             return "\n".join(lines) + ("" if text.endswith("\n") else "\n"), True
         
-        # Handle inline 'by'
         m = _INLINE_BY_TAIL.search(line)
         if m:
+            print(f"[_open_minimal_sorries] Found inline 'by' at line {i+1}: {line}")  # DEBUG
             indent = line[:len(line) - len(line.lstrip(" "))]
             header = line[:m.start()].rstrip()
             lines[i] = header
             lines.insert(i + 1, f"{indent}sorry")
             return "\n".join(lines) + ("" if text.endswith("\n") else "\n"), True
     
+    print("[_open_minimal_sorries] No tactic found to open")  # DEBUG
     return (text if text.endswith("\n") else text + "\n"), False
 
 # ============================================================================
@@ -329,7 +338,6 @@ def plan_outline(goal: str, *, model: Optional[str] = None, outline_k: Optional[
         return best.text
     finally:
         _cleanup_resources(isa, proc)
-
 
 def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *, mode: str = "auto",
                  outline_k: Optional[int] = None, outline_temps: Optional[Iterable[float]] = None,
@@ -395,7 +403,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         STAGE2_CAP = 3
         _skip_fill_logged_once: set[Tuple[str, int]] = set()
         
-        # NEW: Track which hole we're currently focusing on to ensure we don't skip ahead
+        # Track which hole we're currently focusing on
         focused_hole_key: Optional[int] = None
         
         while "sorry" in full and left_s() > 0:
@@ -403,7 +411,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
             if not spans:
                 break
             
-            # NEW: If we have a focused hole, find it. Otherwise take the first.
+            # If we have a focused hole, find it. Otherwise take the first.
             span = None
             if focused_hole_key is not None:
                 for s in spans:
@@ -476,9 +484,11 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                     _skip_fill_logged_once.add((hole_key, start_stage))
 
             # Try CEGIS repairs (only if we're in repair mode for this hole)
-            # Refresh stage just before calling repairs to avoid staleness
             current_stage = repair_progress.get(hole_key, 0)
             if current_stage > 0 and repairs and left_s() > 6:
+                # Save the current state before repair
+                full_before_repair = full
+                
                 state = _print_state_before_hole(isa, session, full, span, trace)
                 eff_goal = _effective_goal_from_state(state, goal_text, full, span, trace)
                 
@@ -561,20 +571,38 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                                 focused_hole_key = None
                                 continue
                         
-                        # Still have attempts left at this stage → open sorries and retry fill
+                        # Still have attempts left at this stage → open sorries and retry
                         if trace:
                             print(f"[repair] Stage {start_stage} made changes but unverified (attempt {stage_tries[key]}/{STAGE1_CAP if start_stage == 1 else STAGE2_CAP}). Opening sorries and retrying fill...")
+                        
                         full = patched
                         full2, opened = _open_minimal_sorries(isa, session, full)
+                        
                         if opened:
                             full = full2
-                            # CRITICAL FIX: DON'T reset repair_progress to 0!
-                            # Keep the current stage so after fill fails, we resume at this stage
-                            # But clear focused_hole_key so it tries fill on newly opened sorries
-                            focused_hole_key = None  # Changed from setting to hole_key
+                            # Find the new sorry and keep the same stage
+                            old_start = span[0]
+                            new_spans = find_sorry_spans(full)
+                            near = _nearest_sorry_span(new_spans, old_start)
+                            if near:
+                                new_hole_key = _hole_fingerprint(full, near)
+                                # Keep the current stage - we're still repairing the same logical block
+                                repair_progress[new_hole_key] = start_stage
+                                focused_hole_key = new_hole_key
+                            else:
+                                focused_hole_key = None
                             continue
                         else:
-                            # Couldn't open sorries - escalate immediately
+                            # Could not open sorries - this means repair removed the sorry but didn't fix the proof
+                            # Check if there are any sorries left at all
+                            remaining_sorries = find_sorry_spans(full)
+                            if not remaining_sorries:
+                                # Repair removed the sorry without fixing the proof - revert and escalate
+                                if trace:
+                                    print(f"[repair] Repair removed sorry without fixing proof. Reverting and escalating...")
+                                full = full_before_repair
+                                
+                            # Escalate immediately
                             if trace:
                                 print(f"[repair] Could not open sorries; escalating stage...")
                             if start_stage < 2:
