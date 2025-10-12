@@ -476,12 +476,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 1 and hs_s >= 0 and left() > 5.0:
         if trace:
             print("[repair] Trying have/show block repair…")
-        current_text = _repair_block(current_text, lines, hs_s, hs_e, goal_text, state0,
-                                     isabelle, session, model, left, trace, "have-show", 1, prior_store)
-        if current_text != full_text:
-            thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
+        patched = _repair_block(current_text, lines, hs_s, hs_e, goal_text, state0,
+                               isabelle, session, model, left, trace, "have-show", 1, prior_store)
+        if patched != current_text:
+            thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-            return current_text, ok, f"stage=1 {'block:have-show' if ok else 'partial-progress'}"
+            return patched, ok, f"stage=1 {'block:have-show' if ok else 'partial-progress'}"
     
     lines = current_text.splitlines()
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
@@ -491,26 +491,26 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     if resume_stage <= 2 and cs >= 0 and left() > 5.0:
         if trace:
             print("[repair] Trying case-block repair…")
-        current_text = _repair_block(current_text, lines, cs, ce, goal_text, state0, isabelle, session,
-                                     model, left, trace, "case", 2, prior_store)
-        if current_text != full_text:
-            thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
+        patched = _repair_block(current_text, lines, cs, ce, goal_text, state0, isabelle, session,
+                               model, left, trace, "case", 2, prior_store)
+        if patched != current_text:
+            thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-            return current_text, ok, f"stage=2 {'block:case' if ok else 'partial-progress'}"
+            return patched, ok, f"stage=2 {'block:case' if ok else 'partial-progress'}"
     
     # Stage 2b: Subproof
     ps, pe = _enclosing_subproof(lines, focus_line)
     if resume_stage <= 2 and ps >= 0 and left() > 3.0:
         if trace:
             print("[repair] Trying subproof repair…")
-        current_text = _repair_block(current_text, lines, ps, pe, goal_text, state0, isabelle, session,
-                                     model, left, trace, "subproof", 2, prior_store)
-        if current_text != full_text:
-            thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
+        patched = _repair_block(current_text, lines, ps, pe, goal_text, state0, isabelle, session,
+                               model, left, trace, "subproof", 2, prior_store)
+        if patched != current_text:
+            thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-            return current_text, ok, f"stage=2 {'block:subproof' if ok else 'partial-progress'}"
+            return patched, ok, f"stage=2 {'block:subproof' if ok else 'partial-progress'}"
     
-    return current_text, current_text != full_text, f"stage={resume_stage} {'partial-progress' if current_text != full_text else 'cegis-nohelp'}"
+    return current_text, False, f"stage={resume_stage} cegis-nohelp"
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str,
                  state0: str, isabelle, session: str, model: Optional[str], left, trace: bool,
@@ -529,6 +529,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
+    last_attempt = None  # Track if we made any valid attempts
     
     for rr in range(rounds):
         if left() <= 3.0:
@@ -611,13 +612,12 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         if ok:
             return patched
         
-        # Update state for next round
-        current_text = patched
-        lines = patched_lines
-        end = start + len(new_block_lines)
-        proof_context = _extract_proof_context(current_text, start)
+        # Track that we made at least one valid attempt (even if unverified)
+        last_attempt = patched
     
-    return current_text
+    # Return last attempt if we made any, otherwise return original
+    # This ensures driver can detect we tried something
+    return last_attempt if last_attempt is not None else current_text
 
 def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[str],
                            isabelle, session: str, budget_s: float = 20.0,
@@ -643,7 +643,19 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     
     patched = _repair_block(full_text, lines, ws, we, goal_text, "", isabelle, session,
                             model, left, trace, "whole", 3, prior_store)
-    
-    if patched != full_text:
-        return patched, True, "regen:whole-proof"
-    return full_text, False, "regen:no-change"
+    # Decide result & verify before returning
+    if not patched or patched == full_text:
+        return full_text, False, "whole:no-change"
+    try:
+        thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
+        ok, _ = finished_ok(_run_theory_with_timeout(
+            isabelle, session, thy, timeout_s=int(min(60, max(15, budget_s)))
+        ))
+    except Exception:
+        ok = False
+    return patched, ok, ("whole:verified" if ok else "whole:unverified")
+
+# Add this comment at the end of the file to clarify the repair flow:
+# Note: Driver's _handle_repair_result should return should_cont=False when stage cap is reached
+# so that whole-proof regeneration can be triggered. The current implementation in driver.py
+# has a bug where should_cont is always True, preventing escalation to whole-proof regen.
