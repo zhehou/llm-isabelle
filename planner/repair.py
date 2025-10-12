@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeo
 import requests
 from typing import Callable
 from planner.repair_inputs import _find_first_hole, _hole_line_bounds, _APPLY_OR_BY, _snippet_window, _clamp_line_index, _quick_state_and_errors, _extract_error_lines, _run_theory_with_timeout, _print_state_before_hole, _nearest_header, _recent_steps, _normalize_error_texts, _facts_from_state, get_counterexample_hints_for_repair, _earliest_failure_anchor
-from planner.prompts import _BLOCK_SYSTEM, _BLOCK_USER
+from planner.prompts import _LOCAL_SYSTEM, _LOCAL_USER, _BLOCK_SYSTEM, _BLOCK_USER
 from prover.config import MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S, OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P
 from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
 
@@ -218,131 +218,33 @@ class _RepairMemory:
 _MAX_PREV_BLOCKS = int(os.getenv("REPAIR_MAX_PREV_BLOCKS", "4"))
 
 # ========== Repair Operations (Parsing & Application) ==========
-def _parse_repair_ops(text: str) -> List[RepairOp]:
-    def extract_json(t):
-        try:
-            return json.loads(t)
-        except Exception:
-            i, j = t.find("["), t.rfind("]")
-            if i != -1 and j != -1 and j > i:
-                try:
-                    return json.loads(t[i:j+1])
-                except Exception:
-                    pass
-        return None
-    
-    data = extract_json(text.strip())
-    if not isinstance(data, list):
-        return []
-    ops = []
-    for item in data:
-        if not isinstance(item, dict) or len(item) != 1:
-            continue
-        k, v = next(iter(item.items()))
-        if k == "insert_before_hole" and isinstance(v, str) and v.strip():
-            ops.append(("insert_before_hole", InsertBeforeHole(v.strip())))
-        elif k == "replace_in_snippet" and isinstance(v, dict):
-            f, r = v.get("find", ""), v.get("replace", "")
-            if all(isinstance(x, str) and x.strip() for x in (f, r)):
-                ops.append(("replace_in_snippet", ReplaceInSnippet(f.strip(), r.strip())))
-        elif k == "insert_have_block" and isinstance(v, dict):
-            lab, stmt, after, hint = v.get("label", "H"), v.get("statement", ""), v.get("after_line_matching", "then show ?thesis"), v.get("body_hint", "apply simp")
-            if all(isinstance(x, str) for x in (lab, stmt, after, hint)) and stmt.strip() and after.strip():
-                ops.append(("insert_have_block", InsertHaveBlock(lab.strip(), stmt.strip(), after.strip(), hint.strip())))
-    return ops[:3]
-
-def _block_has_body_already(lines: List[str]) -> bool:
-    idx = _find_first_hole(lines)
-    if idx is None:
-        return False
-    k = idx - 1
-    while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
-        k -= 1
-    return k >= 0 and (_HAS_BODY.match(lines[k]) or _INLINE_BY_TAIL.search(lines[k]))
-
-def _insert_before_hole_ctxaware(lines: List[str], payload_line: str) -> List[str]:
-    idx = _find_first_hole(lines)
-    if idx is None:
-        return lines
-    k = idx - 1
-    while k >= 0 and (lines[k].strip() == "" or _CTX_HEAD.match(lines[k])):
-        k -= 1
-    insert_at = k + 1
-    indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip(" "))]
-    return lines[:insert_at] + [f"{indent}{payload_line}"] + lines[insert_at:]
-
-def _apply_insert_before_hole(full_text: str, hole_span: Tuple[int, int], line: str) -> str:
-    hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
-    if _APPLY_OR_BY.match(line) or line.strip() in ("done", "."):
-        if hole_line is not None:
-            indent = lines[hole_line][:len(lines[hole_line]) - len(lines[hole_line].lstrip(" "))]
-            lines[hole_line] = f"{indent}{line.strip()}"
-            return "\n".join(lines) + ("\n" if full_text.endswith("\n") else "")
-    if _block_has_body_already(lines):
-        return full_text
-    win_s, win_e = max(0, hole_line - 4), hole_line + 1
-    if any(L.strip() == line.strip() for L in lines[win_s:win_e]):
-        return full_text
-    new_lines = _insert_before_hole_ctxaware(lines, line)
-    return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "") if new_lines != lines else full_text
-
-def _apply_replace_in_snippet(full_text: str, hole_span: Tuple[int, int], find: str, replace: str) -> str:
-    hole_line, _, lines = _hole_line_bounds(full_text, hole_span)
-    s, e = _snippet_window(lines, hole_line)
-    snippet = lines[s:e]
-    try:
-        idx = snippet.index(find)
-        if snippet[idx].strip() == replace.strip():
-            return full_text
-        snippet[idx] = replace
-    except ValueError:
-        stripped = [L.strip() for L in snippet]
-        try:
-            idx = stripped.index(find.strip())
-            orig = snippet[idx]
-            leading = orig[:len(orig) - len(orig.lstrip(" "))]
-            if orig.strip() == replace.strip():
-                return full_text
-            snippet[idx] = leading + replace.lstrip(" ")
-        except ValueError:
-            return full_text
-    new_lines = lines[:s] + snippet + lines[e:]
-    return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
-
-def _apply_insert_have_block(full_text: str, hole_span: Tuple[int, int], label: str, statement: str, after_line_matching: str, body_hint: str) -> str:
-    hole_line, indent, lines = _hole_line_bounds(full_text, hole_span)
-    s, e = _snippet_window(lines, hole_line)
-    anchor_idx = hole_line
-    for i in range(s, e):
-        if lines[i].strip() == after_line_matching.strip():
-            anchor_idx = i
-            break
-    pad = " " * max(2, indent)
-    block = [f'{pad}have {label}: "{statement}"', f"{pad}  proof -", f"{pad}    sorry", f"{pad}  qed"]
-    new_lines = lines[:anchor_idx] + block + lines[anchor_idx:]
-    return "\n".join(new_lines) + ("\n" if full_text.endswith("\n") else "")
 
 def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], 
-                         proof_context: str,  # Changed from state_block
+                         proof_context: str,  block_type: str,
                          block_text: str, model: Optional[str], timeout_s: int,
                          why: str = "Previous attempt failed; propose a different block-level change.",
                          prior_failed_blocks: Optional[str] = None) -> str:
     ce = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
-    prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
-        goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
-        ce_hints="\n".join(ce) or "(none)", 
-        proof_context=(proof_context or "").strip(),  # Changed from state_block
-        block_text=block_text.rstrip(), why=why,
-        prior_failed_blocks=(prior_failed_blocks or "(none)")
-    )
+    if block_type == "have-show":
+        prompt = _LOCAL_SYSTEM + "\n\n" + _LOCAL_USER.format(
+            goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
+            ce_hints="\n".join(ce) or "(none)", 
+            proof_context=(proof_context or "").strip(),  # Changed from state_block
+            block_text=block_text.rstrip(), why=why,
+            prior_failed_blocks=(prior_failed_blocks or "(none)")
+        )
+    else:
+        prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
+            goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
+            ce_hints="\n".join(ce) or "(none)", 
+            proof_context=(proof_context or "").strip(),  # Changed from state_block
+            block_text=block_text.rstrip(), why=why,
+            prior_failed_blocks=(prior_failed_blocks or "(none)")
+        )
     try:
         return _sanitize_llm_block(_generate_simple(prompt, model=model, timeout_s=timeout_s))
     except Exception:
         return ""
-
-# def _filter_ops_against_banlist(ops_json_text: str, ban: Set[str]) -> List[RepairOp]:
-#     # Ban list is outline-only; local step edits are never filtered by it.
-#     return _parse_repair_ops(ops_json_text)
 
 def propose_rule_based_repairs(goal_text: str, state_block: str, header: str, facts: List[str]) -> List[RepairOp]:
     """
@@ -451,26 +353,53 @@ def _enclosing_subproof(lines: List[str], hole_line: int) -> Tuple[int, int]:
 def _enclosing_have_show_block(lines: List[str], hole_line: int) -> Tuple[int, int]:
     if not lines:
         return (-1, -1)
+
     i = _clamp_line_index(lines, hole_line)
-    head_re = re.compile(r"(?m)^\s*(have|show|obtain)\b")
-    stop_re = re.compile(r"(?m)^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b|proof\b)\b")
+
+    head_re  = re.compile(r"^\s*(have|show|obtain)\b")
+    # IMPORTANT: do NOT include `proof` here — subproofs belong to the block.
+    fence_re = re.compile(
+        r"^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b)\b"
+    )
+
+    # climb to the enclosing have/show head, but stop if we hit a block fence
     while i >= 0 and not head_re.match(lines[i]):
-        if re.match(r"(?m)^\s*(?:case\b|next\b|qed\b)\b", lines[i]):
-            break
+        if re.match(r"^\s*(?:case\b|next\b|qed\b)\b", lines[i]):
+            return (-1, -1)
         i -= 1
+
     if i < 0 or not head_re.match(lines[i]):
         return (-1, -1)
-    depth = sum(1 if _PROOF_RE.match(lines[k]) else (-1 if _QED_RE.match(lines[k]) else 0) for k in range(i + 1))
-    base, j = depth, i + 1
+
+    # NEW: if the head line itself has an inline "by …", keep only that line
+    if _INLINE_BY_TAIL.search(lines[i] or ""):
+        return (i, i + 1)
+
+    # Track nested subproofs correctly from the head line outward.
+    depth = 0
+    j = i + 1
     while j < len(lines):
-        if _PROOF_RE.match(lines[j]):
+        L = lines[j]
+
+        # Base-level one-liner endings
+        if depth == 0:
+            # stop immediately after a base-level "sorry"
+            if (L or "").strip() == "sorry":
+                j = j + 1
+                break
+            # do not include any fence token at base depth
+            if fence_re.match(L or ""):
+                break
+
+        # Subproof bookkeeping
+        if _PROOF_RE.match(L or ""):
             depth += 1
-        elif _QED_RE.match(lines[j]):
+        elif _QED_RE.match(L or ""):
             depth = max(0, depth - 1)
-        if depth == base and stop_re.match(lines[j]):
-            break
+
         j += 1
-    return (i, j)
+
+    return (i, j if j > i else -1)
 
 def _enclosing_whole_proof(lines: List[str]) -> Tuple[int, int]:
     last_qed = -1
@@ -514,25 +443,53 @@ def _strip_wrapper_to_case_block(proposed: str, original_case_block: str) -> str
     return "\n".join(lines[start:end]).rstrip()
 
 def _strip_wrapper_to_have_show(proposed: str, original_block: str) -> str:
-    if not _WRAPPED_THEOREM_HEAD.match(proposed):
-        return proposed
-    m = re.search(r"(?m)^\s*(have|show|obtain)\b", original_block or "")
-    prefer = m.group(1) if m else None
+    # Keep only the single have/show/obtain micro-block, including any nested
+    # `proof … qed` it contains, but STOP at the first base-level `sorry`
+    # or base-level inline `by …`.
     lines = proposed.splitlines()
-    head_idx = None
-    for i, L in enumerate(lines):
-        if (prefer and re.match(rf"^\s*{prefer}\b", L)) or (not prefer and re.match(r"^\s*(have|show|obtain)\b", L)):
-            head_idx = i
-            break
-    if head_idx is None:
+    if not lines:
         return proposed
-    stop_re = re.compile(r"(?m)^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b|proof\b)\b")
-    end = len(lines)
-    for j in range(head_idx + 1, len(lines)):
-        if stop_re.match(lines[j]):
-            end = j
-            break
-    return "\n".join(lines[head_idx:end]).rstrip()
+
+    head_re  = re.compile(r"^\s*(have|show|obtain)\b")
+    fence_re = re.compile(
+        r"^\s*(?:have|show|obtain|thus|hence|then|also|moreover|ultimately|finally|case\b|next\b|qed\b)\b"
+    )
+
+    # find the first have/show/obtain head
+    head_idx = next((i for i, L in enumerate(lines) if head_re.match(L)), -1)
+    if head_idx == -1:
+        return proposed
+
+    out: List[str] = [lines[head_idx]]
+    depth = 0
+
+    for L in lines[head_idx + 1:]:
+        # Base-level one-line endings
+        if depth == 0:
+            # Keep a base-level "sorry", but stop right after it
+            if (L or "").strip() == "sorry":
+                out.append(L)
+                break
+            # Do not include any new head/fence (then/also/moreover/…/case/next/qed)
+            if fence_re.match(L or ""):
+                break
+
+        # Track nested subproofs (kept inside the micro-block)
+        if _PROOF_RE.match(L or ""):
+            depth += 1
+        elif _QED_RE.match(L or ""):
+            depth = max(0, depth - 1)
+
+        out.append(L)
+
+    # Trim any trailing whitespace lines we may have kept
+    while out and out[-1].strip() == "":
+        out.pop()
+
+    # Final guard: if the last kept line is an inline 'by …' on the head, trim to that line only
+    if len(out) == 1 and _INLINE_BY_TAIL.search(out[0] or ""):
+        return out[0].rstrip()
+    return "\n".join(out).rstrip()
 
 def _strip_wrapper_to_subproof(proposed: str) -> str:
     if not _WRAPPED_THEOREM_HEAD.match(proposed):
@@ -756,7 +713,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         try:
             blk = _propose_block_repair(
                 goal=goal_text, errors=err_texts, ce_hints=ce, 
-                proof_context=proof_context,  # Changed from state_block=state0
+                proof_context=proof_context, block_type=block_type,
                 block_text=block, model=model, timeout_s=timeout, why=why,
                 prior_failed_blocks=fails_txt
             )

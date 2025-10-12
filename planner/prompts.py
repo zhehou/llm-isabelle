@@ -1,22 +1,90 @@
 # ========== Prompt Templates for Repair ==========
 
+_LOCAL_SYSTEM = """You are an Isabelle/HOL expert.
+You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be verified in Isabelle/HOL.
+Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
+
+EDIT SCOPE
+- Keep the first "... have ..." line EXACTLY as is
+- The proof is ONLY for the first line, don't prove anything else in PROOF_CONTEXT
+- Do NOT add additional "have" or "show" statements if you have already proved the opening line
+- Maintain indentation and whitespace style of the original.
+
+STRICT RULES
+- In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
+- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
+- Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
+- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
+- Never add "qed" in BLOCK
+- Don't copy text from PROOF_CONTEXT. 
+
+LIGHT GRAMMAR (allowed shapes)
+<stmt> ::=
+  "using" <thms>
+| "unfolding" <thms>
+
+<proof> ::=
+  "by" <method>
+| "sorry"
+
+<method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
+           | "auto" | "blast" | "fastforce" | "clarsimp"
+           | "intro" <thms> | "elim" <thms> | "rule" <thm>           
+           | "subst" <thm> | "-"
+
+OUTPUT
+- Keep branch structure intact; every opened branch must end with a `show` and close.
+- Do NOT invent new constants or fact names; use only identifiers in LOCAL_CONTEXT or the original BLOCK.
+- Output ONLY the revised BLOCK (no fences).
+"""
+
+_LOCAL_USER = """WHAT FAILED:
+{why}
+
+GOAL:
+{goal}
+
+PROOF_CONTEXT (lemma header and all proven statements before the BLOCK - you can reference any named facts from here):
+<<<CONTEXT
+{proof_context}
+CONTEXT
+
+ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that have similar errors):
+{errors}
+
+COUNTEREXAMPLE_HINTS (learn from counterexamples of previous goals and avoid generating goals based on the counterexamples):
+{ce_hints}
+
+PRIOR FAILED BLOCKS (do **not** repeat these ideas/structures; these are bad examples, not templates):
+<<<FAILED_PROOFS
+{prior_failed_blocks}
+FAILED_PROOFS
+
+ORIGINAL BLOCK TO REPLACE:
+<<<BLOCK
+{block_text}
+BLOCK
+
+Return ONLY the new BLOCK text (no fences)."""
+
 _BLOCK_SYSTEM = """You are an Isabelle/HOL expert.
 You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be verified in Isabelle/HOL.
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
 - Edit ONLY inside the BLOCK; keep lemma header unchanged if it's present.
-- Case 1: If BLOCK starts with a line that contains "... have ...", then that's the local goal line and keep it exactly as is. Only repair the proof in the following lines to prove the local goal. Don't create new chained goals like "... have/show ..." in this case. 
-- Case 2: If BLOCK doesn't start with a line that contains "... have ...", then it's a larger block, and you MAY change the opening `proof (…)`/`induction …`/`cases …` for a different proof strategy, repair the entire block, as long as you aim to prove the GOAL.
-- Keep case names/labels stable; do not add/remove ‘lemma’/‘qed’.
+- You MAY modify the structure (change proof strategy, add intermediate facts)
+- Name all new facts like f1, f2, etc.
+- Keep existing case/fact names/labels stable
 - Maintain indentation and whitespace style of the original.
 
 STRICT RULES
-- In `using`/`simp add:` refer ONLY to named facts (no raw quoted propositions).
+- In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
 - When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
-- Don't add "qed" if there isn't a matching "proof".
+- Don't add "qed" if there isn't an open "proof".
+- Don't copy text from PROOF_CONTEXT. 
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::=
