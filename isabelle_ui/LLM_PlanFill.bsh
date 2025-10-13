@@ -1,210 +1,208 @@
-// LLM_PlanFill.bsh — Paste after caret if caret is inside the lemma; else just below lemma line.
-// Menu: Macros → LLM_Prover → LLM_PlanFill
+// LLM_PlanFill.bsh — auto-extract goal, call /plan_fill (mode:auto), and insert the first filled script.
+// BeanShell-friendly (Java 1.4 style): no generics, no enhanced for-loops.
 
-import org.gjt.sp.jedit.*;
-import javax.swing.JOptionPane;
+import javax.swing.*;
 import java.io.*;
 import java.net.*;
-import java.nio.charset.Charset;
 import java.util.regex.*;
+import java.util.ArrayList;
+import org.gjt.sp.jedit.*;
+import org.gjt.sp.jedit.textarea.JEditTextArea;
 
-String SERVER = "http://127.0.0.1:5005/plan_fill";
-int    BUDGET = 100;
-String MODEL  = "gemini:gemini-2.5-pro";  // optional
+// ------------------ Config ------------------
+String SERVER_BASE = "http://127.0.0.1:5005";
+String ENDPOINT = SERVER_BASE + "/plan_fill";
 
-// --- SAFE SLICE GUARD: prevent ArrayIndexOutOfBounds in getText ---
-int clampInt(int x, int lo, int hi) {
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
+String MODEL = "gemini:gemini-2.5-flash";
+int BUDGET = 300;          // seconds
+
+// Planner knobs (defaults mirror server)
+boolean DIVERSE = true;
+int K = 3;
+// String TEMPS = "[0.35,0.55,0.85]"; // optional; null → server default schedule
+String TEMPS = null;
+
+boolean REPAIRS = true;
+boolean REPAIR_TRACE = false;
+// --------------------------------------------
+
+// Helpers
+String jquote(String s) {
+  if (s == null) return "null";
+  StringBuffer b = new StringBuffer("\"");
+  for (int i=0;i<s.length();i++) {
+    char c = s.charAt(i);
+    if (c=='\\' || c=='"') b.append('\\').append(c);
+    else if (c=='\n') b.append("\\n");
+    else if (c=='\r') b.append("\\r");
+    else if (c=='\t') b.append("\\t");
+    else b.append(c);
+  }
+  b.append('"');
+  return b.toString();
 }
 
-String getTextSafe(JEditBuffer buffer, int startOffset, int endOffset) {
-    // If next-boundary wasn't found, endOffset might be -1; use doc end.
-    int docLen = buffer.getLength();
-    int start = clampInt(startOffset, 0, docLen);
-    int end   = (endOffset < 0) ? docLen : clampInt(endOffset, 0, docLen);
-    if (end < start) { int t = start; start = end; end = t; }
-    int len = end - start;
-    if (len <= 0) return "";
-    return buffer.getText(start, len);
+String readAll(InputStream is) throws Exception {
+  if (is == null) return "";
+  BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+  StringBuffer sb = new StringBuffer();
+  String line;
+  while ((line = br.readLine()) != null) sb.append(line).append("\n");
+  br.close();
+  return sb.toString();
 }
 
-// Find previous lemma/theorem above caret; return {lemmaLineIndex, insertAfterLemmaPos, goal}
-Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
-  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
-  int caretLine = ta.getCaretLine();
-  int minLine = Math.max(0, caretLine - 1000);
-  for (int li = caretLine; li >= minLine; li--) {
-    int ls = ta.getLineStartOffset(li);
-    int le = ta.getLineEndOffset(li);
-    String L = getTextSafe(buf, ls, le);
-    Matcher m = pat.matcher(L);
-    if (m.find()) {
-      int insertPos = le - 1; // below lemma line
-      String goal = m.group(2);
-      return new Object[] { new Integer(li), new Integer(insertPos), goal };
-    }
+String extractGoalFromAroundCaret(View view, int lookAroundLines) {
+  Buffer buf = view.getBuffer();
+  JEditTextArea ta = view.getTextArea();
+  int caret = ta.getCaretPosition();
+  int line = ta.getLineOfOffset(caret);
+
+  Pattern qp = Pattern.compile("\"([^\"\\\\]|\\\\.)*\"");
+  int last = Math.min(buf.getLineCount()-1, line + lookAroundLines);
+  for (int ln = line; ln <= last; ln++) {
+    String s = buf.getLineText(ln);
+    java.util.regex.Matcher m = qp.matcher(s);
+    if (m.find()) return s.substring(m.start()+1, m.end()-1).trim();
+  }
+  int first = Math.max(0, line - lookAroundLines);
+  for (int ln = line-1; ln >= first; ln--) {
+    String s = buf.getLineText(ln);
+    java.util.regex.Matcher m = qp.matcher(s);
+    if (m.find()) return s.substring(m.start()+1, m.end()-1).trim();
   }
   return null;
 }
 
-// Find next lemma/theorem header after a given line; return its line index or -1
-int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
-  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
-  int total = ta.getLineCount();
-  int maxLine = Math.min(total - 1, fromLine + 1000);
-  for (int li = fromLine + 1; li <= maxLine; li++) {
-    int ls = ta.getLineStartOffset(li);
-    int le = ta.getLineEndOffset(li);
-    String L = getTextSafe(buf, ls, le);
-    Matcher m = pat.matcher(L);
-    if (m.find()) return li;
+int findLineWithTokens(Buffer buf, int startLine, int maxLook, String[] tokens) {
+  int end = Math.min(buf.getLineCount()-1, startLine + maxLook);
+  for (int ln = startLine; ln <= end; ln++) {
+    String s = buf.getLineText(ln).trim();
+    for (int i=0;i<tokens.length;i++) {
+      if (s.equals(tokens[i])) return ln;
+    }
   }
   return -1;
 }
 
-// JSON helpers
-String jsonEsc(String s) { return s.replace("\\","\\\\").replace("\"","\\\""); }
-
-// Extract and unescape the JSON string value of "outline"
-String parseOutline(String resp) {
-  String marker = "\"outline\":\"";
-  int pos = resp.indexOf(marker);
-  if (pos < 0) return null;
-  int i = pos + marker.length();
-  StringBuilder raw = new StringBuilder();
-  boolean esc = false;
-  for (; i < resp.length(); i++) {
-    char c = resp.charAt(i);
-    if (esc) { raw.append('\\').append(c); esc=false; continue; }
-    if (c=='\\') { esc=true; continue; }
-    if (c=='"') break;
-    raw.append(c);
-  }
-  // unescape
-  String s = raw.toString();
-  StringBuilder out = new StringBuilder();
-  boolean e=false;
-  for (int k=0;k<s.length();k++){
-    char c=s.charAt(k);
-    if (e) {
-      if (c=='n') out.append('\n');
-      else if (c=='t') out.append('\t');
-      else if (c=='r') out.append('\r');
-      else if (c=='b') out.append('\b');
-      else if (c=='f') out.append('\f');
-      else if (c=='\\') out.append('\\');
-      else if (c=='"') out.append('"');
-      else out.append(c);
-      e=false;
-    } else if (c=='\\') { e=true; }
-    else { out.append(c); }
-  }
-  return out.toString();
+void replaceLine(Buffer buf, int line, String text) {
+  int off = buf.getLineStartOffset(line);
+  int len = buf.getLineLength(line);
+  buf.remove(off, len);
+  if (!text.endsWith("\n")) text = text + "\n";
+  buf.insert(off, text);
 }
 
-String stripLeadingHeadersAndToProof(String s) {
-  if (s == null) return "";
-  String out = s.trim();
-  // Drop any leading 'lemma ...' or 'theorem ...' lines (possibly multiple)
-  // and any blank lines immediately after them.
-  String[] lines = out.split("\\r?\\n");
-  StringBuilder sb = new StringBuilder();
-  boolean dropping = true;
-  for (int i = 0; i < lines.length; i++) {
-    String L = lines[i];
-    String Lt = L.trim();
-    if (dropping) {
-      if (Lt.matches("^(lemma|theorem)\\b.*")) {
-        continue; // skip header
+void insertAtCaret(View view, String text) {
+  Buffer buf = view.getBuffer();
+  JEditTextArea ta = view.getTextArea();
+  int caret = ta.getCaretPosition();
+  if (!text.endsWith("\n")) text = text + "\n";
+  buf.insert(caret, text);
+}
+
+// crude JSON: extract "fills":[ ... ] into an array of strings (no generics)
+String[] parseFills(String body) {
+  try {
+    int idx = body.indexOf("\"fills\"");
+    if (idx < 0) return null;
+    int lb = body.indexOf("[", idx);
+    int rb = body.indexOf("]", lb);
+    if (lb < 0 || rb < 0) return null;
+    String arr = body.substring(lb+1, rb);
+
+    ArrayList out = new ArrayList();
+    boolean inQ = false;
+    StringBuffer cur = new StringBuffer();
+    for (int i=0;i<arr.length();i++) {
+      char c = arr.charAt(i);
+      if (c=='"' && (i==0 || arr.charAt(i-1)!='\\')) {
+        inQ = !inQ;
+        if (!inQ) { out.add(cur.toString()); cur.setLength(0); }
+      } else if (inQ) {
+        cur.append(c);
       }
-      if (Lt.isEmpty()) {
-        continue; // skip leading blanks following header
-      }
-      dropping = false;
     }
-    sb.append(L).append("\n");
+    String[] res = new String[out.size()];
+    for (int i=0;i<out.size();i++) res[i] = (String) out.get(i);
+    return res;
+  } catch (Exception e) {
+    return null;
   }
-  out = sb.toString().trim();
-
-  // If there is a 'proof' later, keep from the first 'proof' to the end.
-  // (Models sometimes emit an extra header or text before the actual proof.)
-  // We search at line starts to avoid matching words like 'proofs'.
-  java.util.regex.Pattern proofPat = java.util.regex.Pattern.compile("(?m)^\\s*proof\\b");
-  java.util.regex.Matcher pm = proofPat.matcher(out);
-  if (pm.find()) {
-    out = out.substring(pm.start()).trim();
-  }
-  return out;
 }
 
-EditPane ep = view.getEditPane();
-JEditTextArea ta = ep.getTextArea();
-Buffer buf = ta.getBuffer();
+// -------------- Main flow --------------
+Buffer buf = view.getBuffer();
+JEditTextArea ta = view.getTextArea();
+int caret = ta.getCaretPosition();
+int caretLine = ta.getLineOfOffset(caret);
 
-// Anchor to previous lemma
-Object[] anchor = findPrevLemma(buf, ta);
-if (anchor == null) {
-  JOptionPane.showMessageDialog(view, "Put the caret near or within a lemma/theorem.", "LLM Plan&Fill", JOptionPane.WARNING_MESSAGE);
+String goal = extractGoalFromAroundCaret(view, 6);
+if (goal == null || goal.length() == 0) {
+  Macros.error(view, "Could not deduce a goal (looked for quoted proposition near caret).");
   return;
 }
-int lemmaLine      = ((Integer)anchor[0]).intValue();
-int afterLemmaPos  = ((Integer)anchor[1]).intValue();
-String goal        = (String) anchor[2];
 
-// Decide insertion placement: inside lemma → after caret line; else → after lemma line
-int caretLine      = ta.getCaretLine();
-int nextLemmaLine  = findNextLemmaLine(buf, ta, lemmaLine);
-boolean caretInsideLemma = (caretLine > lemmaLine) && ((nextLemmaLine == -1) || (caretLine < nextLemmaLine));
+String theoryFile = buf.getPath();
+String theoryText = null;
+if (theoryFile == null || theoryFile.length() == 0) {
+  theoryText = buf.getText(0, buf.getLength());
+}
 
-int insertPos = caretInsideLemma ? (ta.getLineEndOffset(caretLine) - 1) : afterLemmaPos;
+StringBuffer sb = new StringBuffer();
+sb.append("{");
+sb.append("\"goal\":").append(jquote(goal));
+sb.append(",\"timeout\":").append(BUDGET);
+sb.append(",\"mode\":\"auto\"");
+sb.append(",\"diverse\":").append(DIVERSE ? "true":"false");
+sb.append(",\"k\":").append(K);
+if (MODEL != null && MODEL.length()>0) sb.append(",\"model\":").append(jquote(MODEL));
+if (TEMPS != null) sb.append(",\"temps\":").append(TEMPS);
+sb.append(",\"repairs\":").append(REPAIRS ? "true":"false");
+sb.append(",\"repair_trace\":").append(REPAIR_TRACE ? "true":"false");
+if (theoryFile != null && theoryFile.length() > 0)
+  sb.append(",\"theory_file\":").append(jquote(theoryFile));
+else
+  sb.append(",\"theory_text\":").append(jquote(theoryText));
+sb.append("}");
+String payload = sb.toString();
 
-// Call server
-String payload = "{"
-  + "\"goal\":\"" + jsonEsc(goal) + "\","
-  + "\"timeout\":" + BUDGET
-  + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
-  + "}";
-
-HttpURLConnection conn = null;
-InputStream is = null;
-String resp = "";
 try {
-  URL url = new URL(SERVER);
-  conn = (HttpURLConnection) url.openConnection();
+  URL u = new URL(ENDPOINT);
+  HttpURLConnection conn = (HttpURLConnection)u.openConnection();
+  conn.setConnectTimeout(5000);
+  conn.setReadTimeout(1000 * (BUDGET + 10));
   conn.setRequestMethod("POST");
+  conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
   conn.setDoOutput(true);
-  conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+
   OutputStream os = conn.getOutputStream();
   os.write(payload.getBytes("UTF-8"));
-  os.flush(); os.close();
+  os.flush();
+  os.close();
+
   int code = conn.getResponseCode();
-  is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
-  BufferedReader br = new BufferedReader(new InputStreamReader(is, Charset.forName("UTF-8")));
-  StringBuilder sb = new StringBuilder(); String line;
-  while ((line = br.readLine()) != null) sb.append(line);
-  br.close();
-  resp = sb.toString();
-} catch (Exception e) {
-  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Plan&Fill", JOptionPane.ERROR_MESSAGE);
-  return;
-} finally {
-  try { if (is != null) is.close(); } catch (Exception _e) {}
-  try { if (conn != null) conn.disconnect(); } catch (Exception _e) {}
+  String body = (code >= 200 && code < 300) ? readAll(conn.getInputStream())
+                                            : readAll(conn.getErrorStream());
+
+  if (code < 200 || code >= 300) {
+    Macros.error(view, "LLM PlanFill error (HTTP " + code + "):\n" + body);
+    return;
+  }
+
+  String[] fills = parseFills(body);
+  if (fills == null || fills.length == 0) {
+    insertAtCaret(view, "(* LLM PlanFill (no fills parsed): *)\n" + body + "\n");
+    Macros.message(view, "LLM PlanFill: no fills parsed; inserted raw JSON as a comment.");
+    return;
+  }
+
+  String script = fills[0];
+  // Prefer to replace a nearby 'sorry'
+  int target = findLineWithTokens(buf, caretLine, 30, new String[] {"sorry"});
+  if (target >= 0) replaceLine(buf, target, script);
+  else insertAtCaret(view, script);
+
+} catch (Exception ex) {
+  Macros.error(view, "LLM PlanFill exception: " + ex);
 }
-
-// Parse outline
-String outline = parseOutline(resp);
-if (outline == null) {
-  JOptionPane.showMessageDialog(view, "No outline in response:\n" + resp, "LLM Plan&Fill", JOptionPane.INFORMATION_MESSAGE);
-  return;
-}
-
-// Strip duplicate lemma header if present
-outline = stripLeadingHeadersAndToProof(outline);
-
-// Insert: always start on a new line
-ta.selectNone();
-ta.setCaretPosition(insertPos);
-ta.setSelectedText("\n" + outline + (outline.endsWith("\n") ? "" : "\n"));

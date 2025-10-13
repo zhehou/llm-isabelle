@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from prover.isabelle_api import start_isabelle_server, get_isabelle_client
 from prover.prover import prove_goal
-from prover.config import MODEL as DEFAULT_MODEL
+from prover.config import MODEL as DEFAULT_MODEL, ISABELLE_SESSION
 from planner.driver import plan_and_fill
 from prover.llm import detect_backend_for_model
 
@@ -16,6 +16,7 @@ app = FastAPI(title="LLM Isabelle Prover API")
 
 # ------------------------------------------------------------
 # Built-in defaults (can be overridden by env or request JSON)
+# Keep these aligned with planner/driver.py and prover/prover.py
 # ------------------------------------------------------------
 DEFAULT_PRIORS_PATH = "datasets/isar_priors.json"
 DEFAULT_HINTLEX_PATH = "datasets/isar_hintlex.json"
@@ -23,8 +24,8 @@ DEFAULT_HINTLEX_TOP = 8
 DEFAULT_CONTEXT_HINTS = True
 DEFAULT_LIB_TEMPLATES = True
 DEFAULT_ALPHA = 1.0
-DEFAULT_BETA = 0.6
-DEFAULT_GAMMA = 0.25
+DEFAULT_BETA = 0.5          # match driver default
+DEFAULT_GAMMA = 0.2          # match driver default
 DEFAULT_DIVERSE = True
 DEFAULT_K = 3
 
@@ -41,12 +42,17 @@ print(
 
 print(f"[server] LLM_DEBUG={'ON' if os.getenv('LLM_DEBUG') not in (None, '', '0', 'false', 'False', 'no', 'NO') else 'OFF'}")
 
+# Ensure a sensible default for PREMISES_MODEL_DIR unless user overrides via env or request
+if not os.environ.get("PREMISES_MODEL_DIR"):
+    os.environ["PREMISES_MODEL_DIR"] = "datasets/premises_models"
+    print(f"[server] PREMISES_MODEL_DIR not set; defaulting to {os.environ['PREMISES_MODEL_DIR']}")
+
 # ----------------------------
 # Isabelle: start once, reuse
 # ----------------------------
 server_info, proc = start_isabelle_server(name="isabelle", log_file="ui_server.log")
 isabelle = get_isabelle_client(server_info)
-SESSION = isabelle.session_start(session="HOL")
+SESSION = isabelle.session_start(session=ISABELLE_SESSION)
 
 @atexit.register
 def _shutdown():
@@ -95,21 +101,35 @@ def _env_str(name: str, default: Optional[str]) -> Optional[str]:
 class ProveReq(BaseModel):
     goal: str
     model: Optional[str] = None
+    # search control
     timeout: int = 60
-    beam: int = 4
-    max_depth: int = 8
-    facts_limit: int = 6
+    beam: int = 3             # align with driver usage
+    max_depth: int = 6        # align with driver usage
+    hint_lemmas: int = 6
+    facts_limit: int = 8
+    # tools
     sledge: bool = True
-    sledge_timeout: int = 20
-    sledge_every: int = 2
-    quickcheck: bool = True
+    sledge_timeout: int = 10
+    sledge_every: int = 1
+    quickcheck: bool = False  # conservative (boolean goals only)
     qc_timeout: int = 2
     qc_every: int = 1
-    nitpick: bool = True
+    nitpick: bool = False
     np_timeout: int = 5
     np_every: int = 2
+    # variants/minimization
     variants: bool = True
+    variant_timeout: int = 6
+    variant_tries: int = 24
     minimize: bool = True
+    minimize_timeout: int = 8
+    # LLM / reranker / tracing
+    enable_reranker: bool = True
+    trace: bool = False
+    color: bool = False
+    # ensembles / outputs
+    models: Optional[List[str]] = None  # optional ensemble
+    save_dir: Optional[str] = None      # where to dump artifacts
 
 class ProveResp(BaseModel):
     success: bool
@@ -128,16 +148,30 @@ def prove(req: ProveReq):
     res = prove_goal(
         isabelle, SESSION, req.goal,
         model_name_or_ensemble=model,
-        beam_w=req.beam, max_depth=req.max_depth, hint_lemmas=6, timeout=req.timeout,
-        models=None, save_dir=None,
-        use_sledge=req.sledge, sledge_timeout=req.sledge_timeout, sledge_every=req.sledge_every,
-        trace=False, use_color=False,
-        use_qc=req.quickcheck, qc_timeout=req.qc_timeout, qc_every=req.qc_every,
-        use_np=req.nitpick, np_timeout=req.np_timeout, np_every=req.np_every,
+        beam_w=req.beam,
+        max_depth=req.max_depth,
+        hint_lemmas=req.hint_lemmas,
+        timeout=req.timeout,
+        models=req.models,
+        save_dir=req.save_dir,
+        use_sledge=req.sledge,
+        sledge_timeout=req.sledge_timeout,
+        sledge_every=req.sledge_every,
+        trace=req.trace,
+        use_color=req.color,
+        use_qc=req.quickcheck,
+        qc_timeout=req.qc_timeout,
+        qc_every=req.qc_every,
+        use_np=req.nitpick,
+        np_timeout=req.np_timeout,
+        np_every=req.np_every,
         facts_limit=req.facts_limit,
-        do_minimize=req.minimize, minimize_timeout=8,
-        do_variants=req.variants, variant_timeout=6, variant_tries=24,
-        enable_reranker=True,
+        do_minimize=req.minimize,
+        minimize_timeout=req.minimize_timeout,
+        do_variants=req.variants,
+        variant_timeout=req.variant_timeout,
+        variant_tries=req.variant_tries,
+        enable_reranker=req.enable_reranker,
     )
     raw_steps = [str(s) for s in res.get("steps", [])]
     tactic_steps = [s for s in raw_steps if s.strip().startswith(("apply", "by "))]
@@ -180,6 +214,9 @@ class PlanFillReq(BaseModel):
     alpha: Optional[float] = None
     beta: Optional[float] = None
     gamma: Optional[float] = None
+
+    # Outputs
+    save_dir: Optional[str] = None
 
 class PlanFillResp(BaseModel):
     success: bool
@@ -238,7 +275,7 @@ def plan_fill(req: PlanFillReq):
         # repairs
         repairs=repairs,
         max_repairs_per_hole=max_repairs,
-        repair_trace=repair_trace,
+        trace=repair_trace,            # match driver.py signature
         # priors & micro-RAG
         priors_path=priors_path,
         context_hints=context_hints,
@@ -246,7 +283,7 @@ def plan_fill(req: PlanFillReq):
         alpha=alpha, beta=beta, gamma=gamma,
         hintlex_path=hintlex_path,
         hintlex_top=hintlex_top,
-    )
+)
 
     return PlanFillResp(
         success=bool(r.success),

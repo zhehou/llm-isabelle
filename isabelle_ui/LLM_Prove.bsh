@@ -1,204 +1,193 @@
-// LLM_Prover.bsh — Suggest steps at caret if inside lemma; else below lemma header.
-// Menu: Macros → LLM_Prover → LLM_Prover
+// LLM_Prove.bsh — auto-extract goal near caret, call /prove, insert proof at caret.
+// BeanShell-friendly (no generics), Java 1.4 style.
 
-import org.gjt.sp.jedit.*;
-import javax.swing.JOptionPane;
+import javax.swing.*;
 import java.io.*;
 import java.net.*;
-import java.nio.charset.Charset;
 import java.util.regex.*;
+import java.util.ArrayList;
+import org.gjt.sp.jedit.*;
+import org.gjt.sp.jedit.textarea.JEditTextArea;
 
-String SERVER = "http://127.0.0.1:5005/prove";
-int    BUDGET = 60;
-String MODEL  = "gemini:gemini-2.5-flash";  // optional model override
+// ------------------ Config ------------------
+String SERVER_BASE = "http://127.0.0.1:5005";
+String ENDPOINT = SERVER_BASE + "/prove";
+String MODEL = "gemini:gemini-2.5-flash";
+int BUDGET = 60;  // seconds
+// --------------------------------------------
 
-// --- SAFE SLICE GUARD: prevent ArrayIndexOutOfBounds in getText ---
-int clampInt(int x, int lo, int hi) {
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
+// Helpers
+String jquote(String s) {
+  if (s == null) return "null";
+  StringBuffer b = new StringBuffer("\"");
+  for (int i=0;i<s.length();i++) {
+    char c = s.charAt(i);
+    if (c=='\\' || c=='"') b.append('\\').append(c);
+    else if (c=='\n') b.append("\\n");
+    else if (c=='\r') b.append("\\r");
+    else if (c=='\t') b.append("\\t");
+    else b.append(c);
+  }
+  b.append('"');
+  return b.toString();
 }
 
-String getTextSafe(JEditBuffer buffer, int startOffset, int endOffset) {
-    // If next-boundary wasn't found, endOffset might be -1; use doc end.
-    int docLen = buffer.getLength();
-    int start = clampInt(startOffset, 0, docLen);
-    int end   = (endOffset < 0) ? docLen : clampInt(endOffset, 0, docLen);
-    if (end < start) { int t = start; start = end; end = t; }
-    int len = end - start;
-    if (len <= 0) return "";
-    return buffer.getText(start, len);
+String readAll(InputStream is) throws Exception {
+  if (is == null) return "";
+  BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+  StringBuffer sb = new StringBuffer();
+  String line;
+  while ((line = br.readLine()) != null) { sb.append(line).append("\n"); }
+  br.close();
+  return sb.toString();
 }
 
-// Find the previous lemma/theorem line above caret; return {lemmaLineIndex, insertAfterLemmaPos, goal}
-Object[] findPrevLemma(Buffer buf, JEditTextArea ta) {
-  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
-  int caretLine = ta.getCaretLine();
-  int minLine = Math.max(0, caretLine - 500);
-  for (int li = caretLine; li >= minLine; li--) {
-    int ls = ta.getLineStartOffset(li);
-    int le = ta.getLineEndOffset(li);
-    String L = getTextSafe(buf, ls, le);
-    Matcher m = pat.matcher(L);
-    if (m.find()) {
-      int insertPos = le - 1;      // default insert right after lemma line
-      String goal = m.group(2);
-      return new Object[] { new Integer(li), new Integer(insertPos), goal };
-    }
+// Find first quoted proposition " … " around caret (±N lines)
+String extractGoalFromAroundCaret(View view, int lookAroundLines) {
+  Buffer buf = view.getBuffer();
+  JEditTextArea ta = view.getTextArea();
+  int caret = ta.getCaretPosition();
+  int line = ta.getLineOfOffset(caret);
+
+  Pattern qp = Pattern.compile("\"([^\"\\\\]|\\\\.)*\"");
+  // forward
+  int last = Math.min(buf.getLineCount()-1, line + lookAroundLines);
+  for (int ln = line; ln <= last; ln++) {
+    String s = buf.getLineText(ln);
+    java.util.regex.Matcher m = qp.matcher(s);
+    if (m.find()) return s.substring(m.start()+1, m.end()-1).trim();
+  }
+  // backward
+  int first = Math.max(0, line - lookAroundLines);
+  for (int ln = line-1; ln >= first; ln--) {
+    String s = buf.getLineText(ln);
+    java.util.regex.Matcher m = qp.matcher(s);
+    if (m.find()) return s.substring(m.start()+1, m.end()-1).trim();
   }
   return null;
 }
 
-// Find the next lemma/theorem header after a given line; return its line index or -1 if none
-int findNextLemmaLine(Buffer buf, JEditTextArea ta, int fromLine) {
-  Pattern pat = Pattern.compile("^\\s*(lemma|theorem)\\s+\"([^\"]+)\"", Pattern.MULTILINE);
-  int total = ta.getLineCount();
-  int maxLine = Math.min(total - 1, fromLine + 500);
-  for (int li = fromLine + 1; li <= maxLine; li++) {
-    int ls = ta.getLineStartOffset(li);
-    int le = ta.getLineEndOffset(li);
-    String L = getTextSafe(buf, ls, le);
-    Matcher m = pat.matcher(L);
-    if (m.find()) return li;
-  }
-  return -1;
+void insertAtCaret(View view, String text) {
+  Buffer buf = view.getBuffer();
+  JEditTextArea ta = view.getTextArea();
+  int caret = ta.getCaretPosition();
+  if (!text.endsWith("\n")) text = text + "\n";
+  buf.insert(caret, text);
 }
 
-// Get indentation (leading spaces) of a buffer line
-String getIndent(Buffer buf, JEditTextArea ta, int lineIndex) {
-  int ls = ta.getLineStartOffset(lineIndex);
-  int le = ta.getLineEndOffset(lineIndex);
-  String L = getTextSafe(buf, ls, le);
-  int i = 0;
-  while (i < L.length()) {
-    char c = L.charAt(i);
-    if (c != ' ' && c != '\t') break;
-    i++;
-  }
-  return L.substring(0, i);
-}
+// Parse steps from JSON without generics (very crude, but works for flat arrays)
+String[] parseStepsOrFallback(String body) {
+  try {
+    int idx = body.indexOf("\"steps\"");
+    if (idx < 0) return null;
+    int lb = body.indexOf("[", idx);
+    int rb = body.indexOf("]", lb);
+    if (lb < 0 || rb < 0) return null;
+    String arr = body.substring(lb+1, rb);
 
-// Build payload JSON safely
-String jsonEsc(String s) {
-  return s.replace("\\","\\\\").replace("\"","\\\"");
-}
-
-EditPane ep = view.getEditPane();
-JEditTextArea ta = ep.getTextArea();
-Buffer buf = ta.getBuffer();
-
-// 1) Anchor: previous lemma
-Object[] anchor = findPrevLemma(buf, ta);
-if (anchor == null) {
-  JOptionPane.showMessageDialog(view, "Put the caret near or within a lemma/theorem.", "LLM Prover", JOptionPane.WARNING_MESSAGE);
-  return;
-}
-int lemmaLine = ((Integer)anchor[0]).intValue();
-int afterLemmaPos = ((Integer)anchor[1]).intValue();
-String goal = (String) anchor[2];
-
-// 2) Decide insertion location
-int caretLine = ta.getCaretLine();
-int nextLemmaLine = findNextLemmaLine(buf, ta, lemmaLine);
-
-// Are we inside the lemma block? (strictly after lemma line, and before next lemma or EOF)
-boolean caretInsideLemma =
-    (caretLine > lemmaLine) &&
-    ((nextLemmaLine == -1) || (caretLine < nextLemmaLine));
-
-// Compute insert position and indentation:
-// - If inside: insert after current line, with current line's indent
-// - Else: insert after lemma line, with lemma line's indent + two spaces
-int insertPos;
-String baseIndent;
-if (caretInsideLemma) {
-  insertPos = ta.getLineEndOffset(caretLine) - 1;
-  baseIndent = getIndent(buf, ta, caretLine);
-} else {
-  insertPos = afterLemmaPos;
-  baseIndent = getIndent(buf, ta, lemmaLine) + "  ";
-}
-
-// 3) Call server
-String payload = "{\"goal\":\"" + jsonEsc(goal) + "\","
-               + "\"timeout\":" + BUDGET
-               + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
-               + "}";
-
-HttpURLConnection conn = null;
-InputStream is = null;
-String resp = "";
-try {
-  URL url = new URL(SERVER);
-  conn = (HttpURLConnection) url.openConnection();
-  conn.setRequestMethod("POST");
-  conn.setDoOutput(true);
-  conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-  OutputStream os = conn.getOutputStream();
-  os.write(payload.getBytes("UTF-8"));
-  os.flush(); os.close();
-  int code = conn.getResponseCode();
-  is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
-  BufferedReader br = new BufferedReader(new InputStreamReader(is, Charset.forName("UTF-8")));
-  StringBuilder sb = new StringBuilder();
-  String line;
-  while ((line = br.readLine()) != null) sb.append(line);
-  br.close();
-  resp = sb.toString();
-} catch (Exception e) {
-  JOptionPane.showMessageDialog(view, "HTTP error:\n" + e, "LLM Prover", JOptionPane.ERROR_MESSAGE);
-  return;
-} finally {
-  try { if (is != null) is.close(); } catch (Exception _e) {}
-  try { if (conn != null) conn.disconnect(); } catch (Exception _e) {}
-}
-
-// 4) Parse steps array from JSON
-java.util.List steps = new java.util.ArrayList();
-try {
-  int idx = resp.indexOf("\"steps\"");
-  if (idx >= 0) {
-    int lb = resp.indexOf('[', idx);
-    int rb = (lb >= 0) ? resp.indexOf(']', lb) : -1;
-    if (lb >= 0 && rb > lb) {
-      String arr = resp.substring(lb + 1, rb);
-      boolean inStr=false, esc=false;
-      StringBuilder cur = new StringBuilder();
-      for (int i=0;i<arr.length();i++){
-        char c = arr.charAt(i);
-        if (!inStr) { if (c=='"') { inStr=true; cur.setLength(0); } }
-        else {
-          if (esc) { cur.append(c); esc=false; }
-          else if (c=='\\') esc=true;
-          else if (c=='"') { inStr=false; steps.add(cur.toString()); }
-          else cur.append(c);
-        }
+    ArrayList out = new ArrayList();
+    boolean inQ = false;
+    StringBuffer cur = new StringBuffer();
+    for (int i=0;i<arr.length();i++) {
+      char c = arr.charAt(i);
+      if (c=='"' && (i==0 || arr.charAt(i-1)!='\\')) {
+        inQ = !inQ;
+        if (!inQ) { out.add(cur.toString()); cur.setLength(0); }
+      } else if (inQ) {
+        cur.append(c);
       }
     }
+    String[] res = new String[out.size()];
+    for (int i=0;i<out.size();i++) res[i] = (String) out.get(i);
+    return res;
+  } catch (Exception ex) {
+    return null;
   }
-} catch (Exception _e) {}
+}
 
-if (steps.isEmpty()) {
-  JOptionPane.showMessageDialog(view, "No steps returned.\nRaw response:\n" + resp, "LLM Prover", JOptionPane.INFORMATION_MESSAGE);
+// -------------------- Main --------------------
+Buffer buf = view.getBuffer();
+JEditTextArea ta = view.getTextArea();
+
+String sel = ta.getSelectedText();
+String goal = null;
+if (sel != null && sel.trim().length() > 0) goal = sel.trim();
+else goal = extractGoalFromAroundCaret(view, 6);
+
+if (goal == null || goal.length() == 0) {
+  Macros.error(view, "Could not deduce a goal.\nPlace caret near: lemma \"…\" or select the proposition.");
   return;
 }
 
-// 5) Build script: only tactic-like lines, indented under baseIndent
-StringBuilder script = new StringBuilder();
-for (int i=0;i<steps.size();i++) {
-  String s = ((String)steps.get(i)).trim();
-  if (s.length()==0) continue;
-  if (s.startsWith("by ") || s.startsWith("apply")) {
-    script.append(baseIndent).append(s).append("\n");
-  }
-}
-if (script.length()==0) {
-  JOptionPane.showMessageDialog(view, "No tactic-like steps found.\nRaw response:\n" + resp, "LLM Prover", JOptionPane.INFORMATION_MESSAGE);
-  return;
+String theoryFile = buf.getPath();
+String theoryText = null;
+if (theoryFile == null || theoryFile.length() == 0) {
+  theoryText = buf.getText(0, buf.getLength());
 }
 
-// 6) Insert: always new line before the script
-ta.selectNone();
-ta.setCaretPosition(insertPos);
-String toInsert = "\n" + script.toString();
-ta.setSelectedText(toInsert);
+StringBuffer sb = new StringBuffer();
+sb.append("{");
+sb.append("\"goal\":").append(jquote(goal));
+sb.append(",\"timeout\":").append(BUDGET);
+if (MODEL != null && MODEL.length() > 0) sb.append(",\"model\":").append(jquote(MODEL));
+// context for auto context-files:
+if (theoryFile != null && theoryFile.length() > 0)
+  sb.append(",\"theory_file\":").append(jquote(theoryFile));
+else
+  sb.append(",\"theory_text\":").append(jquote(theoryText));
+sb.append("}");
+String payload = sb.toString();
+
+try {
+  URL u = new URL(ENDPOINT);
+  HttpURLConnection conn = (HttpURLConnection)u.openConnection();
+  conn.setConnectTimeout(5000);
+  conn.setReadTimeout(1000 * (BUDGET + 10));
+  conn.setRequestMethod("POST");
+  conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+  conn.setDoOutput(true);
+
+  OutputStream os = conn.getOutputStream();
+  os.write(payload.getBytes("UTF-8"));
+  os.flush();
+  os.close();
+
+  int code = conn.getResponseCode();
+  String body = (code >= 200 && code < 300) ? readAll(conn.getInputStream())
+                                            : readAll(conn.getErrorStream());
+  if (code < 200 || code >= 300) {
+    Macros.error(view, "LLM Prove error (HTTP " + code + "):\n" + body);
+    return;
+  }
+
+  String[] steps = parseStepsOrFallback(body);
+  if (steps == null || steps.length == 0) {
+    insertAtCaret(view, "(* LLM Prove (no steps parsed): *)\n" + body + "\n");
+    Macros.message(view, "LLM Prove: no steps parsed; inserted raw JSON as a comment.");
+    return;
+  }
+
+  // Prefer a single "by ..." line
+  String byLine = null;
+  for (int i=0;i<steps.length;i++) {
+    String s = steps[i].trim();
+    if (s.startsWith("by ")) { byLine = s; break; }
+  }
+
+  if (byLine != null) {
+    insertAtCaret(view, byLine);
+  } else {
+    StringBuffer ins = new StringBuffer();
+    ins.append("proof -\n");
+    for (int i=0;i<steps.length;i++) {
+      String s = steps[i].trim();
+      if (!s.startsWith("apply") && !s.startsWith("by ")) s = "apply (" + s + ")";
+      ins.append("  ").append(s).append("\n");
+    }
+    ins.append("  done");
+    insertAtCaret(view, ins.toString());
+  }
+
+} catch (Exception ex) {
+  Macros.error(view, "LLM Prove exception: " + ex);
+}
