@@ -228,36 +228,55 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
 def _handle_repair_result(full: str, patched: str, span: Tuple[int, int], hole_key: int,
                          start_stage: int, stage_tries: dict, repair_progress: dict,
                          isa, session: str, trace: bool) -> Tuple[str, Optional[int], bool]:
+    """
+    Handle the result of a repair attempt.
+    
+    Returns: (new_full_text, new_focused_hole_key, should_continue)
+    - new_full_text: The text to use going forward
+    - new_focused_hole_key: The hole to focus on (or None for first hole)
+    - should_continue: True to continue loop, False to escalate to whole-proof regen
+    """
     STAGE1_CAP, STAGE2_CAP = 2, 3
     key = (hole_key, start_stage)
     stage_tries[key] = stage_tries.get(key, 0) + 1
     
     should_escalate = ((start_stage == 1 and stage_tries[key] >= STAGE1_CAP) or 
-                      (start_stage == 2 and stage_tries.get((hole_key, 2), 0) >= STAGE2_CAP))
+                      (start_stage == 2 and stage_tries[key] >= STAGE2_CAP))
     
     if should_escalate:
-        repair_progress[hole_key] = 2 if start_stage < 2 else 2
-        return full, hole_key, (start_stage < 2)
+        if start_stage < 2:
+            # Escalate from stage 1 to stage 2
+            repair_progress[hole_key] = 2
+            return full, hole_key, True  # Continue with stage 2
+        else:
+            # Stage 2 cap reached - signal to caller to do whole-proof regen
+            repair_progress[hole_key] = 2
+            return full, hole_key, False  # Don't continue - trigger whole-proof
     
+    # Not escalating yet - try to open sorries in the patched text
     if trace:
         cap = STAGE1_CAP if start_stage == 1 else STAGE2_CAP
         print(f"[repair] Stage {start_stage} unverified (attempt {stage_tries[key]}/{cap}). Opening sorries...")
     
     full2, opened = _open_minimal_sorries(isa, session, patched)
+    
     if opened:
+        # Successfully inserted sorry - find it and focus on it
         near = _nearest_sorry_span(find_sorry_spans(full2), span[0])
         if near:
             new_hole_key = _hole_fingerprint(full2, near)
-            repair_progress[new_hole_key] = start_stage
+            repair_progress[new_hole_key] = start_stage  # Keep same stage for the new sorry
             return full2, new_hole_key, True
+        # Opened sorry but can't find it? Use unfocused
         return full2, None, True
     
+    # Could not open sorries - the patched text doesn't have any tactics to replace
+    # This means the repair attempt didn't produce valid Isabelle code structure
+    # Stay at same stage, same hole, retry
     if trace:
-        print("[repair] Could not open sorries; escalating...")
-    if not find_sorry_spans(patched):
-        patched = full
-    repair_progress[hole_key] = 2 if start_stage < 2 else 2
-    return patched, hole_key, True
+        print("[repair] Could not open sorries; staying focused on same hole...")
+    repair_progress[hole_key] = start_stage  # Keep at same stage
+    return full, hole_key, True  # Return ORIGINAL text, stay focused
 
 def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional[str],
                   left_s, repairs: bool, max_repairs_per_hole: int, trace: bool,
@@ -284,6 +303,7 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
         per_hole_budget = int(max(5, left_s() / max(1, len(spans))))
         start_stage = repair_progress.get(hole_key, 0)
         
+        # Stage 0: Try fill
         if start_stage == 0:
             full2, ok, script = _fill_one_hole(isa, session, full, span, goal_text, model, per_hole_budget, trace=trace)
             
@@ -311,9 +331,9 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
                 print(f"[fill] Skipping fill for hole; running repairs at stage {start_stage}")
                 skip_fill_logged.add((hole_key, start_stage))
         
+        # Stage 1 or 2: Try repair
         current_stage = repair_progress.get(hole_key, 0)
         if current_stage > 0 and repairs and left_s() > 6:
-            full_before = full
             state = _print_state_before_hole(isa, session, full, span, trace)
             eff_goal = _effective_goal_from_state(state, goal_text, full, span, trace)
             
@@ -324,6 +344,7 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
                 trace=trace, resume_stage=current_stage,
             )
             
+            # Check if repair succeeded
             if patched != full:
                 if _verify_full_proof(isa, session, patched):
                     if trace:
@@ -333,16 +354,18 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
                     stage_tries.clear()
                     continue
                 
+                # Repair produced something but unverified - handle it
                 new_full, new_focus, should_cont = _handle_repair_result(
-                    full, patched, span, hole_key, start_stage, stage_tries, repair_progress, isa, session, trace
+                    full, patched, span, hole_key, current_stage, stage_tries, repair_progress, isa, session, trace
                 )
                 full, focused_hole_key = new_full, new_focus
                 
                 if should_cont:
                     continue
                 
+                # Stage cap reached - trigger whole-proof regeneration
                 if trace:
-                    print("[repair] Stage 2 cap reached. Regenerating whole proof...")
+                    print("[repair] Stage cap reached. Regenerating whole proof...")
                 
                 new_full, ok_re, _ = regenerate_whole_proof(
                     full_text=full, goal_text=goal_text, model=model, isabelle=isa, session=session,
@@ -350,6 +373,8 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
                 )
                 
                 if ok_re and new_full != full:
+                    if trace:
+                        print("[repair] Whole regeneration succeeded!")
                     full, focused_hole_key = new_full, None
                     repair_progress.clear()
                     stage_tries.clear()
@@ -365,11 +390,54 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
                 repair_progress.clear()
                 stage_tries.clear()
                 continue
-            
-            key = (hole_key, start_stage)
-            stage_tries[key] = stage_tries.get(key, 0) + 1
-            repair_progress[hole_key] = min(start_stage + 1, 2)
-            focused_hole_key = hole_key
+            else:
+                # Repair made no progress (returned same text) - increment stage tries
+                key = (hole_key, current_stage)
+                stage_tries[key] = stage_tries.get(key, 0) + 1
+                
+                STAGE1_CAP, STAGE2_CAP = 2, 3
+                
+                if current_stage == 1 and stage_tries[key] >= STAGE1_CAP:
+                    if trace:
+                        print(f"[repair] Stage 1 cap reached ({stage_tries[key]}/{STAGE1_CAP}). Escalating to stage 2...")
+                    repair_progress[hole_key] = 2
+                    focused_hole_key = hole_key
+                    continue
+                    
+                elif current_stage == 2 and stage_tries[key] >= STAGE2_CAP:
+                    if trace:
+                        print(f"[repair] Stage 2 cap reached ({stage_tries[key]}/{STAGE2_CAP}). Regenerating whole proof...")
+                    
+                    new_full, ok_re, _ = regenerate_whole_proof(
+                        full_text=full, goal_text=goal_text, model=model, isabelle=isa, session=session,
+                        budget_s=min(40.0, max(8.0, left_s() * 0.8)), trace=trace, prior_outline_text=full
+                    )
+                    
+                    if ok_re and new_full != full:
+                        if trace:
+                            print("[repair] Whole regeneration succeeded!")
+                        full, focused_hole_key = new_full, None
+                        repair_progress.clear()
+                        stage_tries.clear()
+                        continue
+                    
+                    if trace:
+                        print("[repair] Whole regeneration failed; proposing fresh outline...")
+                    
+                    best, _ = propose_isar_skeleton_diverse_best(
+                        goal_text, isabelle=isa, session_id=session, model=model, force_outline=True, **outline_params
+                    )
+                    full, focused_hole_key = best.text, None
+                    repair_progress.clear()
+                    stage_tries.clear()
+                    continue
+                else:
+                    # Continue trying at current stage
+                    if trace:
+                        cap = STAGE1_CAP if current_stage == 1 else STAGE2_CAP
+                        print(f"[repair] No progress at stage {current_stage} (attempt {stage_tries[key]}/{cap}). Retrying...")
+                    focused_hole_key = hole_key
+                    continue
     
     return full, fills, failed
 
