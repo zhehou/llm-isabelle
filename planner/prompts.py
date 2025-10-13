@@ -5,27 +5,24 @@ You propose a replacement for the provided Isabelle/Isar proof BLOCK that can be
 Return ONLY the new BLOCK text (no JSON, no comments). Preserve all text outside the block.
 
 EDIT SCOPE
-- Keep the first "... have ..." line EXACTLY as is
+- Keep the first "... have ..." (or "... show ...") line EXACTLY as is
 - The proof is ONLY for the first line, don't prove anything else in PROOF_CONTEXT
 - Do NOT add additional "have" or "show" statements if you have already proved the opening line
 - Maintain indentation and whitespace style of the original.
 
 STRICT RULES
+- Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
+- If "by ..." can directly solve the goal, then don't add "proof ... qed".
 - In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
-- Never add "qed" in BLOCK
-- Don't copy text from PROOF_CONTEXT. 
+- Your output must be substantively different from every block in PRIOR FAILED BLOCKS. 
+- Never add "qed" in BLOCK unless the original BLOCK opened a `proof`.
+- Don't copy text verbatim from PROOF_CONTEXT. 
 
 LIGHT GRAMMAR (allowed shapes)
-<stmt> ::=
-  "using" <thms>
-| "unfolding" <thms>
+<stmt> ::= "using" <thms> | "unfolding" <thms>
 
-<proof> ::=
-  "by" <method>
-| "sorry"
+<proof> ::= "by" <method> | "sorry" | "proof" ["(" <method> ")"] <stmts>* "qed"   # only if original opened a proof
 
 <method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
            | "auto" | "blast" | "fastforce" | "clarsimp"
@@ -78,36 +75,31 @@ EDIT SCOPE
 - Keep existing case/fact names/labels stable
 - Maintain indentation and whitespace style of the original.
 
-STRICT RULES
+STRICT RULES (MODE-SAFE)
+- Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
+- If "by ..." can directly solve the goal, then don't add "proof ... qed".
+- If the first line is `show …` or `have …` without an open `proof`, finish with a one-liner `by <method>`.
+- Never place a bare method command like `intro subsetI` on its own line; if you need it, use `proof (intro subsetI)`.
 - In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
 - Don't add "qed" if there isn't an open "proof".
 - Don't copy text from PROOF_CONTEXT. 
 
 LIGHT GRAMMAR (allowed shapes)
-<stmt> ::=
-  "using" <thms>
-| "unfolding" <thms>
-| "have" "<prop>" <proof>
-| "show ?case" <proof>        // inside induction branches
-| "show ?thesis" <proof>      // other branches
-| "from" <thms> <goalstmt>
-| "with" <thms> <goalstmt>
-| "also" | "moreover" | "finally" <goalstmt>
-| "next"                       // to separate branches
-| "let" <pat> "=" <expr> | "define" <name> "where" "<eqn>"
+<stmt> ::= "using" <thms> | "unfolding" <thms> | "have" "<prop>" <proof>
+         | "show ?case" <proof> | "show ?thesis" <proof>
+         | "from" <thms> <goalstmt> | "with" <thms> <goalstmt>
+         | "also" | "moreover" | "finally" <goalstmt>
+         | "next" | "let" <pat> "=" <expr> | "define" <name> "where" "<eqn>"
 
 <goalstmt> ::= "have" "<prop>" <proof> | "show" "<prop>" <proof>
 
-<proof> ::=
-  "by" <method>
-| "proof" ["(" <method> ")"] <stmts>* "qed"
-| "sorry"
+<proof> ::= "by" <method>
+          | "proof" ["(" <method> ")"] <stmts>* "qed"      # only if the original opened a proof
+          | "sorry"
 
-<method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
-           | "auto" | "blast" | "fastforce" | "clarsimp"
+<method> ::= "simp" ["add:" <thms>] ["only:" <thms>] | "auto" | "blast" | "fastforce" | "clarsimp"
            | "intro" <thms> | "elim" <thms> | "rule" <thm>
            | "cases" <expr> | "induction" <var> ["arbitrary:" <vars>]
            | "subst" <thm> | "-"
@@ -148,30 +140,32 @@ BLOCK
 Return ONLY the new BLOCK text (no fences)."""
 
 # -----------------------------------------------------------------------------
-# Prompt for OUTLINES  (nudged with ?case and calculational patterns)
+# Prompt for OUTLINES  (mode-safe and structure-tightened)
 # -----------------------------------------------------------------------------
 SKELETON_PROMPT = """You are an Isabelle/HOL expert. 
 
 TASK
 Given a lemma statement, first figure out a proof plan in English INTERNALLY that aims to break the problem into smaller problems so you can divide and conquer. Do NOT reveal your plan. Output ONLY a CLEAN Isabelle/Isar proof outline that corresponds to your English proof plan and is verifiable in Isabelle/HOL. Leave nontrivial reasoning steps as `sorry`.
 
-HARD OUTPUT RULES
+OUTPUT RULES
 - Output ONLY Isabelle/Isar (no prose, no code fences).
 - Begin at (or immediately after) the exact header:
   lemma "{goal}"
 - Produce exactly ONE lemma..qed block.
-- Prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
+- Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
+- If "by ..." can directly solve the goal, then don't add "proof ... qed".
+- If "by ..." can't solve the goal, prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
 - Use the right shell:
   • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
   • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
   • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
-- When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
 - Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
+- Do NOT emit `apply <method>` lines.
 
 LIGHT GRAMMAR (allowed shapes)
 lemma "{goal}"
 <refine>* <proof>
-<refine> ::= using <thms> | unfolding <thms> | apply <method>
+<refine> ::= using <thms> | unfolding <thms>   # (apply <method>) is forbidden
 <proof>  ::= proof [<method>] <stmts>* qed | by <method> | sorry | done
 <stmts>  ::= fix <vars> | assume <n>: "<prop>" | have "<prop>" <proof>
              | show ?case <proof> | show ?thesis <proof> | then <goal_stmt>
@@ -184,43 +178,27 @@ lemma "{goal}"
              | "rule" <thm> | "metis" [<thms>] | "(" <method> ")"
 
 STYLE EXAMPLES
+
+lemma "{goal}"
+ by auto
+
 lemma "{goal}"
 proof (induction xs)
   case Nil
-  have f1: "…"
-    using Nil.prems
-    sorry
-  show ?case
-    using f1
-    sorry
+  show ?case by simp
 next
   case (Cons x xs)
-  have f1: "…"
-    using Cons.prems
-    sorry
-  have f2: "…"
-    using Cons.IH f1
-    sorry
-  show ?case
-    using f2
-    sorry
+  have f1: "…" using Cons.prems sorry
+  show ?case using f1 sorry
 qed
 
 lemma "{goal}"
 proof (cases b)
   case True
-  have f1: "…"
-    sorry
-  show ?thesis
-    using f1
-    sorry
+  show ?thesis by blast
 next
   case False
-  have f2: "…"
-    sorry
-  show ?thesis
-    using f2
-    sorry
+  show ?thesis by blast
 qed
 
 lemma "{goal}"

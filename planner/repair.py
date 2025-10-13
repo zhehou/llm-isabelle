@@ -37,6 +37,20 @@ _INLINE_BY_TAIL = re.compile(r"\s+by\s+.+$")
 _WRAPPED_THEOREM_HEAD = re.compile(r"(?mx)\A(?:[ \t]*(?:\(\*.*?\*\)|\<comment\>.*?\<\/comment\>)[ \t]*\n|[ \t]*\n)*[ \t]*(?:lemma|theorem|corollary)\b")
 
 # ========== Utility Functions ==========
+def _lemma_is_closed_oneliner(full_text: str) -> bool:
+    """Detect if the current lemma block is already closed by a top-level `by …`/`done` and has no trailing 'proof'."""
+    m0 = re.search(r'(?m)^\s*lemma\s+"', full_text)
+    if not m0:
+        return False
+    m1 = re.search(r'(?m)^\s*lemma\s+"', full_text[m0.end():])
+    end = len(full_text) if not m1 else (m0.end() + m1.start())
+    block = full_text[m0.start():end]
+    m_by = re.search(r'(?m)^\s*(?:by|done)\b.*$', block)
+    if not m_by:
+        return False
+    tail = block[m_by.end():]
+    return not re.search(r'(?m)^\s*(?:proof|sorry)\b', tail)
+
 def _log(prefix: str, label: str, content: str, trace: bool = True) -> None:
     if trace and content:
         print(f"[{prefix}] {label} (len={len(content)}):\n{content if content.strip() else '  (empty)'}")
@@ -456,6 +470,12 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
                      isabelle, session: str, repair_budget_s: float = 15.0, max_ops_to_try: int = 3,
                      beam_k: int = 1, allow_whole_fallback: bool = False, trace: bool = False,
                      resume_stage: int = 0) -> Tuple[str, bool, str]:
+    # HARD GUARANTEE: never repair a lemma already closed by a one-liner
+    if _lemma_is_closed_oneliner(full_text):
+        if trace:
+            print("[repair] Skipping repairs: lemma already closed by one-liner.")
+        return full_text, False, "closed-lemma"
+
     t0 = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - t0))
     current_text = full_text
