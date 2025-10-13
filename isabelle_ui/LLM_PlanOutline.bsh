@@ -1,6 +1,5 @@
-// LLM_PlanOutline.bsh — auto-extract goal, call /plan_fill in outline mode,
-// and insert the outline (replacing nearby 'sorry' if present).
-// BeanShell-friendly (Java 1.4 style).
+// LLM_PlanOutline.bsh — call /plan_fill (outline mode), unescape JSON, insert only proof block.
+// BeanShell-safe (no generics).
 
 import javax.swing.*;
 import java.io.*;
@@ -14,9 +13,8 @@ String SERVER_BASE = "http://127.0.0.1:5005";
 String ENDPOINT = SERVER_BASE + "/plan_fill";
 
 String MODEL = "gemini:gemini-2.5-flash";
-int BUDGET = 200;
+int BUDGET = 60;
 
-// For a single clean outline:
 boolean DIVERSE = false;
 int K = 1;
 // --------------------------------------------
@@ -46,6 +44,28 @@ String readAll(InputStream is) throws Exception {
   return sb.toString();
 }
 
+String jsonUnescape(String s) {
+  if (s == null) return null;
+  StringBuffer out = new StringBuffer();
+  boolean esc = false;
+  for (int i=0;i<s.length();i++) {
+    char c = s.charAt(i);
+    if (!esc) {
+      if (c=='\\') esc = true;
+      else out.append(c);
+    } else {
+      if (c=='n') out.append('\n');
+      else if (c=='r') out.append('\r');
+      else if (c=='t') out.append('\t');
+      else if (c=='\\') out.append('\\');
+      else if (c=='"') out.append('"');
+      else out.append(c);
+      esc = false;
+    }
+  }
+  return out.toString();
+}
+
 String extractGoalFromAroundCaret(View view, int lookAroundLines) {
   Buffer buf = view.getBuffer();
   JEditTextArea ta = view.getTextArea();
@@ -72,9 +92,7 @@ int findLineWithTokens(Buffer buf, int startLine, int maxLook, String[] tokens) 
   int end = Math.min(buf.getLineCount()-1, startLine + maxLook);
   for (int ln = startLine; ln <= end; ln++) {
     String s = buf.getLineText(ln).trim();
-    for (int i=0;i<tokens.length;i++) {
-      if (s.equals(tokens[i])) return ln;
-    }
+    for (int i=0;i<tokens.length;i++) if (s.equals(tokens[i])) return ln;
   }
   return -1;
 }
@@ -95,7 +113,6 @@ void insertAtCaret(View view, String text) {
   buf.insert(caret, text);
 }
 
-// extract "outline":" ... " from JSON string (crude)
 String parseOutline(String body) {
   try {
     int i = body.indexOf("\"outline\"");
@@ -107,15 +124,56 @@ String parseOutline(String body) {
     boolean esc = false;
     for (int j=firstQ+1; j<body.length(); j++) {
       char c = body.charAt(j);
-      if (esc) { s.append(c); esc = false; continue; }
+      if (esc) { s.append('\\').append(c); esc = false; continue; } // keep escapes, unescape later
       if (c=='\\') { esc = true; continue; }
       if (c=='\"') break;
       s.append(c);
     }
     return s.toString();
-  } catch (Exception e) {
-    return null;
+  } catch (Exception e) { return null; }
+}
+
+// Extract "proof … qed/done"
+String extractProofBlockOnly(String script) {
+  if (script == null) return null;
+  String s = script;
+  int start = -1;
+  for (int i=0; i+5<=s.length(); i++) {
+    if (s.regionMatches(true, i, "proof", 0, 5)) {
+      char prev = (i==0) ? ' ' : s.charAt(i-1);
+      char next = (i+5>=s.length()) ? ' ' : s.charAt(i+5);
+      boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+      boolean rightOK = Character.isWhitespace(next) || next=='-' || next=='\n';
+      if (leftOK && rightOK) { start = i; break; }
+    }
   }
+  if (start < 0) return null;
+
+  int endQED = -1, endDONE = -1;
+  for (int j=start+5; j+3<=s.length(); j++) {
+    if (s.regionMatches(true, j, "qed", 0, 3)) {
+      char prev = (j==0) ? ' ' : s.charAt(j-1);
+      char next = (j+3>=s.length()) ? '\n' : s.charAt(j+3);
+      boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+      boolean rightOK = (j+3==s.length()) || Character.isWhitespace(next) || next=='\n';
+      if (leftOK && rightOK) { endQED = j+3; break; }
+    }
+  }
+  if (endQED < 0) {
+    for (int j=start+5; j+4<=s.length(); j++) {
+      if (s.regionMatches(true, j, "done", 0, 4)) {
+        char prev = (j==0) ? ' ' : s.charAt(j-1);
+        char next = (j+4>=s.length()) ? '\n' : s.charAt(j+4);
+        boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+        boolean rightOK = (j+4==s.length()) || Character.isWhitespace(next) || next=='\n';
+        if (leftOK && rightOK) { endDONE = j+4; break; }
+      }
+    }
+  }
+
+  int end = (endQED >= 0) ? endQED : endDONE;
+  if (end < 0) return s.substring(start).trim();
+  return s.substring(start, end).trim();
 }
 
 // -------------- Main flow --------------
@@ -177,13 +235,17 @@ try {
   String outline = parseOutline(body);
   if (outline == null || outline.trim().length() == 0) {
     insertAtCaret(view, "(* LLM PlanOutline (no outline parsed): *)\n" + body + "\n");
-    Macros.message(view, "LLM PlanOutline: no outline parsed; inserted raw JSON as a comment.");
+    Macros.message(view, "LLM PlanOutline: no outline parsed; inserted raw JSON.");
     return;
   }
 
+  String script = jsonUnescape(outline);        // <<< fix \n etc.
+  String proofOnly = extractProofBlockOnly(script);
+  if (proofOnly == null || proofOnly.trim().length()==0) proofOnly = script;
+
   int target = findLineWithTokens(buf, caretLine, 30, new String[] {"sorry"});
-  if (target >= 0) replaceLine(buf, target, outline);
-  else insertAtCaret(view, outline);
+  if (target >= 0) replaceLine(buf, target, proofOnly);
+  else insertAtCaret(view, proofOnly);
 
 } catch (Exception ex) {
   Macros.error(view, "LLM PlanOutline exception: " + ex);

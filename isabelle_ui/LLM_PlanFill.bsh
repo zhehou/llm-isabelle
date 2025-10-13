@@ -1,5 +1,5 @@
-// LLM_PlanFill.bsh — auto-extract goal, call /plan_fill (mode:auto), and insert the first filled script.
-// BeanShell-friendly (Java 1.4 style): no generics, no enhanced for-loops.
+// LLM_PlanFill.bsh — call /plan_fill, unescape JSON, and insert only the proof block (proof … qed/done).
+// BeanShell-safe (no generics).
 
 import javax.swing.*;
 import java.io.*;
@@ -14,19 +14,17 @@ String SERVER_BASE = "http://127.0.0.1:5005";
 String ENDPOINT = SERVER_BASE + "/plan_fill";
 
 String MODEL = "gemini:gemini-2.5-flash";
-int BUDGET = 300;          // seconds
+int BUDGET = 100;
 
-// Planner knobs (defaults mirror server)
 boolean DIVERSE = true;
 int K = 3;
-// String TEMPS = "[0.35,0.55,0.85]"; // optional; null → server default schedule
+// String TEMPS = "[0.35,0.55,0.85]";  // optional; null → server default
 String TEMPS = null;
 
 boolean REPAIRS = true;
 boolean REPAIR_TRACE = false;
 // --------------------------------------------
 
-// Helpers
 String jquote(String s) {
   if (s == null) return "null";
   StringBuffer b = new StringBuffer("\"");
@@ -52,6 +50,34 @@ String readAll(InputStream is) throws Exception {
   return sb.toString();
 }
 
+// -------- JSON string helpers (BeanShell-safe) --------
+String jsonUnescape(String s) {
+  if (s == null) return null;
+  StringBuffer out = new StringBuffer();
+  boolean esc = false;
+  for (int i=0;i<s.length();i++) {
+    char c = s.charAt(i);
+    if (!esc) {
+      if (c=='\\') esc = true;
+      else out.append(c);
+    } else {
+      // handle common escapes
+      if (c=='n') out.append('\n');
+      else if (c=='r') out.append('\r');
+      else if (c=='t') out.append('\t');
+      else if (c=='\\') out.append('\\');
+      else if (c=='"') out.append('"');
+      else {
+        // best effort: keep char as-is if unknown escape
+        out.append(c);
+      }
+      esc = false;
+    }
+  }
+  return out.toString();
+}
+
+// Find first quoted proposition " … " around caret (±N lines)
 String extractGoalFromAroundCaret(View view, int lookAroundLines) {
   Buffer buf = view.getBuffer();
   JEditTextArea ta = view.getTextArea();
@@ -78,9 +104,7 @@ int findLineWithTokens(Buffer buf, int startLine, int maxLook, String[] tokens) 
   int end = Math.min(buf.getLineCount()-1, startLine + maxLook);
   for (int ln = startLine; ln <= end; ln++) {
     String s = buf.getLineText(ln).trim();
-    for (int i=0;i<tokens.length;i++) {
-      if (s.equals(tokens[i])) return ln;
-    }
+    for (int i=0;i<tokens.length;i++) if (s.equals(tokens[i])) return ln;
   }
   return -1;
 }
@@ -101,7 +125,7 @@ void insertAtCaret(View view, String text) {
   buf.insert(caret, text);
 }
 
-// crude JSON: extract "fills":[ ... ] into an array of strings (no generics)
+// ------- crude JSON parsing for fills / outline --------
 String[] parseFills(String body) {
   try {
     int idx = body.indexOf("\"fills\"");
@@ -120,15 +144,77 @@ String[] parseFills(String body) {
         inQ = !inQ;
         if (!inQ) { out.add(cur.toString()); cur.setLength(0); }
       } else if (inQ) {
+        // keep backslashes; we'll unescape later
         cur.append(c);
       }
     }
     String[] res = new String[out.size()];
     for (int i=0;i<out.size();i++) res[i] = (String) out.get(i);
     return res;
-  } catch (Exception e) {
-    return null;
+  } catch (Exception e) { return null; }
+}
+
+String parseOutline(String body) {
+  try {
+    int i = body.indexOf("\"outline\"");
+    if (i < 0) return null;
+    int colon = body.indexOf(":", i);
+    int firstQ = body.indexOf("\"", colon+1);
+    if (firstQ < 0) return null;
+    StringBuffer s = new StringBuffer();
+    boolean esc = false;
+    for (int j=firstQ+1; j<body.length(); j++) {
+      char c = body.charAt(j);
+      if (esc) { s.append('\\').append(c); esc = false; continue; } // keep escapes, unescape later
+      if (c=='\\') { esc = true; continue; }
+      if (c=='\"') break;
+      s.append(c);
+    }
+    return s.toString();
+  } catch (Exception e) { return null; }
+}
+
+// Extract "proof ... qed" (or "proof ... done")
+String extractProofBlockOnly(String script) {
+  if (script == null) return null;
+  String s = script;
+  int start = -1;
+  for (int i=0; i+5<=s.length(); i++) {
+    if (s.regionMatches(true, i, "proof", 0, 5)) {
+      char prev = (i==0) ? ' ' : s.charAt(i-1);
+      char next = (i+5>=s.length()) ? ' ' : s.charAt(i+5);
+      boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+      boolean rightOK = Character.isWhitespace(next) || next=='-' || next=='\n';
+      if (leftOK && rightOK) { start = i; break; }
+    }
   }
+  if (start < 0) return null;
+
+  int endQED = -1, endDONE = -1;
+  for (int j=start+5; j+3<=s.length(); j++) {
+    if (s.regionMatches(true, j, "qed", 0, 3)) {
+      char prev = (j==0) ? ' ' : s.charAt(j-1);
+      char next = (j+3>=s.length()) ? '\n' : s.charAt(j+3);
+      boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+      boolean rightOK = (j+3==s.length()) || Character.isWhitespace(next) || next=='\n';
+      if (leftOK && rightOK) { endQED = j+3; break; }
+    }
+  }
+  if (endQED < 0) {
+    for (int j=start+5; j+4<=s.length(); j++) {
+      if (s.regionMatches(true, j, "done", 0, 4)) {
+        char prev = (j==0) ? ' ' : s.charAt(j-1);
+        char next = (j+4>=s.length()) ? '\n' : s.charAt(j+4);
+        boolean leftOK = Character.isWhitespace(prev) || prev=='\n';
+        boolean rightOK = (j+4==s.length()) || Character.isWhitespace(next) || next=='\n';
+        if (leftOK && rightOK) { endDONE = j+4; break; }
+      }
+    }
+  }
+
+  int end = (endQED >= 0) ? endQED : endDONE;
+  if (end < 0) return s.substring(start).trim();
+  return s.substring(start, end).trim();
 }
 
 // -------------- Main flow --------------
@@ -190,18 +276,24 @@ try {
     return;
   }
 
+  String script = null;
   String[] fills = parseFills(body);
-  if (fills == null || fills.length == 0) {
-    insertAtCaret(view, "(* LLM PlanFill (no fills parsed): *)\n" + body + "\n");
-    Macros.message(view, "LLM PlanFill: no fills parsed; inserted raw JSON as a comment.");
+  if (fills != null && fills.length > 0) script = fills[0];
+  if (script == null || script.trim().length()==0) script = parseOutline(body);
+
+  if (script == null || script.trim().length()==0) {
+    insertAtCaret(view, "(* LLM PlanFill (no script parsed): *)\n" + body + "\n");
+    Macros.message(view, "LLM PlanFill: no script parsed; inserted raw JSON.");
     return;
   }
 
-  String script = fills[0];
-  // Prefer to replace a nearby 'sorry'
+  script = jsonUnescape(script);                 // <<< fix \n etc.
+  String proofOnly = extractProofBlockOnly(script);
+  if (proofOnly == null || proofOnly.trim().length()==0) proofOnly = script;
+
   int target = findLineWithTokens(buf, caretLine, 30, new String[] {"sorry"});
-  if (target >= 0) replaceLine(buf, target, script);
-  else insertAtCaret(view, script);
+  if (target >= 0) replaceLine(buf, target, proofOnly);
+  else insertAtCaret(view, proofOnly);
 
 } catch (Exception ex) {
   Macros.error(view, "LLM PlanFill exception: " + ex);
