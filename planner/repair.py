@@ -111,6 +111,30 @@ def _extract_proof_context(full_text: str, block_start_line: int) -> str:
     
     return "\n".join(lines[lemma_line:block_start_line]).strip()
 
+def _clean_block_double_sorries(block_text: str) -> str:
+    """Remove double-sorry patterns where head has inline sorry followed by indented sorry."""
+    lines = block_text.splitlines()
+    if len(lines) < 2:
+        return block_text
+    
+    cleaned = []
+    i = 0
+    while i < len(lines):
+        curr = lines[i]
+        # Check if current line has inline sorry/by and next line is standalone sorry
+        if i + 1 < len(lines):
+            next_line = lines[i + 1]
+            # If current line has inline tactic and next line is just sorry, skip next line
+            if (_INLINE_BY_TAIL.search(curr) or curr.rstrip().endswith("sorry")) and \
+               next_line.strip() == "sorry":
+                cleaned.append(curr)
+                i += 2  # Skip the redundant sorry
+                continue
+        cleaned.append(curr)
+        i += 1
+    
+    return "\n".join(cleaned)
+
 # ========== LLM Generation ==========
 def _generate_simple(prompt: str, model: Optional[str] = None, *, timeout_s: Optional[int] = None) -> str:
     m = model or DEFAULT_MODEL
@@ -290,6 +314,7 @@ def _enclosing_subproof(lines: List[str], hole_line: int) -> Tuple[int, int]:
     return (i, j if j > i else -1)
 
 def _enclosing_have_show_block(lines: List[str], hole_line: int) -> Tuple[int, int]:
+    """Extract have/show block bounds, cleaned of double-sorry patterns."""
     if not lines:
         return (-1, -1)
     
@@ -451,12 +476,14 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
         
         indent = block_lines[cand][:len(block_lines[cand]) - len(block_lines[cand].lstrip())]
         
-        # Check if line above has an inline tactic that conflicts
+        # Strip any inline tactic from the line above to prevent conflicts
         if cand > 0:
             prev_line = block_lines[cand - 1]
-            if _INLINE_BY_TAIL.search(prev_line):
-                # Strip inline tactic to avoid conflicts
+            if _INLINE_BY_TAIL.search(prev_line) or prev_line.rstrip().endswith("sorry"):
                 block_lines[cand - 1] = _INLINE_BY_TAIL.sub('', prev_line).rstrip()
+                # Also remove " sorry" at end if present
+                if block_lines[cand - 1].rstrip().endswith(" sorry"):
+                    block_lines[cand - 1] = block_lines[cand - 1].rstrip()[:-6].rstrip()
         
         # Replace the failing tactic with sorry
         block_lines[cand] = f"{indent}sorry"
@@ -537,6 +564,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     err_texts = _normalize_error_texts(errs)
     ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
     block = "\n".join(lines[start:end])
+    block = _clean_block_double_sorries(block)
     proof_context = _extract_proof_context(current_text, start)
     
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
