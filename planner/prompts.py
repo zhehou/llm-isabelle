@@ -14,10 +14,10 @@ STRICT RULES
 - Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
 - If "by ..." can directly solve the goal, then don't add "proof ... qed".
 - In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
-- Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Your output must be substantively different from every block in PRIOR FAILED BLOCKS. 
+- Your output BLOCK must be substantively different from every block in PRIOR FAILED BLOCKS. 
 - Never add "qed" in BLOCK unless the original BLOCK opened a `proof`.
 - Don't copy text verbatim from PROOF_CONTEXT. 
+- Every tactic line (e.g., "by ...", "using ... by ...", or "sorry") must be in a new line.
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::= "using" <thms> | "unfolding" <thms>
@@ -75,16 +75,15 @@ EDIT SCOPE
 - Keep existing case/fact names/labels stable
 - Maintain indentation and whitespace style of the original.
 
-STRICT RULES (MODE-SAFE)
+STRICT RULES
 - Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
 - If "by ..." can directly solve the goal, then don't add "proof ... qed".
-- If the first line is `show …` or `have …` without an open `proof`, finish with a one-liner `by <method>`.
-- Never place a bare method command like `intro subsetI` on its own line; if you need it, use `proof (intro subsetI)`.
 - In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
+- Your output BLOCK must be substantively different from every block in PRIOR FAILED BLOCKS, e.g., prove different intermediate facts.
 - Don't add "qed" if there isn't an open "proof".
 - Don't copy text from PROOF_CONTEXT. 
+- Every tactic line (e.g., "by ...", "using ... by ...", or "sorry") must be in a new line.
 
 LIGHT GRAMMAR (allowed shapes)
 <stmt> ::= "using" <thms> | "unfolding" <thms> | "have" "<prop>" <proof>
@@ -161,6 +160,7 @@ OUTPUT RULES
   • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
 - Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
 - Do NOT emit `apply <method>` lines.
+- Every tactic line (e.g., "by ...", "using/unfolding ... by ...", or "sorry") must be in a new line.
 
 LIGHT GRAMMAR (allowed shapes)
 lemma "{goal}"

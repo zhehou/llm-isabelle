@@ -451,17 +451,15 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
         
         indent = block_lines[cand][:len(block_lines[cand]) - len(block_lines[cand].lstrip())]
         
-        if block_lines[cand].lstrip().startswith("apply"):
-            head_idx = next((i for i in range(cand, -1, -1) if _HEAD_CMD_RE.match(block_lines[i] or "")), None)
-            if head_idx is not None:
-                head_indent = block_lines[head_idx][:len(block_lines[head_idx]) - len(block_lines[head_idx].lstrip())]
-                seq_s = next((i for i in range(cand, -1, -1) if not _is_tactic_line(block_lines[i])), 0) + 1
-                seq_e = next((i for i in range(cand + 1, len(block_lines)) if not _is_tactic_line(block_lines[i])), len(block_lines))
-                block_lines[seq_s:seq_e] = [f"{head_indent}proof -", f"{head_indent}  sorry", f"{head_indent}qed"]
-            else:
-                break
-        else:
-            block_lines[cand] = f"{indent}sorry"
+        # Check if line above has an inline tactic that conflicts
+        if cand > 0:
+            prev_line = block_lines[cand - 1]
+            if _INLINE_BY_TAIL.search(prev_line):
+                # Strip inline tactic to avoid conflicts
+                block_lines[cand - 1] = _INLINE_BY_TAIL.sub('', prev_line).rstrip()
+        
+        # Replace the failing tactic with sorry
+        block_lines[cand] = f"{indent}sorry"
     
     return "\n".join(block_lines)
 
