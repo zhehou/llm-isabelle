@@ -32,6 +32,38 @@ _PROOF_LINE_RE  = re.compile(r'(?m)^\s*proof\b')
 _SORRY_RE       = re.compile(r'(?m)^\s*sorry\b')
 _MODE_RE        = re.compile(r'^\s*proof\s*\(([^)]+)\)')
 
+_STATE_STRUCTURED_RX = re.compile(r'(?m)^\s*(have|show|proof|qed|next)\b')
+
+def _sanitize_state_script_lines(lines: list[str]) -> list[str]:
+    """
+    Remove any structured Isar commands from a list of tactic lines
+    when we are in proof (state) mode. Keeps only 'apply ...', 'by ...', 'done', 'sorry'.
+    """
+    out: list[str] = []
+    for ln in lines:
+        t = (ln or "").strip()
+        if not t:
+            continue
+        # Strip accidental leading 'by' duplication
+        if t.startswith("show ") or t.startswith("have ") or t.startswith("proof") or t == "qed" or t == "next":
+            continue
+        out.append(t)
+    return out
+
+def _sanitize_state_snippet(snippet: str) -> str:
+    """
+    Used before verification of any candidate while in state mode.
+    Remove whole structured lines to avoid 'Illegal application...' noise.
+    """
+    if not snippet:
+        return snippet
+    if not _STATE_STRUCTURED_RX.search(snippet):
+        return snippet
+    return "\n".join(
+        ln for ln in snippet.splitlines()
+        if not _STATE_STRUCTURED_RX.match(ln)
+    )
+
 def _proof_mode_from_state(state_block: str) -> str:
     """Return Isabelle proof mode from a state block, e.g. 'prove', 'state', 'chain'. Empty if unknown."""
     for line in state_block.splitlines():
@@ -104,6 +136,48 @@ def _sanitize_isar_minor(text: str) -> str:
     """
     return re.sub(r"(?m)^(\s*)proof\s*\n\s+intro\s+([^\n]+)$", r"\1proof (intro \2)", text)
 
+def _adopt_as_lemma_oneliner(
+    full_text: str, finisher: str
+) -> Optional[str]:
+    """
+    Convert the FIRST lemma block into a one-liner:
+        lemma "G"
+        proof ...
+          ...
+        qed
+    ==> 
+        lemma "G"
+          by <finisher>
+
+    Returns patched text if a well-formed lemma/proof/qed block is found, else None.
+    """
+    span = _slice_first_lemma(full_text)
+    if not span:
+        return None
+    s, e = span
+    block = full_text[s:e]
+
+    # Find the first 'proof' and its matching 'qed' inside this lemma block
+    m_proof = re.search(r'(?m)^\s*proof\b.*$', block)
+    if not m_proof:
+        return None
+    m_qed = list(re.finditer(r'(?m)^\s*qed\b', block))
+    if not m_qed:
+        return None
+    q_last = m_qed[-1]
+
+    # Compute the end of the lemma header line (after its first newline).
+    # We will keep the lemma header and replace everything until end-of-block by '  by <finisher>\n'
+    hdr_nl = block.find("\n")
+    if hdr_nl == -1:
+        return None
+
+    lemma_header = block[:hdr_nl + 1]            # includes newline
+    one_liner   = f"  {finisher.strip()}\n"
+    patched_block = lemma_header + one_liner
+
+    return full_text[:s] + patched_block + full_text[e:]
+
 @dataclass(slots=True)
 class PlanAndFillResult:
     success: bool
@@ -147,6 +221,114 @@ def _is_inside_have_show(text: str, span: Tuple[int, int]) -> bool:
         if _HEAD_CMD_RE.match(line or ""):
             return True
     return False
+
+def _adopt_finisher_at_hole(
+    *, full_text: str, hole_span: Tuple[int, int], finisher: str, eff_goal: str,
+    isa, session: str, trace: bool
+) -> Tuple[str, bool, str]:
+    """
+    Insert a discovered finisher at the current hole, respecting proof mode.
+
+    - In proof (state|chain):
+        1) Prefer converting the whole lemma to a one-liner (attach 'by …' to lemma header).
+        2) If that is not possible, try replacing the hole with a bare 'by …'.
+    - In proof (prove):
+        - If governed by have/show, attach inline; otherwise synthesize `show "<goal>" by …`.
+
+    Returns: (patched_text, applied, why)
+    """
+    fin_raw = (finisher or "").strip()
+    if not fin_raw:
+        return full_text, False, "empty-finisher"
+    fin = fin_raw if fin_raw.startswith("by ") or fin_raw == "done" else f"by {fin_raw}"
+
+    # NOTE: suppress internal noisy debug prints here
+    state_block = _print_state_before_hole(isa, session, full_text, hole_span, trace=False)
+    mode = _proof_mode_from_state(state_block)
+
+    # --- STATE/CHAIN MODE ---
+    if mode in {"state", "chain", ""}:
+        # (A) Try to adopt as lemma one-liner (most robust and mirrors your final success)
+        cand_top = _adopt_as_lemma_oneliner(full_text, fin)
+        if cand_top:
+            cand_top = _strip_trailing_dead_proof(_sanitize_isar_minor(cand_top))
+            if _verify_full_proof(isa, session, cand_top):
+                if trace:
+                    print(f"[fill] Adopted finisher as lemma one-liner in state mode: {fin}")
+                return cand_top, True, "state:lemma-oneliner"
+
+        # (B) Fallback: replace the hole with a bare 'by …'
+        s, e = hole_span
+        line_start = full_text.rfind("\n", 0, s) + 1
+        indent = full_text[line_start:s]
+        indent = indent[:len(indent) - len(indent.lstrip())]
+        payload = f"{indent}{fin}\n"
+        cand = full_text[:s] + payload + full_text[e:]
+        cand = _strip_trailing_dead_proof(_sanitize_isar_minor(cand))
+        cand = _sanitize_state_snippet(cand)
+        if _verify_full_proof(isa, session, cand):
+            if trace:
+                print(f"[fill] Adopted finisher in state mode (hole replacement): {fin}")
+            return cand, True, "state:by"
+        return full_text, False, "state:verify-failed"
+
+    # --- PROVE MODE ---
+    if _is_inside_have_show(full_text, hole_span):
+        if trace:
+            print("[fill] Attaching finisher inline to have/show head (prove mode).")
+        cand = _attach_finisher_inline(full_text, hole_span, fin) or full_text
+        if cand != full_text:
+            cand = _strip_trailing_dead_proof(_sanitize_isar_minor(cand))
+            if _verify_full_proof(isa, session, cand):
+                return cand, True, "prove:inline"
+            return full_text, False, "prove:inline-verify-failed"
+
+    # No governing head → insert `show "<goal>"` just above the hole and inline the finisher.
+    if trace:
+        print("[fill] Inserting `show` head and attaching finisher (prove mode).")
+    full2, span2 = _ensure_show_head_before_hole(full_text, hole_span, eff_goal)
+    cand = _attach_finisher_inline(full2, span2, fin) or full2
+    if cand != full_text:
+        cand = _strip_trailing_dead_proof(_sanitize_isar_minor(cand))
+        if _verify_full_proof(isa, session, cand):
+            return cand, True, "prove:show-by"
+
+        # Fallback: bare 'by …' at the hole (rare in prove mode)
+        s, e = hole_span
+        line_start = full_text.rfind("\n", 0, s) + 1
+        indent = full_text[line_start:s]
+        indent = indent[:len(indent) - len(indent.lstrip())]
+        payload = f"{indent}{fin}\n"
+        cand2 = full_text[:s] + payload + full_text[e:]
+        cand2 = _strip_trailing_dead_proof(_sanitize_isar_minor(cand2))
+        if _verify_full_proof(isa, session, cand2):
+            return cand2, True, "prove:bare-by"
+
+    return full_text, False, "prove:verify-failed"
+
+def _maybe_run_planner_repairs(
+    *, full: str, span: Tuple[int, int], eff_goal: str, model: Optional[str],
+    isa, session: str, left_s, max_repairs_per_hole: int, trace: bool, resume_stage: int = 0
+) -> Tuple[str, bool, str]:
+    """
+    Call planner (structured Isar) repairs only if current mode is `proof (prove)`.
+    Otherwise, skip so the stepwise prover keeps control in state/chain modes.
+    """
+    # NOTE: suppress noisy debug prints from the state fetch
+    state = _print_state_before_hole(isa, session, full, span, trace=False)
+    mode = _proof_mode_from_state(state)
+    if mode and mode != "prove":
+        if trace:
+            print(f"[repair] In mode '{mode}': skipping planner repairs; staying with stepwise tactics.")
+        return full, False, f"skip:mode={mode}"
+
+    return try_cegis_repairs(
+        full_text=full, hole_span=span, goal_text=eff_goal, model=model,
+        isabelle=isa, session=session,
+        repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
+        max_ops_to_try=max_repairs_per_hole, beam_k=2, allow_whole_fallback=False,
+        trace=trace, resume_stage=resume_stage,
+    )
 
 # === NEW: robust finisher parsing & attachment ===
 _FINISHER_CORE = re.compile(
@@ -331,9 +513,11 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: tuple[int,
         s, e = hole_span
         return full_text[:s] + "\n" + full_text[e:], True, "(stale-hole)"
 
-    state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
+    # NOTE: call with trace=False to avoid Isabelle’s noisy "[DEBUG ERROR]" during state mode
+    state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace=False)
     _log_state_block("fill", state_block, trace=trace)
     eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
+    mode = _proof_mode_from_state(state_block) or ""
 
     res = prove_goal(
         isabelle, session, eff_goal, model_name_or_ensemble=model, beam_w=3, max_depth=6,
@@ -346,38 +530,41 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: tuple[int,
     if not (applies or finisher):
         return full_text, False, "no-steps"
 
-    # If we can finish in prove/state/chain with no governing head, synthesize 'show "<goal>"' and inline the finisher.
-    mode = _proof_mode_from_state(state_block)
-    if finisher and not _is_inside_have_show(full_text, hole_span) and mode in {"prove", "state", "chain", ""}:
-        if trace:
-            print("[fill] Synthesizing `show` head in prove/state mode and attaching finisher.")
-        full_text2, span2 = _ensure_show_head_before_hole(full_text, hole_span, eff_goal)
-        new_text = _attach_finisher_inline(full_text2, span2, finisher) or full_text2
-        if new_text != full_text:
-            # Minor syntax cleanup, then verify
-            new_text = _sanitize_isar_minor(_strip_trailing_dead_proof(new_text))
-            if _verify_full_proof(isabelle, session, new_text):
-                return new_text, True, finisher
+    # === Adopt a discovered finisher with mode awareness ===
+    if finisher:
+        patched, applied, why = _adopt_finisher_at_hole(
+            full_text=full_text, hole_span=hole_span, finisher=finisher, eff_goal=eff_goal,
+            isa=isabelle, session=session, trace=trace
+        )
+        if applied and patched != full_text:
+            return patched, True, finisher
+        # If finisher couldn't be adopted, we'll continue with apply-steps below.
 
-    # Prefer attaching a one-line finisher directly to the governing have/show when present.
+    # Prefer attaching a one-line finisher directly to the governing have/show (legacy path).
     if finisher and _is_inside_have_show(full_text, hole_span):
         if trace:
-            print("[fill] Attaching finisher inline to have/show head.")
+            print("[fill] Attaching finisher inline to have/show head (legacy).")
         new_text = _attach_finisher_inline(full_text, hole_span, finisher) or full_text
         if new_text != full_text:
             new_text = _sanitize_isar_minor(_strip_trailing_dead_proof(new_text))
             if _verify_full_proof(isabelle, session, new_text):
                 return new_text, True, finisher
 
+    # Fall back to inserting the script (applies + finisher) inside the hole body.
     if finisher:
         script = applies + [finisher]
+        if mode in {"state", "chain", ""}:
+            script = _sanitize_state_script_lines(script)
         s, e = hole_span
         new_text = full_text[:s] + "\n  " + "\n  ".join(script) + "\n" + full_text[e:]
         new_text = _sanitize_isar_minor(_strip_trailing_dead_proof(new_text))
+        if mode in {"state", "chain", ""}:
+            new_text = _sanitize_state_snippet(new_text)
         if _verify_full_proof(isabelle, session, new_text):
             return new_text, True, "\n".join(script)
         return full_text, False, "finisher-unverified"
 
+    # Only apply-steps (no finisher)
     if applies:
         if _is_inside_have_show(full_text, hole_span):
             if trace:
@@ -389,7 +576,13 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: tuple[int,
         if not dedup:
             return full_text, False, "apply-duplicate"
 
-        return _insert_above_hole(full_text, hole_span, dedup), False, "\n".join(dedup)
+        if mode in {"state", "chain", ""}:
+            dedup = _sanitize_state_script_lines(dedup)
+
+        new_full = _insert_above_hole(full_text, hole_span, dedup)
+        if mode in {"state", "chain", ""}:
+            new_full = _sanitize_state_snippet(new_full)
+        return new_full, False, "\n".join(dedup)
 
     return full_text, False, "no-tactics"
 
@@ -403,14 +596,14 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
     for i, span in enumerate(t_spans):
         if left_s() <= 3.0:
             break
-        st = _print_state_before_hole(isa, session, full, span, trace)
+        # NOTE: suppress noisy debug prints from the state fetch
+        st = _print_state_before_hole(isa, session, full, span, trace=False)
         eff_goal = _effective_goal_from_state(st, goal_text, full, span, trace)
 
-        patched, applied, _ = try_cegis_repairs(
-            full_text=full, hole_span=span, goal_text=eff_goal, model=model,
-            isabelle=isa, session=session, repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
-            max_ops_to_try=max_repairs_per_hole, beam_k=2, allow_whole_fallback=False, 
-            trace=trace, resume_stage=0,
+        patched, applied, _ = _maybe_run_planner_repairs(
+            full=full, span=span, eff_goal=eff_goal, model=model,
+            isa=isa, session=session, left_s=left_s,
+            max_repairs_per_hole=max_repairs_per_hole, trace=trace, resume_stage=0,
         )
 
         if applied and patched != full:
@@ -536,14 +729,13 @@ def _run_fill_loop(isa, session: str, full: str, goal_text: str, model: Optional
         # Stage 1 or 2: Try repair
         current_stage = repair_progress.get(hole_key, 0)
         if current_stage > 0 and repairs and left_s() > 6:
-            state = _print_state_before_hole(isa, session, full, span, trace)
+            state = _print_state_before_hole(isa, session, full, span, trace=False)
             eff_goal = _effective_goal_from_state(state, goal_text, full, span, trace)
 
-            patched, applied, _ = try_cegis_repairs(
-                full_text=full, hole_span=span, goal_text=eff_goal, model=model,
-                isabelle=isa, session=session, repair_budget_s=min(30.0, max(15.0, left_s() * 0.33)),
-                max_ops_to_try=max_repairs_per_hole, beam_k=2, allow_whole_fallback=False,
-                trace=trace, resume_stage=current_stage,
+            patched, applied, _ = _maybe_run_planner_repairs(
+                full=full, span=span, eff_goal=eff_goal, model=model,
+                isa=isa, session=session, left_s=left_s,
+                max_repairs_per_hole=max_repairs_per_hole, trace=trace, resume_stage=current_stage,
             )
 
             # Check if repair succeeded
