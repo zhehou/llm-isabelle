@@ -77,10 +77,10 @@ EDIT SCOPE
 
 STRICT RULES
 - Always prefer `by simp` / `by auto` / `by blast` / `by fastforce` unless more complex proof if necessary.
-- If "by ..." can directly solve the goal, then don't add "proof ... qed".
+- If "by ..." can directly solve the goal, then don't need "proof ... qed".
 - In `using`/`simp add:`/`unfolding` refer ONLY to named facts (no raw quoted propositions) in PROOF_CONTEXT.
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
-- Your output BLOCK must be substantively different from every block in PRIOR FAILED BLOCKS, e.g., prove different intermediate facts.
+- Your output BLOCK must be substantively different from every block in PRIOR FAILED BLOCKS, e.g., different proof strategies or prove different intermediate facts.
 - Don't add "qed" if there isn't an open "proof".
 - Don't copy text from PROOF_CONTEXT. 
 - Every tactic line (e.g., "by ...", "using ... by ...", or "sorry") must be in a new line.
