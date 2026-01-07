@@ -11,9 +11,9 @@ Key features:
   - Premise selection using encoders and transformers
 - Isar-style proof outline generator (in the planner folder)
   - LLM guesses outline
-  - Calls the stepwise prover to fill the details
+  - Calls the stepwise prover to fill the details (WIP)
   - Micro RAG extracted from AFP
-  - CEGIS style iterative proof repair
+  - CEGIS style iterative proof repair (WIP)
 ---
 
 ## Table of Contents
