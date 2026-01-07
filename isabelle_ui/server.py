@@ -238,7 +238,7 @@ def plan_fill(req: PlanFillReq):
         # repairs
         repairs=repairs,
         max_repairs_per_hole=max_repairs,
-        repair_trace=repair_trace,
+        trace=repair_trace,
         # priors & micro-RAG
         priors_path=priors_path,
         context_hints=context_hints,

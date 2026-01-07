@@ -88,11 +88,11 @@ gemini setup
 # Or export GEMINI_API_KEY
 export GEMINI_API_KEY=xxxxxxxx
 # Quick sanity check
-gemini -m gemini-2.5-pro -p "hello"
+gemini -m gemini-3-flash-preview -p "hello"
 ```
 
-**Recommended model IDs**: `gemini-2.5-pro` (reasoning) and `gemini-2.5-flash` (fast).  
-Some experimental models (e.g. `gemini-2.0-pro-exp`) are **versioned** and may not be enabled on every account. If you see NOT_FOUND, try a stable model first.
+**Recommended model IDs**: `gemini-3-pro-preview` (reasoning) and `gemini-3-flash-preview` (fast).  
+If you see NOT_FOUND, try a stable model first.
 
 ---
 
@@ -104,7 +104,7 @@ We route backends via **prefixes**:
 - **Ollama** (local):  
   - `"qwen3-coder:30b"` (no prefix → treated as Ollama for back-compat), or  
   - `"ollama:qwen3-coder-30b"` (explicit prefix).
-- **Gemini CLI**: `"gemini:gemini-2.5-pro"` (or another model available to your CLI).
+- **Gemini CLI**: `"gemini:gemini-3-flash-preview"` (or another model available to your CLI).
 - **Hugging Face**: `"hf:<repo-id>"`, e.g. `"hf:meta-llama/Llama-3.1-8B-Instruct"`.
 
 > If a model call fails, the prover can still produce results by falling back to heuristics/ATP tools (e.g., Sledgehammer). Use the debug tools below to confirm which backend actually ran.
@@ -149,7 +149,7 @@ python -m prover.cli --goal "map f (xs @ ys) = map f xs @ map f ys" \
 **Gemini CLI (hosted):**
 ```bash
 python -m prover.cli --goal 'rev (rev xs) = xs' \
-  --model 'gemini:gemini-2.5-pro'
+  --model 'gemini:gemini-3-flash-preview'
 ```
 
 **Hugging Face (hosted API):**
@@ -189,7 +189,7 @@ python baselines/sledge_only.py \
 Prove multiple goals from a file
 ```bash
 python -m prover.cli --goals-file datasets/lists.txt \
-  --model "gemini:gemini-2.5-pro"
+  --model "gemini:gemini-3-flash-preview"
 ```
 
 Benchmarking
@@ -402,7 +402,7 @@ python -m planner.cli --timeout 60 --diverse-outlines --k 3 --temps "0.35,0.55,0
 
 Proof repair is on by default, but can be turned off
 ```bash
-python -m planner.cli --model "gemini:gemini-2.5-flash" \                   
+python -m planner.cli --model "gemini:gemini-3-flash-preview" \                   
   --timeout 120 --no-repair \
   "map f (xs @ ys) = map f xs @ map f ys"
 ```
@@ -428,7 +428,7 @@ python -m planner.experiments regress \
 Regression testing against previously saved baseline
 ```bash
 python -m planner.experiments regress \
-  --file datasets/lists.txt --model "gemini:gemini-2.5-flash"\
+  --file datasets/lists.txt --model "gemini:gemini-3-flash-preview"\
   --mode auto --diverse --k 3 --timeout 120 \
   --strict-no-sorry --verify \
   --baseline datasets/baselines/planner_lists.json \
