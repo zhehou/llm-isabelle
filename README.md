@@ -2,6 +2,20 @@
 
 This repository implements an Isabelle/HOL theorem prover guided by Large Language Models (LLMs). It integrates Isabelle’s proof engine with modern LLMs (via **Ollama**, **Gemini CLI**, etc).
 
+If you use this repository in academic work, research prototypes, or derivative systems, please cite the following paper:
+
+```bibtex
+@misc{hou2026arxiv,
+      title={Vibe Coding an LLM-powered Theorem Prover}, 
+      author={Zhe Hou},
+      year={2026},
+      eprint={2601.04653},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2601.04653}, 
+}
+```
+
 Key features:
 - Stepwise prover (in the prover folder)
   - LLM guesses tactics
