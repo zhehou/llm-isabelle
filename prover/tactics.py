@@ -120,7 +120,7 @@ _NP_HIT = re.compile(r"(?i)(Nitpick\s+found\s+a\s+counterexample|genuine\s+count
 def precheck_quickcheck_refutes(isabelle, session_id: str, steps_with_candidate: List[str], timeout_s: int) -> bool:
     cmd = f"quickcheck[timeout = {int(timeout_s)}]"
     thy = build_theory(steps_with_candidate + [cmd], add_print_state=False, end_with="sorry")
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy, timeout_s=max(1, int(timeout_s) + 2))):
         if _QC_HIT.search(msg):
             return True
     return False
@@ -128,7 +128,7 @@ def precheck_quickcheck_refutes(isabelle, session_id: str, steps_with_candidate:
 def precheck_nitpick_refutes(isabelle, session_id: str, steps_with_candidate: List[str], timeout_s: int) -> bool:
     cmd = f"nitpick[timeout = {int(timeout_s)}]"
     thy = build_theory(steps_with_candidate + [cmd], add_print_state=False, end_with="sorry")
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, thy, timeout_s=max(1, int(timeout_s) + 2))):
         if _NP_HIT.search(msg):
             return True
     return False
@@ -213,7 +213,7 @@ def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_
     
     # Collect all response text, not just specific message types
     all_text = ""
-    responses = run_theory(isabelle, session_id, thy)
+    responses = run_theory(isabelle, session_id, thy, timeout_s=max(1, int(timeout_s) + 2))
     
     for r in (responses or []):
         # Get response body regardless of type
@@ -276,7 +276,7 @@ def mine_lemmas_from_state(isabelle, session_id: str, state_hint: str, max_lemma
         return []
     theory_text = _build_find_theorems_theory(toks)
     lemmas, seen = [], set()
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text, timeout_s=10)):
         for line in msg.splitlines():
             m = _LEMMA_LINE.match(line.strip())
             if m:
@@ -297,7 +297,7 @@ def mine_facts_prioritized(isabelle, session_id: str, state_hint: str, limit: in
     if def_name_patterns:
         theory_text += "\n" + "\n".join(f"find_theorems {p} - 10" for p in def_name_patterns)
     freq: Dict[str, int] = {}
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text)):
+    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text, timeout_s=12)):
         for line in msg.splitlines():
             m = _LEMMA_LINE.match(line.strip())
             if not m:
@@ -379,7 +379,14 @@ def try_structured_variants(isabelle, session_id: str, goal: str,
             for cons_fin in finishers:
                 if tries >= max_tries or left() <= 0: return None
                 steps = _build_structured_induction_steps(goal, ind_var, nil_fin, cons_fin)
-                ok, _ = finished_ok(run_theory(isabelle, session_id, build_theory([steps[0]] + steps[1:], False, None)))
+                ok, _ = finished_ok(
+                    run_theory(
+                        isabelle,
+                        session_id,
+                        build_theory([steps[0]] + steps[1:], False, None),
+                        timeout_s=max(1, int(min(left(), 30)))
+                    )
+                )
                 tries += 1
                 if ok: return steps
 
@@ -389,7 +396,14 @@ def try_structured_variants(isabelle, session_id: str, goal: str,
             for f_fin in finishers:
                 if tries >= max_tries or left() <= 0: return None
                 steps = _build_structured_cases_bool_steps(goal, cases_var, t_fin, f_fin)
-                ok, _ = finished_ok(run_theory(isabelle, session_id, build_theory([steps[0]] + steps[1:], False, None)))
+                ok, _ = finished_ok(
+                    run_theory(
+                        isabelle,
+                        session_id,
+                        build_theory([steps[0]] + steps[1:], False, None),
+                        timeout_s=max(1, int(min(left(), 30)))
+                    )
+                )
                 tries += 1
                 if ok: return steps
 

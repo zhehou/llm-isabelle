@@ -11,7 +11,10 @@ from .config import (
 # IMPORTANT: read premise/context from live config, not frozen names
 from . import config as CFG
 from .llm import propose_steps, propose_finishers
-from .isabelle_api import build_theory, run_theory, finished_ok, last_print_state_block, use_calls_count
+from .isabelle_api import (
+    build_theory, run_theory, finished_ok, last_print_state_block,
+    use_calls_count, last_call_timed_out,
+)
 
 from .tactics import (
     mine_lemmas_from_state, mine_facts_prioritized,
@@ -58,16 +61,28 @@ def _global_cache_put(k: tuple, v: tuple):
         _global_result_cache.popitem(last=False)
 
 
-def try_step_raw(isabelle, session_id: str, steps: List[str], cand: str) -> Tuple[bool, Optional[int], str, float]:
+def try_step_raw(
+    isabelle,
+    session_id: str,
+    steps: List[str],
+    cand: str,
+    timeout_s: Optional[int] = None,
+) -> Tuple[bool, Optional[int], str, float]:
     t0 = time.monotonic()
     thy = build_theory(steps + [cand], add_print_state=True, end_with="sorry")
-    resps = run_theory(isabelle, session_id, thy)
+    resps = run_theory(isabelle, session_id, thy, timeout_s=timeout_s)
     ok, _ = finished_ok(resps)
     hint = last_print_state_block(resps) if ok else ""
     n = parse_subgoals(hint) if ok else None
     return ok, n, hint, (time.monotonic() - t0) * 1000
 
-def try_step_cached(isabelle, session_id: str, steps: List[str], cand: str) -> Tuple[bool, Optional[int], str, bool, float]:
+def try_step_cached(
+    isabelle,
+    session_id: str,
+    steps: List[str],
+    cand: str,
+    timeout_s: Optional[int] = None,
+) -> Tuple[bool, Optional[int], str, bool, float]:
     gkey = _global_cache_key(steps, cand)
     gval = _global_cache_get(gkey)
     if gval is not None:
@@ -80,16 +95,24 @@ def try_step_cached(isabelle, session_id: str, steps: List[str], cand: str) -> T
         _global_cache_put(gkey, (ok, n_sub, hint))
         return ok, n_sub, hint, True, 0.0
 
-    ok, n_sub, hint, elapsed_ms = try_step_raw(isabelle, session_id, steps, cand)
-    _result_cache[key] = (ok, n_sub, hint)
-    _global_cache_put(gkey, (ok, n_sub, hint))
+    ok, n_sub, hint, elapsed_ms = try_step_raw(isabelle, session_id, steps, cand, timeout_s=timeout_s)
+    # Do not cache wall-clock timeouts: a later retry with more budget may succeed.
+    if not last_call_timed_out():
+        _result_cache[key] = (ok, n_sub, hint)
+        _global_cache_put(gkey, (ok, n_sub, hint))
     return ok, n_sub, hint, False, elapsed_ms
 
 
-def try_finish(isabelle, session_id: str, steps: List[str], fin: str) -> Tuple[bool, float]:
+def try_finish(
+    isabelle,
+    session_id: str,
+    steps: List[str],
+    fin: str,
+    timeout_s: Optional[int] = None,
+) -> Tuple[bool, float]:
     t0 = time.monotonic()
     thy = build_theory(steps + [fin], add_print_state=False, end_with=None)
-    ok, _ = finished_ok(run_theory(isabelle, session_id, thy))
+    ok, _ = finished_ok(run_theory(isabelle, session_id, thy, timeout_s=timeout_s))
     return ok, (time.monotonic() - t0) * 1000
 
 
@@ -306,7 +329,10 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
 
             for fin, origin in finishers_with_origin:
                 if time_left_s() <= 0: break
-                ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin)
+                # Enforce wall-clock budget at the Isabelle boundary to avoid false positives
+                # where Isabelle keeps running long after our global timeout.
+                per_call_timeout = max(1, int(min(time_left_s(), float(budget))))
+                ok, elapsed_ms = try_finish(isabelle, session_id, steps, fin, timeout_s=per_call_timeout)
                 # If sledge/finisher solved before retrieval ran, lazily compute pool metrics now.
                 if CFG.PREMISES_ENABLE and prem_idx is not None and (not pool_feats or float(pool_feats.get("n_premises", 0.0)) == 0.0):
                     try:
@@ -456,7 +482,10 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     }
                     )
                     continue
-                ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(isabelle, session_id, steps, c)
+                per_call_timeout = max(1, int(min(time_left_s(), float(budget))))
+                ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(
+                    isabelle, session_id, steps, c, timeout_s=per_call_timeout
+                )
                 logger.log_attempt(
                     "expand", steps, c, ok, n_sub, cache_hit, elapsed_ms, depth_reached,
                     subgoals_before=prev_n,

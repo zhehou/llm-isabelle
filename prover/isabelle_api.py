@@ -1,7 +1,7 @@
 # prover/isabelle_api.py 
 from __future__ import annotations
 
-import os, json, tempfile, textwrap, re
+import os, json, tempfile, textwrap, re, asyncio
 from typing import List, Tuple, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
@@ -30,6 +30,7 @@ _SUBGOALS_RE = re.compile(r"(\d+)\s+subgoals?")
 
 _use_calls = 0
 _use_timeouts = 0
+_last_call_timed_out = False
 
 
 def _header(imports: Optional[List[str]] = None) -> str:
@@ -122,19 +123,45 @@ def build_theory(steps: List[str], add_print_state: bool, end_with: Optional[str
     return textwrap.dedent(_header() + "\n".join(body) + "\n\n" + FOOTER)
 
 
-def _use_theories_call(isabelle, *, session_id: str, master_dir: str) -> List[IsabelleResponse]:
+def _use_theories_call(isabelle, *, session_id: str, master_dir: str, timeout_s: Optional[int] = None) -> List[IsabelleResponse]:
+    """Internal: best-effort pass through native timeout kwargs (if supported)."""
+    if timeout_s is not None and int(timeout_s or 0) > 0:
+        # Try native timeout kwarg spellings first (best-effort). Some clients ignore these,
+        # so the caller still enforces a wall-clock timeout via Future.result(...).
+        for kw in _TIMEOUT_KWARGS:
+            try:
+                return list(
+                    isabelle.use_theories(
+                        theories=["Scratch"], session_id=session_id, master_dir=master_dir, **{kw: int(timeout_s)}
+                    )
+                )
+            except TypeError:
+                continue
+            except Exception:
+                return []
     return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=master_dir))
 
 
-def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResponse]:
-    """Run a small throwaway theory through Isabelle with an optional wall-clock timeout.
+def run_theory(
+    isabelle,
+    session_id: str,
+    theory_text: str,
+    timeout_s: Optional[int] = None,
+) -> List[IsabelleResponse]:
+    """Run a small throwaway theory through Isabelle with a wall-clock timeout.
 
-    Timeout value defaults to ISABELLE_USE_THEORIES_TIMEOUT_S (0 = disabled).
-    Tries native timeouts first (various kwarg spellings), else falls back to a thread + Future timeout.
+    IMPORTANT: Isabelle-side timeouts are not always authoritative for our pipeline.
+    This wrapper enforces a wall-clock timeout (thread + Future timeout fallback)
+    and records whether the *last* call timed out so callers can avoid false positives.
+
+    - timeout_s: seconds; if None, defaults to ISABELLE_USE_THEORIES_TIMEOUT_S.
+      Use 0/<=0 to disable.
+
     Returns the collected IsabelleResponse list; on timeout returns an empty list.
     """
-    global _use_calls
+    global _use_calls, _last_call_timed_out
     _use_calls += 1
+    _last_call_timed_out = False
 
     tmpdir = tempfile.TemporaryDirectory()
     try:
@@ -142,35 +169,35 @@ def run_theory(isabelle, session_id: str, theory_text: str) -> List[IsabelleResp
         with open(p, "w", encoding="utf-8") as f:
             f.write(theory_text)
 
-        timeout_s = int(ISABELLE_USE_THEORIES_TIMEOUT_S or 0)
+        # Resolve wall-clock timeout (seconds)
+        if timeout_s is None:
+            timeout_s = int(ISABELLE_USE_THEORIES_TIMEOUT_S or 0)
+        else:
+            try:
+                timeout_s = int(timeout_s)
+            except Exception:
+                timeout_s = 0
         if timeout_s > 0:
-            # Try native timeout kwarg spellings first (best-effort)
-            for kw in _TIMEOUT_KWARGS:
-                try:
-                    return list(
-                        isabelle.use_theories(
-                            theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name, **{kw: timeout_s}
-                        )
-                    )
-                except TypeError:
-                    continue
-                except Exception:
-                    return []
-
-            # Fallback: thread with Future timeout
+            # Always enforce a wall-clock timeout (even if native timeouts exist but are ignored).
             with ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(_use_theories_call, isabelle, session_id=session_id, master_dir=tmpdir.name)
+                fut = ex.submit(_use_theories_call, isabelle, session_id=session_id, master_dir=tmpdir.name, timeout_s=timeout_s)
                 try:
                     return fut.result(timeout=timeout_s)
                 except FuturesTimeout:
                     global _use_timeouts
                     _use_timeouts += 1
+                    _last_call_timed_out = True
                     return []
 
         # No timeout requested → direct call
         return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name))
     finally:
         tmpdir.cleanup()
+
+
+def last_call_timed_out() -> bool:
+    """Whether the most recent run_theory() call hit the wall-clock timeout."""
+    return bool(_last_call_timed_out)
 
 
 def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
@@ -181,6 +208,10 @@ def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
       - response body may be bytes, JSON string, or dict
       - dict-like or attribute-style access
     """
+    # If our wall-clock timeout fired, treat as NOT proved (prevents false positives).
+    if last_call_timed_out():
+        return False, {"timeout": True}
+
     any_ok = False
     last_obj: Dict[str, Any] = {}
 
@@ -191,7 +222,11 @@ def finished_ok(resps: List[IsabelleResponse]) -> Tuple[bool, Dict[str, Any]]:
         if not isinstance(obj, dict):
             continue
         last_obj = obj  # track last FINISHED
+        # Some client variants can produce partial/unfinished results; keep the check strict.
         if bool(obj.get("ok", False)) or str(obj.get("result", "")).lower() == "ok":
+            # If the FINISHED payload itself indicates a timeout, do not accept.
+            if str(obj.get("timeout", "")).lower() in ("1", "true", "yes"):
+                continue
             any_ok = True
 
     return any_ok, (last_obj or {})
@@ -253,6 +288,7 @@ __all__ = [
     # config-driven helpers
     "_header", "FOOTER", "parse_n_subgoals", "build_theory", "run_theory",
     "finished_ok", "last_print_state_block", "use_calls_count", "use_timeouts_count",
+    "last_call_timed_out",
     "graceful_terminate",
 ]
 
@@ -266,11 +302,27 @@ def graceful_terminate(proc, timeout_s: int = 3) -> None:
         return
     try:
         proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            proc.kill()
-            proc.wait(timeout=3)
+        # subprocess.Popen has .wait/.kill; multiprocessing.Process has .join/.kill (3.7+)
+        if hasattr(proc, "wait"):
+            try:
+                proc.wait(timeout=timeout_s)
+            except Exception:
+                try:
+                    if hasattr(proc, "kill"):
+                        proc.kill()
+                    proc.wait(timeout=timeout_s)
+                except Exception:
+                    pass
+        elif hasattr(proc, "join"):
+            try:
+                proc.join(timeout=timeout_s)
+            except Exception:
+                pass
+            try:
+                if hasattr(proc, "kill") and getattr(proc, "is_alive", lambda: False)():
+                    proc.kill()
+            except Exception:
+                pass
     finally:
         # Make sure transports/pipes are closed before the loop is closed
         try:
