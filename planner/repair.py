@@ -44,6 +44,13 @@ def _log(prefix: str, label: str, content: str, trace: bool = True) -> None:
 
 def _sanitize_llm_block(text: str) -> str:
     if not text:
+        # Normalise a few common surface-syntax glitches that regularly appear in LLM output.
+        # 1) operator sections with stray spaces: '( @)' -> '(@)' etc.
+        text = re.sub(r"\(\s*([@+\-*/=<>^]+)\s*\)", r"(\1)", text)
+        # 2) remove stray 'sorry' tokens (they often sneak into 'using ...' or as standalone).
+        text = re.sub(r"\bsorry\b", "", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return text
     patterns = [
         r"^\s*<<<BLOCK\s*$",
@@ -626,7 +633,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if ok:
                 return current_text, True, "stage=1 block:have-show"
             # FIX: Return False for unverified changes
-            return current_text, False, "stage=1 partial-progress"
+            return full_text, False, "stage=1 partial-progress"
         lines = current_text.splitlines()
         state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     
@@ -643,7 +650,7 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if ok:
                 return current_text, True, "stage=2 block:case"
             # FIX: Return False for unverified changes
-            return current_text, False, "stage=2 partial-progress"
+            return full_text, False, "stage=2 partial-progress"
     
     # Stage 2b: Subproof
     ps, pe = _enclosing_subproof(lines, focus_line)
@@ -658,10 +665,10 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             if ok:
                 return current_text, True, "stage=2 block:subproof"
             # FIX: Return False for unverified changes
-            return current_text, False, "stage=2 partial-progress"
+            return full_text, False, "stage=2 partial-progress"
     
     if current_text != full_text:
-        return current_text, False, f"stage={resume_stage} partial-progress"
+        return full_text, False, f"stage={resume_stage} partial-progress"
     return full_text, False, f"stage={resume_stage} cegis-nohelp"
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 
