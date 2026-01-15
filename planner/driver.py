@@ -151,12 +151,12 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
         if not dedup:
             return full_text, False, "apply-duplicate"
 
-        if head_idx is not None and best_block.lstrip().startswith("apply "):
-        # Allow apply-style proofs inside have/show. If the tactic sequence is complete,
-        # we can safely end it with "done". If it is incomplete, Isabelle will reject it,
-        # and we will fall back to repair later.
-            if dedup and dedup[-1].strip() not in ("done", "qed"):
-                dedup = dedup + ["done"]
+        if head_idx is not None:
+            # Apply-only inside have/show is illegal in 'prove' mode unless closed by 'by ...'.
+            # Do NOT fabricate 'proof ... qed'. Leave the hole as-is and let the caller escalate to repair.
+            if trace:
+                print("[fill] apply-only inside have/show; not inserting proof/qed; escalating to repair.")
+            return full_text, False, "apply-inside-have/show"
         else:
             # Non have/show context — keep existing behaviour (insert above, keep sorry)
             probe_text = _insert_above_hole_keep_sorry(full_text, hole_span, dedup)
@@ -266,7 +266,8 @@ def _repair_failed_proof_topdown(isa, session, full: str, goal_text: str, model:
             # Partial progress: keep it, then try to open the failing spot into a 'sorry'
             if trace:
                 print("[repair] Partial progress in topdown repair (unverified). Opening sorries...")
-            full2, opened = _open_minimal_sorries(isa, session, patched)
+            full = patched
+            full2, opened = _open_minimal_sorries(isa, session, full)
             if opened:
                 full = full2
                 t_spans = _tactic_spans_topdown(full)
@@ -699,7 +700,8 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                     if trace:
                         cap = STAGE1_CAP if start_stage == 1 else STAGE2_CAP
                         print(f"[repair] Stage {start_stage} changed but unverified (attempt {stage_tries[key]}/{cap}). Opening sorries...")
-                    full2, opened = _open_minimal_sorries(isa, session, patched)
+                    full = patched
+                    full2, opened = _open_minimal_sorries(isa, session, full)
                     if opened:
                         full = full2
                         focused_hole_key = None
