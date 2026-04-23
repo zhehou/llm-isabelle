@@ -235,7 +235,12 @@ def main():
         server_info, proc = start_isabelle_server(name="isabelle", log_file="server.log")
         print(server_info.strip())
         isabelle = get_isabelle_client(server_info)
-        session_id = isabelle.session_start(session="HOL")
+        # isabelle-client 1.1.0 returns a list of response objects; extract the id.
+        _ss_resp = isabelle.session_start(session="HOL")
+        session_id = (
+            _ss_resp[-1].response_body.session_id
+            if isinstance(_ss_resp, list) else _ss_resp
+        )
         print("session_id:", session_id)
 
         # Mine macros from existing logs (fast; skips if file missing)

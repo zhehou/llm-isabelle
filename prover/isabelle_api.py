@@ -73,16 +73,30 @@ def _normalize_type(rt: Any) -> str:
 
 
 def _decode_body_to_dict(body: Any) -> Optional[Dict[str, Any]]:
-    """Body may be dict/JSON string/bytes; return dict or None."""
+    """Body may be dict, JSON string, bytes, or a Pydantic model (isabelle-client>=1.1)."""
     if body is None:
         return None
+    if isinstance(body, dict):
+        return body
+    # Pydantic v2 model (e.g. UseTheoriesResults from isabelle-client 1.1.0)
+    dump = getattr(body, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump()
+        except Exception:
+            pass
+    # Pydantic v1 model
+    d = getattr(body, "dict", None)
+    if callable(d):
+        try:
+            return d()
+        except Exception:
+            pass
     if isinstance(body, (bytes, bytearray)):
         try:
             body = body.decode("utf-8", "replace")
         except Exception:
             body = str(body)
-    if isinstance(body, dict):
-        return body
     try:
         return json.loads(body)
     except Exception:
