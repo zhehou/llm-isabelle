@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 sledge_only.py — Standalone Sledgehammer-only runner (headless Isabelle).
 
 Flow
@@ -141,13 +141,21 @@ def read_log_via_build_log(session: str) -> str:
 def read_log_via_process(tmp_dir: Path, theory: str, imports: List[str], goal: str,
                          sh_timeout: int, provers: Optional[str], timeout: int) -> str:
     """
-    Last-resort fallback: run `isabelle process` in the temp dir and `use_thy` the theory.
-    This prints messages (including Sledgehammer output) to stdout.
+    Last-resort fallback: run `isabelle process_theories` on the temp theory file.
+    This prints messages (including Sledgehammer output) to stdout/stderr.
     """
-    (tmp_dir / f"{theory}.thy").write_text(
-        thy_probe_text(theory, imports, goal, sh_timeout, provers), encoding="utf-8"
+    thy_path = tmp_dir / f"{theory}.thy"
+    thy_path.write_text(
+        thy_probe_text(theory, imports, goal, sh_timeout, provers),
+        encoding="utf-8"
     )
-    cmd = [ISABELLE_BIN, "process", "-l", "HOL", "-e", f'use_thy "{theory}";']
+
+    cmd = [
+        ISABELLE_BIN, "process_theories",
+        "-l", "HOL",
+        "-O",
+        "-f", str(thy_path),
+    ]
     rc, out, err = run(cmd, cwd=str(tmp_dir), timeout=timeout)
     return (out or "") + ("\n" + err if err else "")
 
