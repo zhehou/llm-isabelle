@@ -1,0 +1,13 @@
+goal,fixture_id,category,difficulty,required_mechanism,baseline,mutation,fixture_kind,dependency_depth,success,elapsed_s,mode,model,outline_chars,fills,contextual_fills,fresh_goal_fills,repair_fills,fast_context_fills,searched_context_fills,deterministic_prepass_successes,local_repairs,subproof_repairs,stage3_repairs,verified_aux_obligations,complete_generated_outlines,outline_backtracks,whole_goal_fallbacks,failed_holes,had_sorry,verified_ok,verify_status,fixture_error
+P ⟶ Q ⟹ Q ⟶ R ⟹ P ⟶ R,,,,,,,,,True,44.5233,plan-fill,gemini:gemini-3-flash-preview,40,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+P ⟹ P ∨ Q,,,,,,,,,True,44.2948,plan-fill,gemini:gemini-3-flash-preview,28,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+distinct xs ⟹ distinct (rev xs),,,,,,,,,True,44.3084,plan-fill,gemini:gemini-3-flash-preview,50,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+(∀x. P x ⟶ Q x) ⟹ P a ⟹ Q a,,,,,,,,,True,44.2884,plan-fill,gemini:gemini-3-flash-preview,46,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+xs @ ys = [] ⟹ xs = [],,,,,,,,,True,46.1342,plan-fill,gemini:gemini-3-flash-preview,221,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+P ∧ Q ⟹ Q ∧ P,,,,,,,,,True,44.2893,plan-fill,gemini:gemini-3-flash-preview,32,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+(n::nat) ≤ m ⟹ m ≤ k ⟹ n ≤ k,,,,,,,,,True,44.2872,plan-fill,gemini:gemini-3-flash-preview,47,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+inj f ⟹ distinct xs ⟹ distinct (map f xs),,,,,,,,,True,45.5905,plan-fill,gemini:gemini-3-flash-preview,88,1,1,0,0,0,1,0,0,0,0,0,0,0,0,0,False,True,ok,
+A ⊆ B ⟹ x ∈ A ⟹ x ∈ B,,,,,,,,,True,46.4571,plan-fill,gemini:gemini-3-flash-preview,40,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+x ∈ set xs ⟹ x ∈ set (xs @ ys),,,,,,,,,True,42.1879,plan-fill,gemini:gemini-3-flash-preview,49,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+x ∈ set ys ⟹ x ∈ set (xs @ ys),,,,,,,,,True,41.7309,plan-fill,gemini:gemini-3-flash-preview,49,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+rev xs = ys ⟹ rev ys = xs,,,,,,,,,True,46.4204,plan-fill,gemini:gemini-3-flash-preview,44,1,1,0,0,1,0,0,0,0,0,0,0,0,0,0,False,True,ok,

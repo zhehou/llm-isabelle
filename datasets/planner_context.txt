@@ -1,0 +1,13 @@
+# Focused regression suite for local assumptions and named case facts.
+x ∈ set xs ⟹ x ∈ set (xs @ ys)
+x ∈ set ys ⟹ x ∈ set (xs @ ys)
+distinct xs ⟹ distinct (rev xs)
+inj f ⟹ distinct xs ⟹ distinct (map f xs)
+A ⊆ B ⟹ x ∈ A ⟹ x ∈ B
+P ⟹ P ∨ Q
+P ∧ Q ⟹ Q ∧ P
+P ⟶ Q ⟹ Q ⟶ R ⟹ P ⟶ R
+(∀x. P x ⟶ Q x) ⟹ P a ⟹ Q a
+xs @ ys = [] ⟹ xs = []
+rev xs = ys ⟹ rev ys = xs
+(n::nat) ≤ m ⟹ m ≤ k ⟹ n ≤ k

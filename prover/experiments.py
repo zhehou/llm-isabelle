@@ -32,29 +32,14 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .isabelle_api import start_isabelle_server, get_isabelle_client
+# Premise/reranker tokenizers may initialise before Gemini CLI forks.  Set this
+# before importing the prover stack to suppress the warning and avoid inherited
+# tokenizer worker pools in child processes.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from .isabelle_api import start_isabelle_server, get_isabelle_client, shutdown_isabelle
 from .prover import prove_goal
 from . import config as CFG
-
-def _silence_asyncio_transport_del():
-    """Mute benign 'Event loop is closed' from BaseSubprocessTransport.__del__ at teardown."""
-    try:
-        import asyncio.base_subprocess as _bs  # stdlib
-        _orig = getattr(_bs.BaseSubprocessTransport, "__del__", None)
-        if _orig is None:
-            return
-        def _quiet(self, _o=_orig):
-            try:
-                _o(self)
-            except RuntimeError as e:
-                if "Event loop is closed" in str(e):
-                    return
-                raise
-        _bs.BaseSubprocessTransport.__del__ = _quiet
-    except Exception:
-        pass
-
-_silence_asyncio_transport_del()
 
 class _StoreSetFlag(argparse.Action):
     """Like 'store', but also marks that the user explicitly provided this flag."""
@@ -279,17 +264,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
                     out = _bench_write_csv(suite_name, cfg_name, rows)
                     print(f"CSV → {out}")
     finally:
-        try:
-            isabelle.shutdown()
-        except Exception:
-            pass
-        try:
-            proc.terminate(); proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill(); proc.wait(timeout=3)
-            except Exception:
-                pass
+        shutdown_isabelle(isabelle, proc)
 
 # =============================================================================
 # REGRESS
@@ -495,17 +470,7 @@ def cmd_regress(args: argparse.Namespace) -> None:
         print(f"Median time:  all={summ.median_time_all:.2f}s, succ={summ.median_time_success:.2f}s")
         print(f"Avg depth:    {summ.avg_depth:.2f}")
     finally:
-        try:
-            isabelle.shutdown()
-        except Exception:
-            pass
-        try:
-            proc.terminate(); proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill(); proc.wait(timeout=3)
-            except Exception:
-                pass
+        shutdown_isabelle(isabelle, proc)
 
 # =============================================================================
 # AGGREGATE

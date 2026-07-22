@@ -12,13 +12,37 @@ from typing import Callable
 from planner.repair_inputs import _find_first_hole, _hole_line_bounds, _APPLY_OR_BY, _snippet_window, _clamp_line_index, _quick_state_and_errors, _extract_error_lines, _run_theory_with_timeout, _print_state_before_hole, _nearest_header, _recent_steps, _normalize_error_texts, _facts_from_state, get_counterexample_hints_for_repair, _earliest_failure_anchor
 from planner.prompts import _LOCAL_SYSTEM, _LOCAL_USER, _BLOCK_SYSTEM, _BLOCK_USER
 from prover.config import MODEL as DEFAULT_MODEL, OLLAMA_HOST, TIMEOUT_S as OLLAMA_TIMEOUT_S, OLLAMA_NUM_PREDICT, TEMP as OLLAMA_TEMP, TOP_P as OLLAMA_TOP_P
-from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
+from prover.isabelle_api import (
+    build_theory,
+    run_theory,
+    last_print_state_block,
+    finished_ok,
+    first_error_message,
+)
+from planner.goals import (
+    _extract_local_assumptions,
+    _print_state_before_hole as _context_state_before_hole,
+)
+from planner.frontier import frontier_advanced
+from prover.strategies import (
+    definition_guided_finishers,
+    definition_guided_obligations,
+)
 
 # ========== Configuration ==========
 _ISA_FAST_TIMEOUT_S = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
 _ISA_VERIFY_TIMEOUT_S = int(os.getenv("ISABELLE_VERIFY_TIMEOUT_S", "30"))
 _SESSION = requests.Session()
 _REPAIR_RULES_JSON = os.getenv("REPAIR_RULES_JSON", "").strip()  # optional, declarative fallback rules
+
+
+def _compact_diagnostic(text: str, *, limit: int = 600) -> str:
+    compact = " | ".join(
+        line.strip() for line in str(text or "").splitlines() if line.strip()
+    )
+    if len(compact) > limit:
+        return compact[: max(0, limit - 1)].rstrip() + "…"
+    return compact
 
 # ========== Regex Patterns ==========
 _CTX_HEAD = re.compile(r"^\s*(?:using|from|with|then|ultimately|finally|also|moreover)\b")
@@ -35,6 +59,7 @@ _WRAPPED_THEOREM_HEAD = re.compile(r"(?mx)\A(?:[ \t]*(?:\(\*.*?\*\)|\<comment\>.
 # Outline-level strategies we want to ban on whole-proof regen
 _OUTLINE_PROOF_LINE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]*)\))?\s*$")
 _OUTLINE_BARE         = re.compile(r"(?m)^\s*(?:induction|cases|coinduction)\b.*$")
+_SORRY_RE             = re.compile(r"\bsorry\b")
 
 # ========== Utility Functions ==========
 
@@ -110,8 +135,11 @@ def _is_tactic_line(s: str) -> bool:
 
 def _extract_proof_context(full_text: str, block_start_line: int) -> str:
     """
-    Extract the lemma header and all proof content before the block.
-    Returns everything from the lemma line up to (but not including) the block.
+    Extract theory declarations, the lemma header and proven prefix.
+
+    Stage-3 repair must see user datatypes and recursive equations; otherwise
+    it invents library names for constants whose definitions were simply
+    hidden from the prompt.
     """
     lines = full_text.splitlines()
     
@@ -127,9 +155,19 @@ def _extract_proof_context(full_text: str, block_start_line: int) -> str:
         start = max(0, block_start_line - 10)
         return "\n".join(lines[start:block_start_line]).strip()
     
-    # Return from lemma header to just before the block
+    theory_context = _trim_block_for_prompt(
+        "\n".join(lines[:lemma_line]).strip(), max_chars=6000
+    )
     context_lines = lines[lemma_line:block_start_line]
-    return "\n".join(context_lines).strip()
+    proof_prefix = "\n".join(context_lines).strip()
+    if theory_context:
+        return (
+            "THEORY DECLARATIONS BEFORE THE TARGET:\n"
+            + theory_context
+            + "\n\nTARGET PROOF PREFIX:\n"
+            + proof_prefix
+        ).strip()
+    return proof_prefix
 
 # ========== LLM Generation ==========
 def _generate_simple(prompt: str, model: Optional[str] = None, *, timeout_s: Optional[int] = None) -> str:
@@ -242,7 +280,8 @@ def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, L
             prior_failed_blocks=(prior_failed_blocks or "(none)")
         )
     try:
-        return _sanitize_llm_block(_generate_simple(prompt, model=model, timeout_s=timeout_s))
+        candidate = _sanitize_llm_block(_generate_simple(prompt, model=model, timeout_s=timeout_s))
+        return "" if _SORRY_RE.search(candidate or "") else candidate
     except Exception:
         return ""
 
@@ -402,15 +441,30 @@ def _enclosing_have_show_block(lines: List[str], hole_line: int) -> Tuple[int, i
     return (i, j if j > i else -1)
 
 def _enclosing_whole_proof(lines: List[str]) -> Tuple[int, int]:
-    last_qed = -1
-    for i, line in enumerate(lines):
-        if _QED_RE.match(line):
-            last_qed = i
-    if last_qed < 0:
+    """Return the outer proof block, not the nearest nested proof."""
+    # A theory preamble may contain already-proved support lemmas.  Whole
+    # repair targets the final theorem command assembled by the planner, not
+    # the first declaration in the file.
+    lemma = next(
+        (
+            i for i in range(len(lines) - 1, -1, -1)
+            if re.match(r"^\s*(?:lemma|theorem|corollary)\b", lines[i])
+        ),
+        -1,
+    )
+    if lemma < 0:
         return (-1, -1)
-    for i in range(last_qed, -1, -1):
+    start = next((i for i in range(lemma + 1, len(lines)) if _PROOF_RE.match(lines[i])), -1)
+    if start < 0:
+        return (-1, -1)
+    depth = 0
+    for i in range(start, len(lines)):
         if _PROOF_RE.match(lines[i]):
-            return (i, last_qed + 1)
+            depth += 1
+        elif _QED_RE.match(lines[i]):
+            depth -= 1
+            if depth == 0:
+                return (start, i + 1)
     return (-1, -1)
 
 # ========== Wrapper Stripping ==========
@@ -594,17 +648,23 @@ def _replace_failing_tactics_with_sorry(block_text: str, *, full_text_lines: Lis
 def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: str, model: Optional[str], 
                      isabelle, session: str, repair_budget_s: float = 15.0, max_ops_to_try: int = 3, 
                      beam_k: int = 1, allow_whole_fallback: bool = False, trace: bool = False, 
-                     resume_stage: int = 0) -> Tuple[str, bool, str]:
+                     resume_stage: int = 0,
+                     prior_store: Optional[Dict[str, List[str]]] = None,
+                     failure_notes: Optional[List[str]] = None) -> Tuple[str, bool, str]:
     t0 = time.monotonic()
     left = lambda: max(0.0, repair_budget_s - (time.monotonic() - t0))
     current_text = full_text
-    state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+    state0 = _context_state_before_hole(
+        isabelle, session, current_text, hole_span, trace=trace
+    )
     _log("repair", "State block", state0, trace=trace)
     
     if allow_whole_fallback and trace:
         print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")        
 
-    prior_store: Dict[str, List[str]] = {}
+    if prior_store is None:
+        prior_store = {}
+    max_candidates = max(1, int(max_ops_to_try)) * max(1, int(beam_k))
 
     # Stage 1: have/show/obtain micro-block
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
@@ -619,7 +679,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             print("[repair] Trying have/show block repair…")
         current_text = _repair_block(current_text, lines, hs_s, hs_e, goal_text, state0, 
                                      isabelle, session, model, left, trace, "have-show", 
-                                     stage=1, prior_store=prior_store)
+                                     stage=1, prior_store=prior_store,
+                                     max_candidates=max_candidates,
+                                     failure_notes=failure_notes)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -628,7 +690,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             # FIX: Return False for unverified changes
             return current_text, False, "stage=1 partial-progress"
         lines = current_text.splitlines()
-        state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+        state0 = _context_state_before_hole(
+            isabelle, session, current_text, hole_span, trace=trace
+        )
     
     # Stage 2a: Case-block
     cs, ce = _enclosing_case_block(lines, focus_line)
@@ -636,7 +700,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if trace:
             print("[repair] Trying case-block repair…")
         current_text = _repair_block(current_text, lines, cs, ce, goal_text, state0, isabelle, session, 
-                                     model, left, trace, "case", stage=2, prior_store=prior_store)
+                                     model, left, trace, "case", stage=2, prior_store=prior_store,
+                                     max_candidates=max_candidates,
+                                     failure_notes=failure_notes)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -651,7 +717,9 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
         if trace:
             print("[repair] Trying subproof repair…")
         current_text = _repair_block(current_text, lines, ps, pe, goal_text, state0, isabelle, session, 
-                                     model, left, trace, "subproof", stage=2, prior_store=prior_store)
+                                     model, left, trace, "subproof", stage=2, prior_store=prior_store,
+                                     max_candidates=max_candidates,
+                                     failure_notes=failure_notes)
         if current_text != full_text:
             thy = build_theory(current_text.splitlines(), add_print_state=False, end_with=None)
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
@@ -666,21 +734,39 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
 
 def _repair_block(current_text: str, lines: List[str], start: int, end: int, goal_text: str, 
                  state0: str, isabelle, session: str, model: Optional[str], left, trace: bool, 
-                 block_type: str, stage: int, *, prior_store: Optional[Dict[str, List[str]]] = None) -> str:
+                 block_type: str, stage: int, *, prior_store: Optional[Dict[str, List[str]]] = None,
+                 max_candidates: int = 3,
+                 failure_notes: Optional[List[str]] = None) -> str:
+    original_text = current_text
+    original_lines = list(lines)
+    original_holes = len(_SORRY_RE.findall(original_text))
     _, errs = _quick_state_and_errors(isabelle, session, current_text)
     err_texts = _normalize_error_texts(errs)
+    original_had_error = bool(err_texts)
+    for note in reversed(failure_notes or []):
+        clean_note = re.sub(r"\s+", " ", str(note)).strip()
+        if clean_note and clean_note not in err_texts:
+            err_texts.insert(0, clean_note)
     ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
     block = "\n".join(lines[start:end])
     
     # NEW: Extract proof context instead of using state block
     proof_context = _extract_proof_context(current_text, start)
+    local_assumptions = _extract_local_assumptions(state0)
+    if local_assumptions:
+        proof_context = (
+            proof_context
+            + "\n\nLOCAL ISABELLE ASSUMPTIONS:\n"
+            + "\n".join(f"- {assumption}" for assumption in local_assumptions)
+        ).strip()
     
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
     _log("repair", "proof_context (LLM input)", proof_context, trace=trace)  # Changed log
     _log("repair", "errors (LLM input)", "\n".join(err_texts) or "(none)", trace=trace)
     ce_list = ce.get("bindings", []) + ce.get("def_hints", []) if isinstance(ce, dict) else []  
     _log("repair", "counterexamples (LLM input)", "\n".join(ce_list) or "(none)", trace=trace)
-    rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
+    time_rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
+    rounds = max(1, min(int(max_candidates), time_rounds))
     mem = _RepairMemory()
 
     # Build proposals in a few rounds; track failures and surface them to the LLM
@@ -732,7 +818,6 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
                 print(f"[repair] Skipping duplicate block (fingerprint: {fp_new[:8]}...)")
             continue  # Don't even try to verify, just skip
         
-        before = blk
         if block_type == "case":
             blk = _strip_wrapper_to_case_block(blk, block)
         elif block_type == "have-show":
@@ -741,45 +826,49 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             blk = _strip_wrapper_to_subproof(blk)              
         if blk.strip() == block.strip():
             continue
-        
-        blk_with_sorry = _replace_failing_tactics_with_sorry(blk, full_text_lines=lines, start_line=start + 1, 
-                                                             end_line=end + 1, isabelle=isabelle, 
-                                                             session=session, trace=trace)
-        _log("repair", f"{block_type}-block (output)", blk_with_sorry, trace=trace)
-        
-        # Record this failed candidate into local and shared stores (so next round tries differ)
-        fp = _fingerprint_block(blk_with_sorry)
+
+        _log("repair", f"{block_type}-block (output)", blk, trace=trace)
+        new_block_lines = blk.splitlines()
+        patched_lines = original_lines[:start] + new_block_lines + original_lines[end:]
+        patched = "\n".join(patched_lines)
+
+        try:
+            thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
+            ok, _ = finished_ok(
+                _run_theory_with_timeout(
+                    isabelle, session, thy, timeout_s=min(_ISA_VERIFY_TIMEOUT_S, max(1, int(left())))
+                )
+            )
+        except Exception:
+            ok = False
+        patched_holes = len(_SORRY_RE.findall(patched))
+        # A structural repair is allowed to split one opaque obligation into a
+        # bounded number of later leaf obligations.  Isabelle must accept the
+        # admitted document and its earliest source frontier must advance.
+        bounded_decomposition = patched_holes <= original_holes + 6
+        if ok and bounded_decomposition and (
+            original_had_error or frontier_advanced(original_text, patched)
+        ):
+            return patched
+
+        # Record the actual failed candidate and feed its Isabelle diagnostics
+        # into the next proposal.  Do not compound unverified rewrites.
+        fp = _fingerprint_block(blk)
         if fp and fp not in mem.prev_fps:
             mem.prev_fps.add(fp)
-            mem.prev_blocks.insert(0, blk_with_sorry)
+            mem.prev_blocks.insert(0, blk)
             mem.prev_blocks = mem.prev_blocks[:_MAX_PREV_BLOCKS]
             if isinstance(prior_store, dict):
                 lst = prior_store.setdefault(block_type, [])
-                # De-dup in shared store too
                 if fp not in [_fingerprint_block(x) for x in lst]:
-                    lst.insert(0, blk_with_sorry)
-                    del lst[_MAX_PREV_BLOCKS:]        
-        
-        # FIX: Properly replace the block by splitting into lines
-        new_block_lines = blk_with_sorry.splitlines()
-        patched_lines = lines[:start] + new_block_lines + lines[end:]
-        patched = "\n".join(patched_lines)
-        
-        thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
-        ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
-        
-        if ok:
-            return patched
-        
-        # Update for next iteration - recalculate indices based on new block size
-        current_text = patched
-        lines = patched_lines  # Use the already-split lines
-        # Adjust end index: new_end = start + len(new_block_lines)
-        end = start + len(new_block_lines)
-        # Update proof context for next round too
-        proof_context = _extract_proof_context(current_text, start)
-    
-    return current_text
+                    lst.insert(0, blk)
+                    del lst[_MAX_PREV_BLOCKS:]
+        _, candidate_errs = _quick_state_and_errors(isabelle, session, patched)
+        candidate_error_texts = _normalize_error_texts(candidate_errs)
+        if candidate_error_texts:
+            err_texts = candidate_error_texts
+
+    return original_text
 
 # ---------- Public helper: whole-proof regeneration with prior-failure banlist ----------
 def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[str],
@@ -793,20 +882,210 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     """
     lines = full_text.splitlines()
     ws, we = _enclosing_whole_proof(lines)
+    lemma_index = next(
+        (
+            index for index in range(min(max(ws, 0), len(lines) - 1), -1, -1)
+            if re.match(r"^\s*(?:lemma|theorem|corollary)\b", lines[index])
+        ),
+        -1,
+    )
     if ws < 0 or we <= ws:
         # Fallback: from first lemma/theorem head to EOF
         start = None
-        for i, L in enumerate(lines):
-            if re.match(r"^\s*(?:lemma|theorem|corollary)\b", L):
+        for i in range(len(lines) - 1, -1, -1):
+            if re.match(r"^\s*(?:lemma|theorem|corollary)\b", lines[i]):
                 start = i
                 break
         if start is None:
             return full_text, False, "whole:region-not-found"
         ws, we = start, len(lines)
+        lemma_index = start
+
+    # Preserve the complete command header (including multi-line
+    # assumes/shows/fixes clauses) when Stage 3 replaces only its proof body.
+    # For proof..qed blocks ``ws`` is already the boundary.  A one-line
+    # ``by``/``sorry`` fallback has no explicit proof block, so locate its
+    # first body command instead.
+    if ws > lemma_index:
+        header_end = ws
+    else:
+        header_end = next(
+            (
+                index for index in range(lemma_index + 1, len(lines))
+                if _HAS_BODY.match(lines[index])
+            ),
+            min(len(lines), lemma_index + 1),
+        )
+    header_lines = list(lines[lemma_index:header_end])
+    if header_lines:
+        # Also normalize compact commands such as ``lemma "P" by simp``.
+        # Search only after the final quote so words inside the proposition do
+        # not look like proof syntax.
+        last = header_lines[-1]
+        quote = last.rfind('"')
+        if quote >= 0:
+            inline = re.search(r"\s+(?:by\b.*|sorry\b.*)$", last[quote + 1:])
+            if inline:
+                header_lines[-1] = last[: quote + 1 + inline.start()].rstrip()
 
     # Simple local timer for the block repair
     t0 = time.monotonic()
     left = lambda: max(0.0, budget_s - (time.monotonic() - t0))
+
+    # Stage 3a is deterministic strategy regeneration.  It uses the same
+    # definition analysis as Fill but replaces the complete failed proof,
+    # which also handles non-hole syntax/tactic failures.  LLM regeneration is
+    # retained as Stage 3b when no verified structural portfolio succeeds.
+    if lemma_index >= 0 and left() > 4.0:
+        preamble = "\n".join(lines[:lemma_index]).strip()
+        lemma_indent = lines[lemma_index][
+            : len(lines[lemma_index]) - len(lines[lemma_index].lstrip())
+        ]
+
+        # Stage 3a.1: prove inferred auxiliary obligations independently, then
+        # rebuild the target proof in the enriched theory.  This is a genuine
+        # two-node proof DAG: a false shape/algebra conjecture cannot leak into
+        # a repair candidate, and a successful invariant remains visible in
+        # the returned Isar rather than being hidden inside an LLM rewrite.
+        obligations = definition_guided_obligations(
+            goal_text, preamble, limit=3
+        )
+        occupied = set(re.findall(
+            r"\b(?:lemma|theorem|corollary)\s+([A-Za-z_][A-Za-z0-9_']*)",
+            preamble,
+        ))
+        obligation_proof_cache: Dict[
+            Tuple[str, str], Tuple[bool, str]
+        ] = {}
+        for obligation in obligations:
+            if left() <= 5.0:
+                break
+            aux_name = obligation.name_hint
+            suffix = 1
+            while aux_name in occupied:
+                suffix += 1
+                aux_name = f"{obligation.name_hint}_{suffix}"
+            if trace:
+                print(
+                    f'[repair] Stage 3 obligation candidate '
+                    f'[{obligation.kind}] {aux_name}: '
+                    f'"{obligation.top_level_statement}"'
+                )
+            checked_proof = None
+            for proof_method in obligation.proof_methods[:2]:
+                if left() <= 4.0:
+                    break
+                cache_key = (obligation.top_level_statement, proof_method)
+                cached = cache_key in obligation_proof_cache
+                if cached:
+                    aux_ok, diagnostic = obligation_proof_cache[cache_key]
+                else:
+                    aux_lines = (
+                        lines[:lemma_index]
+                        + [
+                            f'lemma {aux_name}: '
+                            f'"{obligation.top_level_statement}"',
+                            proof_method,
+                        ]
+                    )
+                    try:
+                        aux_theory = build_theory(
+                            aux_lines, add_print_state=False, end_with=None
+                        )
+                        responses = _run_theory_with_timeout(
+                            isabelle,
+                            session,
+                            aux_theory,
+                            timeout_s=max(3, int(min(10.0, left()))),
+                        )
+                        aux_ok, _ = finished_ok(responses)
+                        diagnostic = "" if aux_ok else first_error_message(responses)
+                    except Exception as exc:
+                        aux_ok = False
+                        diagnostic = f"{type(exc).__name__}: {exc}"
+                    obligation_proof_cache[cache_key] = (aux_ok, diagnostic)
+                if trace:
+                    mark = "✓" if aux_ok else "×"
+                    cache_note = " [cached]" if cached else ""
+                    print(
+                        f"[repair] Stage 3 obligation {mark} "
+                        f"[{obligation.kind}] {proof_method}{cache_note}"
+                    )
+                    rendered_diagnostic = _compact_diagnostic(diagnostic)
+                    if not aux_ok and rendered_diagnostic:
+                        print(f"[repair]   Isabelle: {rendered_diagnostic}")
+                if aux_ok:
+                    checked_proof = proof_method
+                    break
+            if checked_proof is None:
+                continue
+            occupied.add(aux_name)
+
+            for main_template in obligation.main_methods[:3]:
+                if left() <= 3.0:
+                    break
+                main_method = main_template.format(aux=aux_name)
+                patched_lines = (
+                    lines[:lemma_index]
+                    + [
+                        f'lemma {aux_name}: "{obligation.top_level_statement}"',
+                        checked_proof,
+                    ]
+                    + header_lines
+                    + [f"{lemma_indent}  {main_method}"]
+                    + lines[we:]
+                )
+                candidate = "\n".join(patched_lines)
+                try:
+                    thy = build_theory(
+                        candidate.splitlines(), add_print_state=False, end_with=None
+                    )
+                    ok, _ = finished_ok(_run_theory_with_timeout(
+                        isabelle,
+                        session,
+                        thy,
+                        timeout_s=max(3, int(min(12.0, left()))),
+                    ))
+                except Exception:
+                    ok = False
+                if not ok:
+                    continue
+                if trace:
+                    print(
+                        f"[repair] Stage 3 verified {obligation.kind} "
+                        "obligation and rebuilt the whole proof."
+                    )
+                return candidate, True, "regen:verified-obligation"
+
+        # Stage 3a.2: direct definition-guided whole-proof strategies.  These
+        # remain the cheapest option when no auxiliary invariant is needed.
+        strategies = definition_guided_finishers(
+            goal_text, preamble, limit=6
+        )
+        for strategy in strategies:
+            if left() <= 2.0:
+                break
+            patched_lines = (
+                lines[:lemma_index]
+                + header_lines
+                + [f"{lemma_indent}  {strategy}"]
+                + lines[we:]
+            )
+            candidate = "\n".join(patched_lines)
+            try:
+                thy = build_theory(candidate.splitlines(), add_print_state=False, end_with=None)
+                ok, _ = finished_ok(_run_theory_with_timeout(
+                    isabelle,
+                    session,
+                    thy,
+                    timeout_s=max(2, int(min(10.0, left()))),
+                ))
+            except Exception:
+                ok = False
+            if ok:
+                if trace:
+                    print(f"[repair] Stage 3 definition strategy verified: {strategy}")
+                return candidate, True, "regen:definition-strategy"
     # Use empty/quick state — the block prompt already carries enough context
     state0 = ""
     # Seed prior failed blocks with the previous outline (so the first round won't repeat it)
@@ -814,7 +1093,9 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     if prior_outline_text:
         prior_store["whole"] = [prior_outline_text]
     patched = _repair_block(full_text, lines, ws, we, goal_text, state0, isabelle, session,
-                            model, left, trace, "whole", stage=3, prior_store=prior_store)
+                            model, left, trace, "whole", stage=3, prior_store=prior_store,
+                            max_candidates=3,
+                            failure_notes=["Earlier Fill and local/subproof repair were exhausted."])
     if patched != full_text:
         # _repair_block only returns a different text if it verified successfully
         return patched, True, "regen:whole-proof"

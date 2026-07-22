@@ -1,0 +1,7 @@
+goal,fixture_id,category,difficulty,required_mechanism,baseline,mutation,fixture_kind,dependency_depth,success,elapsed_s,mode,model,outline_chars,fills,contextual_fills,fresh_goal_fills,repair_fills,fast_context_fills,searched_context_fills,deterministic_prepass_successes,local_repairs,subproof_repairs,stage3_repairs,verified_aux_obligations,complete_generated_outlines,outline_backtracks,whole_goal_fallbacks,failed_holes,had_sorry,verified_ok,verify_status,fixture_error
+map f (xs @ ys) = map f xs @ map f ys,wrong_case_fact_map_append,wrong_method,,,,,,,True,21.3536,plan-fill,gemini:gemini-3-flash-preview,152,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,
+rev (xs @ ys) = rev ys @ rev xs,wrong_method_rev_append,wrong_method,,,,,,,True,21.1357,plan-fill,gemini:gemini-3-flash-preview,146,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,
+filter p (xs @ ys) = filter p xs @ filter p ys,broken_filter_finisher,wrong_method,,,,,,,True,21.1540,plan-fill,gemini:gemini-3-flash-preview,161,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,
+sum_list (replicate n k) = n * k,wrong_arithmetic_method,wrong_method,,,,,,,True,25.3893,plan-fill,gemini:gemini-3-flash-preview,153,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,
+take n (map f xs) = map f (take n xs),wrong_branch_fact,wrong_fact,,,,,,,True,25.3802,plan-fill,gemini:gemini-3-flash-preview,299,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,
+(∀x. P x ⟶ Q x) ⟹ P a ⟹ Q a,broken_quantifier_chain,missing_intermediate,,,,,,,True,25.4088,plan-fill,gemini:gemini-3-flash-preview,148,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,False,True,ok,

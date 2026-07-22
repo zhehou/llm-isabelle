@@ -6,7 +6,7 @@ from typing import Optional, List
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from prover.isabelle_api import start_isabelle_server, get_isabelle_client
+from prover.isabelle_api import start_isabelle_server, get_isabelle_client, shutdown_isabelle
 from prover.prover import prove_goal
 from prover.config import MODEL as DEFAULT_MODEL
 from planner.driver import plan_and_fill
@@ -50,17 +50,7 @@ SESSION = isabelle.session_start(session="HOL")
 
 @atexit.register
 def _shutdown():
-    try:
-        isabelle.shutdown()
-    except Exception:
-        pass
-    try:
-        proc.terminate(); proc.wait(timeout=2)
-    except Exception:
-        try:
-            proc.kill(); proc.wait(timeout=2)
-        except Exception:
-            pass
+    shutdown_isabelle(isabelle, proc, timeout_s=2)
 
 # ----------------------------
 # Small helpers
@@ -157,7 +147,7 @@ class PlanFillReq(BaseModel):
     goal: str
     model: Optional[str] = None
     timeout: int = 100
-    mode: str = "auto"              # "auto" or "outline"
+    mode: str = "auto"              # "auto", "plan-fill" or "outline"
 
     # Diverse outlines
     diverse: Optional[bool] = None  # None → env/default
@@ -168,6 +158,16 @@ class PlanFillReq(BaseModel):
     repairs: Optional[bool] = None
     max_repairs_per_hole: Optional[int] = None
     repair_trace: Optional[bool] = None
+    repair_beam_k: int = 2
+    whole_fallback: bool = True
+    whole_repair: bool = True
+
+    # Exact-context filler profile
+    fill_beam: int = 4
+    fill_depth: int = 8
+    fill_facts_limit: int = 8
+    fill_sledge: bool = True
+    fill_sledge_timeout: int = 10
 
     # Context / micro-RAG / priors
     context_hints: Optional[bool] = None
@@ -186,6 +186,7 @@ class PlanFillResp(BaseModel):
     outline: str
     fills: list[str]
     failed_holes: list[int]
+    metrics: dict[str, int]
     model: str
     backend: str
 
@@ -246,6 +247,14 @@ def plan_fill(req: PlanFillReq):
         alpha=alpha, beta=beta, gamma=gamma,
         hintlex_path=hintlex_path,
         hintlex_top=hintlex_top,
+        fill_beam=max(1, req.fill_beam),
+        fill_depth=max(1, req.fill_depth),
+        fill_facts_limit=max(1, req.fill_facts_limit),
+        fill_sledge=bool(req.fill_sledge),
+        fill_sledge_timeout=max(1, req.fill_sledge_timeout),
+        repair_beam_k=max(1, req.repair_beam_k),
+        whole_fallback=bool(req.whole_fallback),
+        whole_repair=bool(req.whole_repair),
     )
 
     return PlanFillResp(
@@ -253,6 +262,15 @@ def plan_fill(req: PlanFillReq):
         outline=str(r.outline),
         fills=[str(x) for x in r.fills],
         failed_holes=[int(i) for i in r.failed_holes],
+        metrics={
+            name: int(getattr(r.metrics, name, 0))
+            for name in (
+                "deterministic_prepass_successes", "local_repairs",
+                "subproof_repairs", "stage3_repairs",
+                "verified_aux_obligations", "complete_generated_outlines",
+                "outline_backtracks",
+            )
+        },
         model=model,
         backend=backend,
     )

@@ -4,7 +4,9 @@ import json
 import requests
 from typing import Dict, List, Optional, Tuple, Set, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
-from prover.isabelle_api import build_theory, run_theory, last_print_state_block, finished_ok
+from prover.isabelle_api import (
+    build_theory, run_theory, last_call_timed_out, last_print_state_block, finished_ok,
+)
 
 # ========== Configuration ==========
 _ISA_FAST_TIMEOUT_S = int(os.getenv("ISABELLE_FAST_TIMEOUT_S", "12"))
@@ -23,17 +25,10 @@ def _clamp_line_index(lines: List[str], idx: int) -> int:
 def _run_theory_with_timeout(isabelle, session: str, thy: List[str], *, timeout_s: Optional[int]) -> List:
     if not timeout_s or timeout_s <= 0:
         return run_theory(isabelle, session, thy)
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(run_theory, isabelle, session, thy)
-        try:
-            return fut.result(timeout=timeout_s)
-        except _FuturesTimeout:
-            if hasattr(isabelle, "interrupt"):
-                try:
-                    isabelle.interrupt()
-                except Exception:
-                    pass
-            raise TimeoutError("isabelle_run_timeout")
+    result = run_theory(isabelle, session, thy, timeout_s=timeout_s)
+    if last_call_timed_out():
+        raise TimeoutError("isabelle_run_timeout")
+    return result
 
 def _earliest_failure_anchor(isabelle, session: str, full_text: str, *, default_line_0: int) -> Tuple[int, str]:
     try:
@@ -100,7 +95,10 @@ def _extract_print_state_from_responses(resps: List) -> str:
 
 def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[dict]]:
     try:
-        thy = build_theory(full_text.splitlines(), add_print_state=True, end_with=None)
+        # Error extraction should not append print_state after a completed
+        # ``qed``; that can create a secondary outer-syntax error unrelated to
+        # the candidate being diagnosed.
+        thy = build_theory(full_text.splitlines(), add_print_state=False, end_with=None)
         resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
         state = _extract_print_state_from_responses(resps)
         errors: List[dict] = []
@@ -166,7 +164,7 @@ def _print_state_before_hole(isabelle, session: str, full_text: str, hole_span: 
 # ========== Counterexample Hints ==========
 
 def _normalize_isabelle_symbols(s: str) -> str:
-    """Make Isabelle symbols friendlier in short snippets (e.g., a\<^sub>1 → a_1)."""
+    r"""Make Isabelle symbols friendlier in short snippets (e.g., a\<^sub>1 → a_1)."""
     if not s:
         return s
     # subscripts: x\<^sub>12 → x_12
@@ -342,7 +340,7 @@ def _parse_assumptions_from_state(state_block: str) -> List[str]:
     return assumptions[:5]
 
 def _strip_all_forall_prefixes(prop: str) -> str:
-    """Remove leading ⋀x y z. / \<And>x y. prefixes (possibly many)."""
+    r"""Remove leading ⋀x y z. / \<And>x y. prefixes (possibly many)."""
     if not prop:
         return prop
     # Match one or more names (incl. type/commas) up to the first dot after a ⋀/\<And>
@@ -388,7 +386,7 @@ def _counterexample_hints_from_state(
     clean_goal = _strip_all_forall_prefixes(goal)
     
     test_theory = f"""
-theory CounterexampleTest
+theory Scratch
 imports Main Nitpick
 begin
 
@@ -404,8 +402,11 @@ end
     #print(f"[DEBUG] Testing with simplified theory", file=sys.stderr)
     
     try:
-        thy = build_theory(test_theory.splitlines(), add_print_state=False, end_with=None)
-        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=timeout_s + 5)
+        # ``run_theory`` writes Scratch.thy itself.  Passing this complete
+        # theory through build_theory would nest one theory inside another.
+        resps = _run_theory_with_timeout(
+            isabelle, session, test_theory.strip() + "\n", timeout_s=timeout_s + 5
+        )
         
         full_output: List[str] = []
         for r in resps or []:

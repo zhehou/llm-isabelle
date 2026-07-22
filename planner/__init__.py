@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["skeleton", "driver", "extract"]
+__all__ = ["skeleton", "contextual", "driver", "extract"]
 
 # Optional CLI entrypoint
 def main(argv=None) -> int:

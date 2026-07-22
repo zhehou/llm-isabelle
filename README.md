@@ -24,8 +24,10 @@ Key features:
   - ML reranker for tactics
   - Premise selection using encoders and transformers
 - Isar-style proof outline generator (in the planner folder)
-  - LLM guesses outline
-  - Calls the stepwise prover to fill the details (WIP)
+  - LLM proposes a beam of structured outlines
+  - Fills the earliest hole in its exact Isabelle context
+  - Preserves local theory declarations during standalone search
+  - Staged local, subproof and whole-proof repair with verified frontier progress
   - Micro RAG extracted from AFP
   - CEGIS style iterative proof repair (WIP)
 ---
@@ -190,9 +192,9 @@ python -m prover.cli --goal 'rev (rev xs) = xs' \
 
 Test with baseline method (sledgehammer only)
 ```bash
-python baselines/sledge_only.py \                                                              
+python baselines/sledge_only.py \
   --file datasets/logic.txt \
-  --imports Main \    
+  --imports Main \
   --provers "e z3 vampire cvc5" \
   --sledge-timeout 60 \
   --goal-timeout 60 \
@@ -404,36 +406,72 @@ Run the planner to sketch a proof (fill the proof if possible). Internally, it p
 python -m planner.cli --timeout 60 --mode auto "rev (rev xs) = xs"
 ```
 
+Force a structured outline and then fill its holes in their exact Isar context
+```bash
+python -m planner.cli --timeout 120 --mode plan-fill "map f (xs @ ys) = map f xs @ map f ys"
+```
+
+The planner keeps an Isabelle-accepted admitted script and advances strictly in
+source order. Fill closes the earliest `sorry`; a non-hole failure is opened or
+repaired at that same frontier. Repair escalates from a `have`/`show` block, to
+its case/subproof, to the whole proof. Whole repair may introduce smaller later
+holes, which return to Fill. Diverse outlines remain available as bounded
+backtracking branches rather than being discarded after initial ranking.
+In `auto` mode, a bounded deterministic pre-pass tries direct automation,
+definition-directed and standard-library induction macros, and optionally
+Sledgehammer before an LLM outline is requested. A failed pre-pass does not
+initialise a reranker, retrieval model or language model.
+
 Sketch an outline only
 ```bash
 python -m planner.cli --timeout 60 --mode outline "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
-Controlling the divserity of multiple outlines
+Controlling the diversity of multiple outlines
 ```bash
 python -m planner.cli --timeout 60 --diverse-outlines --k 3 --temps "0.35,0.55,0.85" --mode auto "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
 Proof repair is on by default, but can be turned off
 ```bash
-python -m planner.cli --model "gemini:gemini-3-flash-preview" \                   
-  --timeout 120 --no-repair \
+python -m planner.cli --model "gemini:gemini-3-flash-preview" \
+  --timeout 120 --no-repairs \
   "map f (xs @ ys) = map f xs @ map f ys"
 ```
 
 Benchmarking a file of lemmas/proof goals
 ```bash
-python -m planner.experiments bench \  
-  --file datasets/lists.txt \                                 
+python -m planner.experiments bench \
+  --file datasets/lists.txt \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 120 --strict-no-sorry --verify \
   --model "qwen3-coder:30b" --shuffle --seed 42
 ```
 
+Measure structured filling without allowing the direct prover to replace the
+whole theorem. The focused context suite has 12 goals; the broader hard suite
+has 36 goals covering nested list transformations, induction, finite sets and
+quantified reasoning.
+```bash
+python -m planner.experiments bench \
+  --file datasets/planner_hard.txt \
+  --mode plan-fill --diverse --k 3 --temps "0.35,0.55,0.85" \
+  --timeout 180 --strict-no-sorry --verify \
+  --no-whole-fallback --context-hints \
+  --model "gemini:gemini-3-flash-preview" --shuffle --seed 42
+```
+The planner CSV and terminal summary separately report contextual fills,
+context-complete fresh-goal fills and whole-goal fallbacks. Repair accounting
+is independent of fill origin: local surgery, subproof repair, Stage 3 repair,
+verified auxiliary obligations, complete generated outlines and outline
+backtracking each have their own counter.
+`--no-whole-fallback` disables only direct theorem replacement. Use
+`--no-whole-repair` separately when an experiment must also disable Stage 3.
+
 Regression testing and save a baseline
 ```bash
 python -m planner.experiments regress \
-  --file datasets/lists.txt \                                 
+  --file datasets/lists.txt \
   --mode auto --diverse --k 3 --timeout 120 \
   --strict-no-sorry --verify \
   --save-baseline datasets/baselines/planner_lists.json
@@ -442,7 +480,7 @@ python -m planner.experiments regress \
 Regression testing against previously saved baseline
 ```bash
 python -m planner.experiments regress \
-  --file datasets/lists.txt --model "gemini:gemini-3-flash-preview"\
+  --file datasets/lists.txt --model "gemini:gemini-3-flash-preview" \
   --mode auto --diverse --k 3 --timeout 120 \
   --strict-no-sorry --verify \
   --baseline datasets/baselines/planner_lists.json \
@@ -474,7 +512,7 @@ python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
   --context-hints \
   --priors datasets/isar_priors.json \
   --hintlex datasets/isar_hintlex.json \
-  --alpha 1.0 --beta 0.6 --gamma 0.25 \
+  --alpha 1.0 --beta 0.6 --gamma 0.25
 ```
 
 Also enable context extraction for prover call in planner
@@ -489,8 +527,8 @@ python -m planner.cli --goal 'map f (xs @ ys) = map f xs @ map f ys' \
 
 Benchmarking a file of lemmas/proof goals with the micro RAG
 ```bash
-python -m planner.experiments bench \  
-  --file datasets/lists.txt \                                 
+python -m planner.experiments bench \
+  --file datasets/lists.txt \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 120 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
@@ -568,16 +606,16 @@ Maybe train rerankers using on the logs from the validation set, and then run th
 Also try the planner
 ```bash
 # Validation 
-python -m planner.experiments bench \  
-  --file datasets/mini_f2f/mini_f2f_validation.txt \                                 
+python -m planner.experiments bench \
+  --file datasets/mini_f2f/mini_f2f_validation.txt \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 200 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
   --model "qwen3-coder:30b" --shuffle --seed 42
 
 # Testing
-python -m planner.experiments bench \  
-  --file datasets/mini_f2f/mini_f2f_test.txt \                                 
+python -m planner.experiments bench \
+  --file datasets/mini_f2f/mini_f2f_test.txt \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 200 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
@@ -618,13 +656,63 @@ ISABELLE_LOGIC=PutnamBench_Base python -m prover.experiments bench --file datase
 
 Also try the planner
 ```bash
-python -m planner.experiments bench \  
-  --file datasets/putnambench/putnambench_goals.txt \                                 
+python -m planner.experiments bench \
+  --file datasets/putnambench/putnambench_goals.txt \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 200 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
   --model "qwen3-coder:30b" --shuffle --seed 42
 ```
+
+### Fixed-outline planner evaluation
+
+`planner.experiments bench` accepts `--outline-fixtures <jsonl>` for
+mechanism-level evaluation. Unlike goal-only suites, fixed outlines do not
+allow outline generation to solve a theorem before filling starts.
+`datasets/planner_structured.jsonl` measures multi-hole filling and
+`datasets/planner_repair.jsonl` measures recovery from invalid proof blocks.
+Each fixture file declares whether inputs must contain holes or must be
+complete-but-invalid. The runner checks that contract before scoring, so an
+already-valid input is a fixture error rather than a repair success. Invalid
+complete proofs use deterministic minimal tactic surgery before generative
+block repair, and successful surgery fills are reported under the `repair`
+origin.
+
+Definition-directed recovery also supports verified auxiliary obligations.
+When recursive equations suggest an append homomorphism or a guaranteed result
+shape (for example, a nonempty list needed to simplify `butlast`), the prover
+checks that helper theorem independently before rebuilding the target with a
+generalized induction. Stage 3 preserves multi-line theorem headers and uses
+the same obligation mechanism before falling back to whole-proof generation.
+Auxiliary propositions have separate local and theory-level renderings: local
+Isar helpers explicitly quantify and then `fix` synthesized variables, while
+standalone helper lemmas leave those variables free for Isabelle to fix before
+an induction method runs. Equivalent obligations from competing induction
+plans are merged, and their checked result is cached for the current search.
+With `--trace`, every generated helper statement and Isabelle's first failure
+diagnostic are printed, which makes schema errors distinguishable from an
+unsuitable proof method.
+
+Structural search also recognises recursive argument positions of common HOL
+library functions such as `filter`, `map`, `take`, `fold`, `rev` and
+`replicate`. It checks complete methods such as `by (induction xs) auto`
+atomically before broad search or model calls. Exact-context Fill composes
+available assumptions with a bounded rule-aware portfolio, including `injD`,
+`order_trans`, `transD` and `subset_trans`; named local facts and mined theorem
+names are supplied to `meson` or `metis`, and every candidate is still checked
+by Isabelle in the original proof document.
+
+Contextual search reserves the real Isabelle state before trying finishers,
+keeps active nested case facts by proof indentation, and can replace stale
+`using`/`unfolding` modifiers when replaying a verified method. Proof surgery
+treats those modifiers and their tactic as one repair atom. Theorem mining also
+reads both streaming notes and consolidated `FINISHED` responses, prioritising
+constants from the actual subgoal and assumptions over print-state boilerplate.
+Benchmark CSVs distinguish `ok`, `fail`, `transport_error`, `skipped`, and
+`skipped_incomplete` verification states. Isabelle server processes are owned
+synchronously and all entry points use one cooperative shutdown path, avoiding
+closed-event-loop subprocess warnings at interpreter exit.
+See `datasets/README_planner_fixtures.md` for the intended ablations.
 
 ---
 

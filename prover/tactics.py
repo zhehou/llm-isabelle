@@ -58,22 +58,42 @@ def _decode_body(obj: object) -> Optional[dict]:
     return None
 
 def _iter_note_messages(responses) -> Iterable[str]:
-    """Yield Sledge/Find/etc. messages; accept NOTE/WRITELN/INFORMATION/TRACING."""
+    """Yield Sledge/Find/etc. messages from direct and FINISHED responses.
+
+    Several isabelle-client versions consolidate command output inside the
+    final node JSON instead of emitting separate NOTE records.  Ignoring that
+    representation made theorem mining return an empty list even when
+    ``find_theorems`` had found useful elimination rules.
+    """
     for r in (responses or []):
         typ = _normalize_response_type(getattr(r, "response_type", None))
-        if typ not in ("NOTE", "WRITELN", "INFORMATION", "TRACING"):
-            continue
         body = _decode_body(getattr(r, "response_body", None))
         if isinstance(body, dict):
-            msg = body.get("message") or body.get("text") or body.get("content")
-            if msg is not None:
-                yield str(msg)
+            if typ in ("NOTE", "WRITELN", "INFORMATION", "TRACING"):
+                msg = body.get("message") or body.get("text") or body.get("content")
+                if msg is not None:
+                    yield str(msg)
+            for node in body.get("nodes", []) or []:
+                for item in node.get("messages", []) or []:
+                    kind = str(item.get("kind", "")).lower()
+                    if kind in ("writeln", "information", "tracing", "warning"):
+                        message = item.get("message") or item.get("text")
+                        if message is not None:
+                            yield str(message)
         elif isinstance(body, str):
             # Some clients may return a plain string
             yield body
 
 # --- Variant step templates (tiny helper) ---
 VAR_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9_']*)\b")
+_FACT_REFERENCE_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)?$"
+)
+_LLM_TYPE_RECORD = re.compile(
+    r"^\[LLM_TYPE\]\s+([A-Za-z][A-Za-z0-9_']*)\s+::\s+"
+    r"(.*?)(?=^\[[A-Z0-9_]+\]|\Z)",
+    re.M | re.S,
+)
 
 def _likely_vars_from_state_hint(state_hint: str, k: int = 3) -> List[str]:
     if not state_hint:
@@ -91,7 +111,55 @@ def _likely_vars_from_state_hint(state_hint: str, k: int = 3) -> List[str]:
             seen.add(t); ordered.append(t)
     return ordered[:k]
 
+
+def _typed_vars_from_state_hint(state_hint: str) -> List[tuple[str, str]]:
+    """Read variables and types emitted by the planner's Isabelle method."""
+
+    typed: List[tuple[str, str]] = []
+    for match in _LLM_TYPE_RECORD.finditer(state_hint or ""):
+        name = match.group(1).rstrip("_")
+        typ = re.sub(r"\s+", " ", match.group(2)).strip()
+        item = (name, typ)
+        if name and typ and item not in typed:
+            typed.append(item)
+    return typed
+
+
+def _structural_commands_for_type(name: str, typ: str) -> List[str]:
+    low = typ.lower()
+    # Functions, propositions, sets and unconstrained type variables are poor
+    # induction targets.  Lists, naturals and user datatypes are strong ones.
+    if any(arrow in typ for arrow in ("⇒", "=>", "\\<Rightarrow>")) or low in {"bool", "prop", "int", "real"}:
+        return []
+    if low.endswith(" set") or low == "set" or re.fullmatch(r"'[a-z][a-z0-9_']*", low):
+        return []
+    if " list" in low or low.endswith("list") or low == "nat":
+        return [f"apply (induction {name})", f"apply (cases {name})"]
+    # A concrete, non-function type is usually a datatype.  Isabelle will
+    # reject a proposal when it is not, so this remains a safe search hint.
+    return [f"apply (induction {name})", f"apply (cases {name})"]
+
 def variant_step_templates(state_hint: str, limit: int = 4) -> List[str]:
+    typed = _typed_vars_from_state_hint(state_hint)
+    if typed:
+        ranked = sorted(
+            typed,
+            key=lambda item: (
+                0 if " list" in item[1].lower() or item[1].lower().endswith("list") else
+                1 if item[1].lower() == "nat" else 2,
+            ),
+        )
+        typed_out: List[str] = []
+        for name, typ in ranked:
+            for command in _structural_commands_for_type(name, typ):
+                if command not in typed_out:
+                    typed_out.append(command)
+                if len(typed_out) >= limit:
+                    return typed_out
+        # Presence of type records is authoritative.  Do not fall back to
+        # token guessing and accidentally induce on a function or theorem name.
+        return typed_out
+
     vars_ = _likely_vars_from_state_hint(state_hint, k=3)
     out, seen = [], set()
     for v in vars_:
@@ -109,6 +177,58 @@ def variant_step_templates(state_hint: str, limit: int = 4) -> List[str]:
                 seen.add(c); out.append(c)
         if len(out) >= limit:
             break
+    return out[:limit]
+
+
+def fact_composition_finishers(
+    goal_or_state: str,
+    facts: Iterable[str] = (),
+    *,
+    limit: int = 10,
+) -> List[str]:
+    """Build bounded, rule-aware finishers for composing available facts.
+
+    Automation often extracts the right intermediate facts but does not chain
+    them.  These candidates select a small set of standard elimination and
+    transitivity rules from the actual goal shape, then let Isabelle's
+    ``auto``/``meson``/``metis`` instantiate them.  Every candidate remains
+    verifier checked, so the lexical trigger affects search cost, not soundness.
+    """
+
+    text = str(goal_or_state or "")
+    rules: List[str] = []
+    if re.search(r"\binj(?:_on)?\b", text):
+        rules.append("injD")
+    if re.search(r"(?:≤|\\<le>|<=)", text):
+        rules.append("order_trans")
+    if re.search(r"\btrans\b", text):
+        rules.append("transD")
+    if re.search(r"(?:⊆|\\<subseteq>).*?(?:⊆|\\<subseteq>)", text, re.S):
+        rules.append("subset_trans")
+    rules = list(dict.fromkeys(rules))
+    if not rules or limit <= 0:
+        return []
+
+    named = [
+        str(fact).strip() for fact in facts
+        if _FACT_REFERENCE_RE.fullmatch(str(fact).strip())
+    ]
+    named = list(dict.fromkeys(named))[:6]
+    rule_text = " ".join(rules)
+    out: List[str] = []
+
+    def add(method: str) -> None:
+        if method not in out and len(out) < limit:
+            out.append(method)
+
+    if "injD" in rules:
+        add("by (auto dest: injD)")
+    add(f"by (meson {rule_text})")
+    add(f"by (metis {rule_text})")
+    if named:
+        evidence = " ".join(named)
+        add(f"by (metis {evidence} {rule_text})")
+        add(f"by (meson {evidence} {rule_text})")
     return out[:limit]
 
 # =============================================================================
@@ -148,6 +268,7 @@ _SLEDGE_AUTO_LINE = re.compile(r"(?i)(?:try this:\s*)?(auto(?:\s+[^)\n]*)?)", re
 # Strip timing tails like " (0.6 ms" / " (1 ms)" / " (2.3 s)" at line end (closing ')' optional)
 _TIMING_TAIL = re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)?\s*$", re.IGNORECASE)
 _TRY_THIS = re.compile(r"(?i)^\s*try this:\s*")
+_TRY_THIS_ANYWHERE = re.compile(r"(?i)\btry this:\s*(by\s+.+)$")
 
 def _normalize_finisher_text(s: str) -> str:
     # Remove "Try this:" prefix
@@ -159,37 +280,92 @@ def _normalize_finisher_text(s: str) -> str:
     s = " ".join(s.split())
     return s
 
+
+def _safe_sledge_candidate(candidate: str) -> bool:
+    """Reject transport/JSON fragments accidentally captured as tactics."""
+    if not candidate or not (candidate.startswith("by ") or candidate == "done"):
+        return False
+    bad_fragments = (
+        "{\"", "\"pos\"", "\"file\"", "response_body", "theory_name",
+        "node_name", "session_id", "tmp/", "/tmp", ".thy\"", "exports",
+    )
+    if any(fragment in candidate for fragment in bad_fragments):
+        return False
+    lowered = candidate.lower()
+    if any(fragment in lowered for fragment in (
+        "try this:", "found a proof", "duplicate proof", "theory processed",
+        "percentage", "unprocessed", "consolidated", "canceled",
+    )):
+        return False
+    # Nested method arguments such as ``simp add: foo(1)`` are valid, but the
+    # former regex stopped at the first closing parenthesis and emitted broken
+    # tactics.  A lightweight quote-aware balance check rejects those
+    # truncations as well as serialized diagnostic tails.
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: List[str] = []
+    quoted = False
+    escaped = False
+    for char in candidate:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quoted:
+            escaped = True
+            continue
+        if char == '"':
+            quoted = not quoted
+            continue
+        if quoted:
+            continue
+        if char in "([{":
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
+                return False
+    if quoted or stack:
+        return False
+    # Genuine suggestions are short single commands.  This also prevents a
+    # greedy regex from swallowing a serialized Isabelle response.
+    return "\n" not in candidate and len(candidate) <= 500
+
 def _extract_sledge_by_lines(text: str) -> List[str]:
     out: List[str] = []
 
-    # "by ..." lines
+    # Prefer complete message lines.  This preserves nested parentheses and
+    # faithfully handles output such as
+    # ``metis: Try this: by (metis foo(1)) (3 ms)``.
+    for raw_line in text.splitlines():
+        match = _TRY_THIS_ANYWHERE.search(raw_line)
+        if match:
+            suggestion = _normalize_finisher_text(match.group(1))
+        else:
+            stripped = raw_line.strip()
+            suggestion = _normalize_finisher_text(stripped) if stripped.startswith("by ") else ""
+        if _safe_sledge_candidate(suggestion) and suggestion not in out:
+            out.append(suggestion)
+
+    # Compatibility fallback for older clients that concatenate messages.
+    # The safety predicate discards any truncated/unbalanced match.
     for match in _SLEDGE_BY.finditer(text):
         suggestion = _normalize_finisher_text(match.group(1))
-        if suggestion and suggestion not in out:
+        if _safe_sledge_candidate(suggestion) and suggestion not in out:
             out.append(suggestion)
 
     # "apply ..." lines
     for match in _SLEDGE_APPLY.finditer(text):
         suggestion = _normalize_finisher_text(match.group(1))
-        if suggestion and suggestion not in out:
-            out.append(suggestion)
-
-    # metis facts → "by (metis ...)"
-    for match in _SLEDGE_METIS_LINE.finditer(text):
-        facts = match.group(1).strip() if match.lastindex and match.lastindex >= 1 else ""
-        suggestion = _normalize_finisher_text(f"by (metis {facts})" if facts else "by (metis)")
-        if suggestion and suggestion not in out:
+        if _safe_sledge_candidate(suggestion) and suggestion not in out:
             out.append(suggestion)
 
     # simp/auto one-liners → "by simp"/"by auto"
     for match in _SLEDGE_SIMP_LINE.finditer(text):
         suggestion = _normalize_finisher_text(f"by {match.group(1).strip()}")
-        if suggestion and suggestion not in out:
+        if _safe_sledge_candidate(suggestion) and suggestion not in out:
             out.append(suggestion)
 
     for match in _SLEDGE_AUTO_LINE.finditer(text):
         suggestion = _normalize_finisher_text(f"by {match.group(1).strip()}")
-        if suggestion and suggestion not in out:
+        if _safe_sledge_candidate(suggestion) and suggestion not in out:
             out.append(suggestion)
 
     # Heuristic sweep for common finishers (kept, but normalized)
@@ -211,29 +387,11 @@ def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_
     sh_cmd = f"sledgehammer [timeout = {int(timeout_s)}]"
     thy = build_theory(steps + [sh_cmd], add_print_state=False, end_with="sorry")
     
-    # Collect all response text, not just specific message types
-    all_text = ""
     responses = run_theory(isabelle, session_id, thy, timeout_s=max(1, int(timeout_s) + 2))
-    
-    for r in (responses or []):
-        # Get response body regardless of type
-        body = getattr(r, "response_body", None)
-        if body is not None:
-            if isinstance(body, dict):
-                msg = body.get("message") or body.get("text") or body.get("content") or ""
-            elif isinstance(body, (bytes, bytearray)):
-                try:
-                    msg = body.decode("utf-8", "replace")
-                except:
-                    msg = str(body)
-            else:
-                msg = str(body)
-            all_text += msg + "\n"
-    
-    # Also try to get any note messages using the existing helper
-    from .tactics import _iter_note_messages
-    for msg in _iter_note_messages(responses):
-        all_text += msg + "\n"
+    # Parse only Isabelle message fields.  Stringifying whole response objects
+    # leaks JSON metadata into the tactic regex and previously produced giant
+    # candidates containing temporary filenames and status objects.
+    all_text = "\n".join(_iter_note_messages(responses))
     
     # Extract suggestions
     cands = _extract_sledge_by_lines(all_text)
@@ -243,7 +401,7 @@ def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_
     seen = set()
     for c in cands:
         clean = c.strip()
-        if clean and (clean.startswith("by ") or clean == "done") and clean not in seen:
+        if _safe_sledge_candidate(clean) and clean not in seen:
             seen.add(clean)
             out.append(clean)
             if len(out) >= limit:
@@ -255,7 +413,43 @@ def sledgehammer_finishers(isabelle, session_id: str, steps: List[str], timeout_
 # Mining lemmas / prioritized facts
 # =============================================================================
 FIND_NAME_TOKENS = re.compile(r"[A-Za-z][A-Za-z0-9_']{2,}")
-_LEMMA_LINE = re.compile(r"^\s*\d+\.\s*([A-Za-z0-9_\.]+):")
+_FIND_TOKEN_NOISE = {
+    "proof", "prove", "goal", "subgoal", "subgoals", "llm", "raw",
+    "vars", "params", "frees", "schematics", "fixes", "assm", "fact",
+    "true", "false", "case", "thesis",
+}
+# Isabelle versions differ on whether ``find_theorems`` numbers results and
+# whether names contain theory qualifiers or apostrophes.  Accept both forms;
+# the previous mandatory ``1.`` prefix silently discarded every result on
+# clients that print ``List.distinct_map: ...``.
+_LEMMA_LINE = re.compile(r"^\s*(?:\d+\.\s*)?([A-Za-z0-9_.'-]+):")
+
+
+def _find_name_tokens_from_state(state_hint: str, limit: int = 12) -> List[str]:
+    """Prioritise constants from marker payloads over print-state boilerplate."""
+    if not state_hint:
+        return []
+    marker_payloads = re.findall(
+        r"(?ms)^\[LLM_(?:SUBGOAL|ASSM|FACT)\]\s+(.*?)(?=^\[|\Z)",
+        state_hint,
+    )
+    sources = [*marker_payloads, state_hint]
+    ordered: List[str] = []
+    seen = set()
+    for source in sources:
+        for token in FIND_NAME_TOKENS.findall(source):
+            if token.endswith("__"):
+                continue
+            bare = token.rstrip("_")
+            low = bare.lower()
+            if low in _FIND_TOKEN_NOISE:
+                continue
+            if bare not in seen:
+                seen.add(bare)
+                ordered.append(bare)
+                if len(ordered) >= limit:
+                    return ordered
+    return ordered
 
 def _build_find_theorems_theory(symbols: List[str]) -> str:
     body = "\n".join(f'find_theorems name:{s}' for s in symbols[:8])
@@ -271,7 +465,7 @@ def _build_find_theorems_filtered(symbols: List[str], filters: List[str]) -> str
     ).strip()
 
 def mine_lemmas_from_state(isabelle, session_id: str, state_hint: str, max_lemmas: int = 6) -> List[str]:
-    toks = list(dict.fromkeys(FIND_NAME_TOKENS.findall(state_hint)))
+    toks = _find_name_tokens_from_state(state_hint)
     if not toks:
         return []
     theory_text = _build_find_theorems_theory(toks)
@@ -287,17 +481,37 @@ def mine_lemmas_from_state(isabelle, session_id: str, state_hint: str, max_lemma
                         return lemmas
     return lemmas
 
-def mine_facts_prioritized(isabelle, session_id: str, state_hint: str, limit: int = 6) -> List[str]:
-    toks = list(dict.fromkeys(FIND_NAME_TOKENS.findall(state_hint)))
+def mine_facts_prioritized(
+    isabelle,
+    session_id: str,
+    state_hint: str,
+    limit: int = 6,
+    timeout_s: int = 12,
+) -> List[str]:
+    toks = _find_name_tokens_from_state(state_hint)
     if not toks:
         return []
-    theory_text = _build_find_theorems_filtered(toks, ["simp", "intro", "rule", "elim", "dest"])
+    theory_text = _build_find_theorems_filtered(
+        toks, ["simp", "intro", "elim", "dest", ""]
+    )
     # Prefer *_def by name (cheap extra pass)
-    def_name_patterns = [f'name: "{stem}_def"' for stem in toks[:6]]
-    if def_name_patterns:
-        theory_text += "\n" + "\n".join(f"find_theorems {p} - 10" for p in def_name_patterns)
+    definition_queries = [f"find_theorems name:{stem}_def" for stem in toks[:6]]
+    if definition_queries:
+        # _build_find_theorems_filtered returns a complete theory.  Insert
+        # extra queries before ``end``; appending them after ``end`` silently
+        # made the mining theory invalid on strict Isabelle clients.
+        head, separator, tail = theory_text.rpartition("\nend")
+        if separator:
+            theory_text = head + "\n" + "\n".join(definition_queries) + separator + tail
     freq: Dict[str, int] = {}
-    for msg in _iter_note_messages(run_theory(isabelle, session_id, theory_text, timeout_s=12)):
+    for msg in _iter_note_messages(
+        run_theory(
+            isabelle,
+            session_id,
+            theory_text,
+            timeout_s=max(1, int(timeout_s)),
+        )
+    ):
         for line in msg.splitlines():
             m = _LEMMA_LINE.match(line.strip())
             if not m:

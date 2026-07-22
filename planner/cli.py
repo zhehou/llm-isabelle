@@ -35,8 +35,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Model id (e.g., 'ollama:qwen2.5:14b', 'hf:meta-llama/...', 'gemini:gemini-2.5-pro')")
     ap.add_argument("--timeout", type=int, default=120,
                     help="Total wall-clock seconds for planning + filling")
-    ap.add_argument("--mode", choices=["auto", "outline"], default="auto",
-                    help="auto: allow whole proofs; outline: force placeholders and fill")
+    ap.add_argument("--mode", choices=["auto", "plan-fill", "outline"], default="auto",
+                    help="auto: allow a whole proof; plan-fill: force and fill holes; outline: outline only")
 
     # Diverse-outline controls
     ap.add_argument("--diverse-outlines", dest="diverse", action="store_true",
@@ -94,13 +94,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     # === New flags for CEGIS enhancements ===
     # Tiny beam over local repairs (adaptive inside the CEGIS loop).
     ap.add_argument("--beam-k", type=int, default=2,
-                    help="Tiny beam size for local repairs (default: 2). Actual beam adapts down to 1 when time is low.")
+                    help="Number of distinct local repair proposals per repair round (default: 2).")
     # Whole-proof fallback toggle.
     ap.add_argument("--whole-fallback", dest="whole_fallback", action="store_true",
-                    help="Allow whole-proof repair as a final fallback when time remains (default: on).")
+                    help="Allow direct theorem-level prover replacement after structured search (default: on).")
     ap.add_argument("--no-whole-fallback", dest="whole_fallback", action="store_false",
-                    help="Disable whole-proof fallback (skip Baldur-like stage).")
+                    help="Disable direct theorem-level replacement; staged repair is unaffected.")
     ap.set_defaults(whole_fallback=True)
+    ap.add_argument("--whole-repair", dest="whole_repair", action="store_true",
+                    help="Allow Stage-3 whole-proof repair/re-outline with fillable holes (default: on).")
+    ap.add_argument("--no-whole-repair", dest="whole_repair", action="store_false",
+                    help="Disable Stage-3 whole-proof repair/re-outline.")
+    ap.set_defaults(whole_repair=True)
+
+    # Exact-context hole search.  Defaults match the stronger interactive
+    # prover profile rather than the old reduced planner profile.
+    ap.add_argument("--fill-beam", type=int, default=4)
+    ap.add_argument("--fill-depth", type=int, default=8)
+    ap.add_argument("--fill-facts-limit", type=int, default=8)
+    ap.add_argument("--fill-sledge", dest="fill_sledge", action="store_true")
+    ap.add_argument("--no-fill-sledge", dest="fill_sledge", action="store_false")
+    ap.set_defaults(fill_sledge=True)
+    ap.add_argument("--fill-sledge-timeout", type=int, default=10)
 
     # --- NEW: premise selection & file-aware context controls (default ON) ---
     ap.add_argument("--premises", dest="premises", action="store_true",
@@ -140,15 +155,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         raw = args.context_files.replace(",", " ").split()
         CFG.PROVER_CONTEXT_FILES = [s for s in raw if s]
 
-    # NOTE: Current driver hard-codes beam_k=2 and whole_fallback=True when calling CEGIS.
-    # We keep the flags here for forward compatibility; warn if users deviate from the current defaults.
-    if args.beam_k != 2 or (args.whole_fallback is False):
-        print(
-            "[cli] Note: driver currently uses beam_k=2 and whole_fallback=True. "
-            "These flags are accepted for forward compatibility and will take effect once driver wiring is updated.",
-            file=sys.stderr,
-        )
-
     res = plan_and_fill(
         goal,
         model=args.model,
@@ -170,6 +176,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         # hintlex
         hintlex_path=args.hintlex,
         hintlex_top=args.hintlex_top,
+        fill_beam=args.fill_beam,
+        fill_depth=args.fill_depth,
+        fill_facts_limit=args.fill_facts_limit,
+        fill_sledge=args.fill_sledge,
+        fill_sledge_timeout=args.fill_sledge_timeout,
+        repair_beam_k=args.beam_k,
+        whole_fallback=args.whole_fallback,
+        whole_repair=args.whole_repair,
     )
     if args.trace and ("--verbose" in (argv or sys.argv) or "--repair-trace" in (argv or sys.argv)):
         print("[planner] Note: --verbose/--repair-trace are deprecated; use --trace.", flush=True)

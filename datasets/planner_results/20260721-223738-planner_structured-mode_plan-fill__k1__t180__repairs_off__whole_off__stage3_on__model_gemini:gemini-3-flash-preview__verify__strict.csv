@@ -1,0 +1,13 @@
+goal,fixture_id,category,difficulty,required_mechanism,baseline,mutation,fixture_kind,dependency_depth,success,elapsed_s,mode,model,outline_chars,fills,contextual_fills,fresh_goal_fills,repair_fills,fast_context_fills,searched_context_fills,deterministic_prepass_successes,local_repairs,subproof_repairs,stage3_repairs,verified_aux_obligations,complete_generated_outlines,outline_backtracks,whole_goal_fallbacks,failed_holes,had_sorry,verified_ok,verify_status,fixture_error
+map g (map f (xs @ ys)) = map (g ∘ f) xs @ map (g ∘ f) ys,nested_map_append,induction_multihole,,,,,,,True,46.8218,plan-fill,gemini:gemini-3-flash-preview,382,4,4,0,0,4,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+rev (concat xss) = concat (map rev (rev xss)),reverse_concat,induction_rewrite,,,,,,,True,35.9518,plan-fill,gemini:gemini-3-flash-preview,275,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+length (concat xss) = sum_list (map length xss),length_concat,induction_calculation,,,,,,,True,35.9937,plan-fill,gemini:gemini-3-flash-preview,283,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+filter p (filter q xs) = filter (λx. p x ∧ q x) xs,filter_intersection,induction_cases,,,,,,,True,40.1855,plan-fill,gemini:gemini-3-flash-preview,333,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+take n (map f xs) = map f (take n xs),take_map,nested_cases,,,,,,,True,38.1010,plan-fill,gemini:gemini-3-flash-preview,308,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+drop n (map f xs) = map f (drop n xs),drop_map,nested_cases,,,,,,,True,38.1875,plan-fill,gemini:gemini-3-flash-preview,308,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+list_all p (xs @ ys) ⟷ list_all p xs ∧ list_all p ys,list_all_append,induction_iff,,,,,,,True,36.0532,plan-fill,gemini:gemini-3-flash-preview,290,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+sum_list (replicate n k) = n * k,sum_replicate,arithmetic_induction,,,,,,,True,35.9741,plan-fill,gemini:gemini-3-flash-preview,242,3,3,0,0,3,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+set (filter p xs) = {x ∈ set xs. p x},set_filter,set_extensionality,,,,,,,True,25.4695,plan-fill,gemini:gemini-3-flash-preview,342,2,2,0,0,2,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+inj f ⟹ distinct xs ⟹ distinct (map f xs),distinct_injective_map,induction_premises,,,,,,,True,61.5433,plan-fill,gemini:gemini-3-flash-preview,340,4,4,0,0,3,1,0,0,0,0,0,0,0,0,0,False,True,ok,
+(∀x. P x ⟶ Q x) ⟹ (∀x. Q x ⟶ R x) ⟹ ∀x. P x ⟶ R x,quantifier_chain,quantifier_multistep,,,,,,,True,29.6729,plan-fill,gemini:gemini-3-flash-preview,347,2,2,0,0,2,0,0,0,0,0,0,0,0,0,0,False,True,ok,
+A ⊆ B ⟹ f ` A ∪ f ` C ⊆ f ` (B ∪ C),image_union_chain,set_multihole,,,,,,,True,38.2326,plan-fill,gemini:gemini-3-flash-preview,419,2,2,0,0,2,0,0,0,0,0,0,0,0,0,0,False,True,ok,

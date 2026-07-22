@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import re
+import time
 from typing import List, Optional, Dict, Tuple
 
 import requests
@@ -60,7 +61,8 @@ def _join_prompts(system_prompt: str, user_prompt: str) -> str:
 # ---------------------------
 
 def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *,
-                     temperature: float | None = None) -> str:
+                     temperature: float | None = None,
+                     timeout_s: Optional[int] = None) -> str:
     url = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
     payload = {
         "model": model,
@@ -72,7 +74,7 @@ def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *,
     }
     try:
         _log(f"call: ollama url={url} model={model}")
-        resp = _SESSION.post(url, json=payload, timeout=int(TIMEOUT_S))
+        resp = _SESSION.post(url, json=payload, timeout=int(timeout_s or TIMEOUT_S))
         resp.raise_for_status()
         return resp.json().get("response", "")
     except Exception as e:
@@ -85,7 +87,13 @@ def _ollama_generate(system_prompt: str, user_prompt: str, model: str, *,
 # Backend: Gemini CLI
 # ---------------------------
 
-def _gemini_cli_generate(system_prompt: str, user_prompt: str, model: str) -> str:
+def _gemini_cli_generate(
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    *,
+    timeout_s: Optional[int] = None,
+) -> str:
     """
     Uses the standalone `gemini` CLI.
 
@@ -107,7 +115,7 @@ def _gemini_cli_generate(system_prompt: str, user_prompt: str, model: str) -> st
             input=b"",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=int(TIMEOUT_S),
+            timeout=int(timeout_s or TIMEOUT_S),
         )
         if proc.returncode != 0:
             msg = (proc.stderr or proc.stdout).decode("utf-8", "ignore").strip()
@@ -126,7 +134,8 @@ def _gemini_cli_generate(system_prompt: str, user_prompt: str, model: str) -> st
 # ---------------------------
 
 def _hf_inference_api_generate(system_prompt: str, user_prompt: str, repo_id: str,
-                               *, temperature: float | None = None) -> str:
+                               *, temperature: float | None = None,
+                               timeout_s: Optional[int] = None) -> str:
     """
     HF Inference API call. Requires HF_API_TOKEN or HUGGINGFACEHUB_API_TOKEN.
     Env:
@@ -149,7 +158,10 @@ def _hf_inference_api_generate(system_prompt: str, user_prompt: str, repo_id: st
     }
     try:
         _log(f"call: hf-inference-api repo={repo_id} url={url} token={'set' if token else 'missing'}")
-        resp = _SESSION.post(url, headers=headers, json=payload, timeout=int(TIMEOUT_S))
+        resp = _SESSION.post(
+            url, headers=headers, json=payload,
+            timeout=int(timeout_s or TIMEOUT_S),
+        )
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
@@ -206,6 +218,7 @@ def _generate_for_model(
     user_prompt: str,
     *,
     temperature: Optional[float] = None,
+    timeout_s: Optional[int] = None,
 ) -> str:
     """
     Route based on prefix:
@@ -216,21 +229,33 @@ def _generate_for_model(
     """
     _log(f"route: {detect_backend_for_model(model)}")
     if model.startswith("gemini:"):
-        return _gemini_cli_generate(system_prompt, user_prompt, model.split(":", 1)[1])
+        return _gemini_cli_generate(
+            system_prompt, user_prompt, model.split(":", 1)[1],
+            timeout_s=timeout_s,
+        )
 
     if model.startswith("hf:"):
         repo = model.split(":", 1)[1]
         force_local = os.getenv("HF_MODE", "").strip().lower() == "local"
         has_token = bool(os.getenv("HF_API_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN"))
         if has_token and not force_local:
-            return _hf_inference_api_generate(system_prompt, user_prompt, repo, temperature=temperature)
+            return _hf_inference_api_generate(
+                system_prompt, user_prompt, repo,
+                temperature=temperature, timeout_s=timeout_s,
+            )
         return _hf_local_generate(system_prompt, user_prompt, repo, temperature=temperature)
 
     if model.startswith("ollama:"):
-        return _ollama_generate(system_prompt, user_prompt, model.split(":", 1)[1], temperature=temperature)
+        return _ollama_generate(
+            system_prompt, user_prompt, model.split(":", 1)[1],
+            temperature=temperature, timeout_s=timeout_s,
+        )
 
     # Back-compat: treat unprefixed names as Ollama models (e.g., "qwen3-coder:30b")
-    return _ollama_generate(system_prompt, user_prompt, model, temperature=temperature)
+    return _ollama_generate(
+        system_prompt, user_prompt, model,
+        temperature=temperature, timeout_s=timeout_s,
+    )
 
 
 # ---------------------------
@@ -269,6 +294,7 @@ def propose_steps(
     temp: float | None = None,
     premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
     premise_pool: Optional[Dict[str, float]] = None,
+    timeout_s: Optional[int] = None,
 ) -> List[str]:
     user = USER_TEMPLATE.format(
         goal=goal,
@@ -277,8 +303,19 @@ def propose_steps(
         facts=("\n".join(facts) if facts else "(none)")
     )
     all_lists: List[List[str]] = []
+    deadline = time.monotonic() + max(1, int(timeout_s)) if timeout_s else None
     for m in models:
-        raw = _generate_for_model(m, SYSTEM_STEPS, user, temperature=temp)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            model_timeout = max(1, int(remaining))
+        else:
+            model_timeout = None
+        raw = _generate_for_model(
+            m, SYSTEM_STEPS, user,
+            temperature=temp, timeout_s=model_timeout,
+        )
         if _VERBOSE and isinstance(raw, str) and raw.startswith("__ERROR__"):
             _log(f"warn: LLM call failed for model={m}; using heuristic fallbacks. detail={raw}")
         cands = parse_ollama_lines(raw, ["apply ", "apply("], NUM_CANDIDATES)
@@ -334,7 +371,8 @@ def propose_finishers(
     temp: float | None = None,
     reranker=None,
     premise_scores: Optional[Dict[str, Tuple[float, float]]] = None,
-    premise_pool: Optional[Dict[str, float]] = None,    
+    premise_pool: Optional[Dict[str, float]] = None,
+    timeout_s: Optional[int] = None,
 ) -> List[str]:
     user = USER_TEMPLATE.format(
         goal=goal,
@@ -344,8 +382,19 @@ def propose_finishers(
     )
     base_lists: List[List[str]] = []
     prefixes = ["done", "by "] if allow_done else ["by "]
+    deadline = time.monotonic() + max(1, int(timeout_s)) if timeout_s else None
     for m in models:
-        raw = _generate_for_model(m, SYSTEM_FINISH, user, temperature=temp)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            model_timeout = max(1, int(remaining))
+        else:
+            model_timeout = None
+        raw = _generate_for_model(
+            m, SYSTEM_FINISH, user,
+            temperature=temp, timeout_s=model_timeout,
+        )
         if _VERBOSE and isinstance(raw, str) and raw.startswith("__ERROR__"):
             _log(f"warn: LLM call failed for model={m}; using heuristic fallbacks. detail={raw}")
         base = parse_ollama_lines(raw, prefixes, max(3, min(NUM_CANDIDATES, 8)))
@@ -355,7 +404,8 @@ def propose_finishers(
                     "by arith", "by presburger", "by fastforce", "by blast", "by meson", "by (metis)"]
     if allow_done:
         base_default = ["done"] + base_default
-    base_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8))) or base_default
+    llm_merged = merge_candidates(base_lists, max(3, min(NUM_CANDIDATES, 8)))
+    base_merged = list(dict.fromkeys(base_default + llm_merged))
     from .heuristics import (
         suggest_common_lemmas, mk_finisher_variants, augment_with_facts_for_finishers,
         live_features_for, extract_candidate_facts
@@ -366,8 +416,14 @@ def propose_finishers(
     lemma_finishers = mk_finisher_variants(static_hints + dyn_hints)
     with_facts = augment_with_facts_for_finishers(base_merged, facts or [], cap=8)
 
+    # Deterministic automation must not disappear merely because an LLM filled
+    # its candidate quota with fact-heavy variants.  Keep a small cheap prefix
+    # ahead of retrieved-fact and model proposals.
+    deterministic = (["done"] if allow_done else []) + [
+        "by simp", "by clarsimp", "by auto", "by fastforce", "by blast"
+    ]
     combined, seen = [], set()
-    for x in with_facts + lemma_finishers + base_merged:
+    for x in deterministic + with_facts + lemma_finishers + base_merged:
         if x not in seen:
             seen.add(x)
             combined.append(x)
@@ -430,5 +486,10 @@ def propose_finishers(
             except Exception:
                 return 0.5
         ranked = sorted(ranked, key=lambda c: (-rscore(c), base_pos[c]))
+
+    # Learned ranking may order the creative tail, but it must not postpone
+    # the cheap trusted portfolio behind slower fact-heavy candidates.
+    pinned = [cmd for cmd in deterministic if cmd in ranked]
+    ranked = pinned + [cmd for cmd in ranked if cmd not in set(pinned)]
 
     return ranked

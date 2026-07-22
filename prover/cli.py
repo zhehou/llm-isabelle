@@ -21,32 +21,8 @@ from .config import (
     VARIANTS_DEFAULT,
 )
 from .prover import prove_goal
-from .isabelle_api import start_isabelle_server, get_isabelle_client
+from .isabelle_api import start_isabelle_server, get_isabelle_client, shutdown_isabelle
 from .tactics import mine_two_step_macros
-
-# --- add near top of prover/cli.py (after imports) ---
-def _silence_asyncio_transport_del():
-    """
-    Mute the benign 'Event loop is closed' from BaseSubprocessTransport.__del__()
-    that can fire at interpreter shutdown when a dependency used asyncio subprocesses.
-    """
-    try:
-        import asyncio.base_subprocess as _bs  # stdlib module
-        _orig = getattr(_bs.BaseSubprocessTransport, "__del__", None)
-        if _orig is None:
-            return
-        def _quiet(self, _o=_orig):
-            try:
-                _o(self)
-            except RuntimeError as e:
-                # Exactly the noisy teardown path on macOS/Python 3.11–3.12
-                if "Event loop is closed" in str(e):
-                    return
-                raise
-        _bs.BaseSubprocessTransport.__del__ = _quiet
-    except Exception:
-        # Never fail shutdown due to a patching issue
-        pass
 
 class _StoreSetFlag(argparse.Action):
     """Like 'store', but also marks that the user explicitly provided this flag."""
@@ -85,15 +61,6 @@ def read_goals(path: str) -> list[str]:
                 goals.append(line.strip('"'))
     return goals
 
-def _setup_loop():
-    """No-op: this CLI doesn't use asyncio; avoid creating/closing loops to prevent teardown races."""
-    return None, None
-
-
-def _teardown_loop(loop, watcher):
-    """No-op: leave any global/default loop alone so transports can finalize cleanly at interpreter exit."""
-    return
-
 def _prove_one(isabelle, session_id: str, goal: str, CFG, args, macro_map=None):
     """Thin wrapper to avoid duplicating the long prove_goal(...) call."""
     return prove_goal(
@@ -130,7 +97,6 @@ def _prove_one(isabelle, session_id: str, goal: str, CFG, args, macro_map=None):
 
 
 def main():
-    _silence_asyncio_transport_del()
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--goal", type=str)
     parser.add_argument("--goals-file", type=str)
@@ -228,7 +194,6 @@ def main():
     if getattr(args, "__set_premises_model_dir", False) and args.premises_model_dir:
         os.environ["PREMISES_MODEL_DIR"] = os.path.expanduser(args.premises_model_dir)        
 
-    loop, watcher = _setup_loop()
     server_info = proc = isabelle = session_id = None
 
     try:
@@ -277,19 +242,7 @@ def main():
             print("\n".join(steps))
 
     finally:
-        # Strict shutdown order to avoid "Event loop is closed"
-        try:
-            if isabelle is not None:
-                isabelle.shutdown()
-        except Exception:
-            pass
-        try:
-            if proc is not None:
-                proc.terminate()
-                proc.wait(timeout=3)
-        except Exception:
-            pass
-        _teardown_loop(loop, watcher)
+        shutdown_isabelle(isabelle, proc)
 
 
 if __name__ == "__main__":

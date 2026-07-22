@@ -1,0 +1,51 @@
+# Planner-focused Isabelle/HOL benchmark.
+# Every non-comment line is an independent lemma statement imported from Main.
+# Run with --no-whole-fallback to measure structured filling rather than rescue.
+
+# Tier 1: nested list transformations and compositional rewrites
+map f (concat xss) = concat (map (map f) xss)
+rev (concat xss) = concat (map rev (rev xss))
+length (concat xss) = sum_list (map length xss)
+rev (map f (xs @ ys)) = rev (map f ys) @ rev (map f xs)
+map g (map f (xs @ ys)) = map (g ∘ f) xs @ map (g ∘ f) ys
+filter p (filter q xs) = filter (λx. p x ∧ q x) xs
+filter p (map f xs) = map f (filter (λx. p (f x)) xs)
+length (filter p xs) ≤ length xs
+set (filter p xs) = {x ∈ set xs. p x}
+list_all p (xs @ ys) ⟷ list_all p xs ∧ list_all p ys
+
+# Tier 2: implications whose assumptions must survive hole extraction
+inj f ⟹ distinct (map f xs) = distinct xs
+rev xs = xs ⟹ rev (map f xs) = map f xs
+rev xs = ys ⟹ rev ys = xs
+xs @ ys = [] ⟹ xs = [] ∧ ys = []
+(⋀x. p (f x) = p x) ⟹ map f (filter p xs) = filter p (map f xs)
+(⋀x. f x = g x) ⟹ f = g
+
+# Tier 3: induction and auxiliary arithmetic/list facts
+sum_list (map Suc xs) = sum_list xs + length xs
+sum_list (replicate n k) = n * k
+rev (replicate n x) = replicate n x
+map f (replicate n x) = replicate n (f x)
+take n (map f xs) = map f (take n xs)
+drop n (map f xs) = map f (drop n xs)
+take n (take m xs) = take (min n m) xs
+drop n (drop m xs) = drop (n + m) xs
+
+# Tier 4: finite sets, images and cardinality arguments
+finite A ⟹ card (f ` A) ≤ card A
+finite A ⟹ inj_on f A ⟹ card (f ` A) = card A
+f ` (A ∪ B) = f ` A ∪ f ` B
+f -` (A ∩ B) = f -` A ∩ f -` B
+A ⊆ B ⟹ f ` A ⊆ f ` B
+
+# Tier 5: quantified reasoning and chained assumptions
+(∀x. P x ⟶ Q x) ⟹ (∀x. P x) ⟹ ∀x. Q x
+(∃x. P x ∧ Q x) ⟹ (∃x. P x) ∧ (∃x. Q x)
+(∀x. P x ∧ Q x) ⟷ (∀x. P x) ∧ (∀x. Q x)
+(∃x. P x ∨ Q x) ⟷ (∃x. P x) ∨ (∃x. Q x)
+
+# Tier 6: natural-number assumption chains
+(n::nat) ≤ m ⟹ n + k ≤ m + k
+(n::nat) < m ⟹ Suc n ≤ m
+(n::nat) ≤ m ⟹ m ≤ n ⟹ n = m

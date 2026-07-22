@@ -15,6 +15,7 @@ STRICT RULES
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
 - When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
+- Never output `sorry`; an admitted block is not a repair.
 - Never add "qed" in BLOCK
 - Don't copy text from PROOF_CONTEXT. 
 
@@ -25,7 +26,6 @@ LIGHT GRAMMAR (allowed shapes)
 
 <proof> ::=
   "by" <method>
-| "sorry"
 
 <method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
            | "auto" | "blast" | "fastforce" | "clarsimp"
@@ -83,6 +83,7 @@ STRICT RULES
 - Respect meta-targets: inside induction branches prefer `show ?case`; otherwise prefer `show ?thesis`.
 - Your output must be substantively different from every block in PRIOR FAILED BLOCKS.
 - When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
+- You MAY use `sorry` only for new, strictly smaller leaf obligations created by a genuine decomposition. Never return the original block unchanged and never replace a structured block by a single `sorry`.
 - Don't add "qed" if there isn't an open "proof".
 - Don't copy text from PROOF_CONTEXT. 
 
@@ -104,7 +105,6 @@ LIGHT GRAMMAR (allowed shapes)
 <proof> ::=
   "by" <method>
 | "proof" ["(" <method> ")"] <stmts>* "qed"
-| "sorry"
 
 <method> ::= "simp" ["add:" <thms>] ["only:" <thms>]
            | "auto" | "blast" | "fastforce" | "clarsimp"
@@ -159,14 +159,16 @@ HARD OUTPUT RULES
 - Output ONLY Isabelle/Isar (no prose, no code fences).
 - Begin at (or immediately after) the exact header:
   lemma "{goal}"
-- Produce exactly ONE lemma..qed block.
+- Produce exactly ONE lemma declaration, closed either by `by <method>` or by one `proof ... qed` block.
 - Prefer structured proofs with named intermediate facts (e.g., f1, f2) that are then reused.
 - Use the right shell:
   • Induction: `proof (induction <var>)` → branches `case …` with `show ?case …`.
   • Exhaustive cases: `proof (cases <expr>)` or `proof (cases rule: <T>.exhaust)` → branches ending with `show ?thesis …`.
   • Calculational: `proof -` with `have …`, `also`, `moreover`, `finally show ?thesis …`.
 - When trivial, close with `by simp` / `by auto` / `by blast` / `by fastforce`, etc, but don't use . as a tactic. 
+- When the goal mentions a recursively defined constant from THEORY CONTEXT, inspect its defining equations and prefer induction on the recursive datatype argument. A bare theorem-level `sorry` is a last resort: expose useful cases and helper statements first.
 - Do NOT invent constants or fact names; only use variables/tokens present in the goal or locally introduced facts.
+- Never reuse a free variable from the lemma statement as a constructor-pattern variable. Choose fresh branch names to avoid capture and confusing renamed contexts.
 
 LIGHT GRAMMAR (allowed shapes)
 lemma "{goal}"
@@ -194,7 +196,7 @@ proof (induction xs)
     using f1
     sorry
 next
-  case (Cons x xs)
+  case (Cons a xs)
   have f1: "…"
     using Cons.prems
     sorry

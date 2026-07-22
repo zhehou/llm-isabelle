@@ -4,6 +4,7 @@ from typing import List, Tuple, Optional, Any, Dict, Iterable
 import json
 import os
 import re
+import time
 from functools import lru_cache
 from planner.prompts import SKELETON_PROMPT
 import requests
@@ -19,7 +20,7 @@ from prover.config import (
 )
 
 # Isabelle helpers (for quick sketch check)
-from prover.isabelle_api import build_theory, run_theory, last_print_state_block
+from prover.isabelle_api import build_theory, finished_ok, run_theory, last_print_state_block
 from prover.utils import parse_subgoals
 
 # Reuse local-context miner from repair (defs/facts list)
@@ -36,7 +37,6 @@ class Skeleton:
 SORRY_RE = re.compile(r"\bsorry\b")
 PROOF_RE = re.compile(r"(?m)^\s*proof(?:\b|\s|\()", re.UNICODE)
 QED_RE   = re.compile(r"(?m)^\s*qed\b", re.UNICODE)
-BY_INLINE_RE = re.compile(r"\s+by\s+.*$")
 # New regex helpers for sanitization
 CASE_START_RE   = re.compile(r"(?m)^\s*case\b")
 NEXT_OR_QED_RE  = re.compile(r"(?m)^\s*(next|qed)\b")
@@ -191,22 +191,37 @@ def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optio
     return str(data).strip()
 
 def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
-    resolved = _gemini_resolve_model_id(model_id, timeout_s=timeout_s)
+    # Share one deadline across CLI, REST and fallback attempts.  Previously
+    # every attempt received the complete timeout, so one outline request
+    # could silently consume three or four times its planner allocation.
+    budget = max(1.0, float(timeout_s or OLLAMA_TIMEOUT_S))
+    deadline = time.monotonic() + budget
+
+    def remaining() -> int:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("Gemini outline generation deadline exhausted")
+        return max(1, int(left))
+
+    resolved = _gemini_resolve_model_id(model_id, timeout_s=remaining())
     if _gemini_cli_available():
         try:
-            return _gemini_cli_generate_simple(prompt, resolved, timeout_s=timeout_s)
+            return _gemini_cli_generate_simple(prompt, resolved, timeout_s=remaining())
         except Exception:
             pass
     try:
-        return _gemini_rest_generate_simple(prompt, resolved, timeout_s=timeout_s)
+        return _gemini_rest_generate_simple(prompt, resolved, timeout_s=remaining())
     except Exception:
         fallback = "gemini-2.5-pro"
         if _gemini_cli_available():
             try:
-                return _gemini_cli_generate_simple(prompt, fallback, timeout_s=timeout_s)
+                return _gemini_cli_generate_simple(prompt, fallback, timeout_s=remaining())
             except Exception:
                 pass
-        return _gemini_rest_generate_simple(prompt, fallback, timeout_s=timeout_s)
+        try:
+            return _gemini_rest_generate_simple(prompt, fallback, timeout_s=remaining())
+        except Exception as exc:
+            return f"__ERROR__ {exc}"
 
 def _generate_simple(
     prompt: str,
@@ -241,6 +256,12 @@ def _generate_simple(
 
 def find_sorry_spans(isar: str) -> List[Tuple[int, int]]:
     return [(m.start(), m.end()) for m in SORRY_RE.finditer(isar)]
+
+
+def _generation_failed(text: str) -> bool:
+    """Recognise provider/transport diagnostics that are not Isar output."""
+    stripped = (text or "").strip()
+    return not stripped or stripped.startswith("__ERROR__")
 
 def _ensure_lemma_header(text: str, goal: str) -> str:
     body = text.lstrip()
@@ -410,6 +431,11 @@ def _maybe_proof_dash(text: str) -> str:
     return text
 
 def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
+    # Provider errors must never cross the boundary into Isabelle source.
+    # Converting an error string into ``lemma ... __ERROR__ ...`` obscures the
+    # real failure and makes every subsequent fill and repair unverifiable.
+    if _generation_failed(text):
+        text = ""
     text = _ensure_lemma_header(text, goal)
     # Normalize ellipsis first (avoid Unicode / spaced form)
     text = _normalize_calculation_ellipsis(text)
@@ -424,24 +450,30 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
         if first_lemma >= 0:
             text = text[first_lemma:]
 
+    # Preserve a valid one-line proof in auto mode.  Previously a second
+    # ``proof ... qed`` block was appended after ``by``, making it invalid.
+    if not PROOF_RE.search(text):
+        one_line = text.splitlines()
+        by_idx = next(
+            (i for i, line in enumerate(one_line[1:], start=1) if re.match(r"^\s*by\b", line)),
+            -1,
+        )
+        if by_idx >= 0:
+            # A complete one-line proof is a valid plan in every mode.  Opening
+            # it into an artificial hole discarded the model's best answer.
+            text = "\n".join(one_line[: by_idx + 1]).rstrip() + "\n"
+            return text
+
     # Ensure proof/qed skeleton exists
     if not PROOF_RE.search(text):
         text = text.rstrip() + "\nproof\n  sorry\nqed\n"
     if not QED_RE.search(text):
         text = text.rstrip() + "\nqed\n"
 
-    # Force an outline (remove inline 'by' if requested by caller)
-    if force_outline:
-        lines = text.splitlines()
-        for i, L in enumerate(lines):
-            if " by " in L:
-                lines[i] = BY_INLINE_RE.sub(" sorry", L)
-        text = "\n".join(lines)
-        if "sorry" not in text:
-            m_qed = QED_RE.search(text)
-            if m_qed:
-                insert_at = m_qed.start()
-                text = text[:insert_at] + "  sorry\n" + text[insert_at:]
+    # Preserve solved leaves in a structured outline.  Deleting every
+    # ``by ...`` manufactured extra holes and discarded useful LLM work.  A
+    # complete structured proof is already a successful planner result; only
+    # a top-level one-line proof is deliberately opened above.
 
     # Light Isar fixups (order matters)
     #  1) Flip only the meta after 'show', preserving 'then/using/from/with/finally' etc.
@@ -454,25 +486,88 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     # Trim to the first complete lemma..qed block to avoid trailing splices
     text = _crop_to_first_proof_block(text)
 
+    # ``proof -; show ?thesis; sorry; qed`` adds no planning structure, but it
+    # refines a theorem ``A ⟹ B`` to a leaf ``B`` and can leave ``A`` only as
+    # an unnamed chained fact.  Canonicalise this vacuous wrapper to a direct
+    # theorem-level hole.  Real outlines with assumes, cases, calculations or
+    # intermediate facts are deliberately untouched.
+    vacuous = re.fullmatch(
+        r'(lemma\s+"[^\n]*"[^\n]*\n)\s*proof\s+-\s*\n'
+        r'\s*show\s+\?thesis\s*\n\s*sorry\s*\n\s*qed\s*',
+        text.strip() + "\n",
+    )
+    if vacuous:
+        text = vacuous.group(1).rstrip() + "\n  sorry\n"
+
     if not text.endswith("\n"):
         text += "\n"
     return text
 
-def _quick_sketch_score(isabelle, session_id: str, outline_text: str) -> int:
-    try:
-        thy = build_theory(outline_text.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session_id, thy)
-        block = last_print_state_block(resps) or ""
-        n = parse_subgoals(block)
-        return int(n) if isinstance(n, int) else 9999
-    except Exception:
-        return 9999
+def _quick_sketch_score(
+    isabelle,
+    session_id: str,
+    outline_text: str,
+    *,
+    budget_s: Optional[float] = None,
+) -> int:
+    """Estimate real outline cost from its reachable hole states.
 
-def _state_block_for_goal(isabelle, session_id: str, goal: str) -> str:
-    mini = f'lemma "{goal}"\nproof\n  sorry\nqed\n'
+    The old check appended ``print_state`` after ``qed``, so it did not inspect
+    any hole and commonly gave every candidate the same sentinel score.
+    """
+    started = time.monotonic()
+    budget = max(1.0, float(budget_s)) if budget_s is not None else 30.0
+
+    def left() -> float:
+        return max(0.0, budget - (time.monotonic() - started))
+
     try:
-        thy = build_theory(mini.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session_id, thy)
+        thy = build_theory(outline_text.splitlines(), add_print_state=False, end_with=None)
+        resps = run_theory(
+            isabelle, session_id, thy,
+            timeout_s=max(1, min(8, int(left()) or 1)),
+        )
+        ok, _ = finished_ok(resps)
+        if not ok:
+            return 10**6
+        holes = find_sorry_spans(outline_text)
+        if not holes:
+            return 0
+        from planner.goals import _print_state_before_hole
+
+        score = 20 * len(holes)
+        inspected = 0
+        for span in holes[:2]:
+            if left() <= 1.0:
+                break
+            block = _print_state_before_hole(
+                isabelle, session_id, outline_text, span, trace=False,
+                timeout_s=max(1, min(6, int(left()) or 1)),
+            ) or ""
+            inspected += 1
+            n = parse_subgoals(block)
+            if not isinstance(n, int):
+                score += 500
+            else:
+                score += 10 * n + min(200, len(" ".join(block.split())) // 20)
+        # Exhausting a deliberately small scoring budget should not classify
+        # an otherwise valid outline as invalid.  Uninspected holes simply
+        # retain a structural cost.
+        score += 80 * max(0, len(holes) - inspected)
+        return score
+    except Exception:
+        return 10**6
+
+def _state_block_for_goal(
+    isabelle, session_id: str, goal: str, theory_preamble: str = ""
+) -> str:
+    prefix = theory_preamble.strip()
+    if prefix:
+        prefix += "\n\n"
+    mini = prefix + f'lemma "{goal}"\nproof\n  print_state\n  sorry\nqed\n'
+    try:
+        thy = build_theory(mini.splitlines(), add_print_state=False, end_with=None)
+        resps = run_theory(isabelle, session_id, thy, timeout_s=12)
         return last_print_state_block(resps) or ""
     except Exception:
         return ""
@@ -600,18 +695,28 @@ def propose_isar_skeleton(
     *,
     force_outline: bool = False,
     hints: Optional[List[str]] = None,
+    timeout_s: Optional[int] = None,
+    theory_preamble: str = "",
 ) -> Skeleton:
     # Inject tiny hint list when available (keeps default behavior if None/empty)
     prompt = SKELETON_PROMPT.format(goal=goal)
     if hints:
         prompt += "\nHINTS: Prefer using " + ", ".join(sorted(set(hints))) + " if applicable.\n"
+    if theory_preamble.strip():
+        prompt += (
+            "\nTHEORY CONTEXT (already declared before the lemma; do not repeat it):\n"
+            + theory_preamble.strip()
+            + "\nEND THEORY CONTEXT\n"
+        )
     raw = _generate_simple(
         prompt=prompt,
         model=model or DEFAULT_MODEL,
         temperature=temp,
-        timeout_s=OLLAMA_TIMEOUT_S,
+        timeout_s=timeout_s or OLLAMA_TIMEOUT_S,
     )
     cleaned = _sanitize_outline(raw, goal=goal, force_outline=force_outline)
+    if theory_preamble.strip():
+        cleaned = theory_preamble.strip() + "\n\n" + cleaned.lstrip()
     return Skeleton(text=cleaned, holes=find_sorry_spans(cleaned))
 
 def propose_isar_skeletons(
@@ -622,20 +727,53 @@ def propose_isar_skeletons(
     k: Optional[int] = None,
     force_outline: bool = False,
     hints: Optional[List[str]] = None,
+    total_timeout_s: Optional[float] = None,
+    theory_preamble: str = "",
 ) -> List[Skeleton]:
     seen, out = set(), []
-    for t in temps:
+    temp_list = list(temps)
+    deadline = (
+        time.monotonic() + max(1.0, float(total_timeout_s))
+        if total_timeout_s is not None else None
+    )
+    for index, t in enumerate(temp_list):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 1.0:
+                break
+            calls_left = max(1, len(temp_list) - index)
+            if index == 0 and calls_left > 1:
+                # A usable first outline is more valuable than several calls
+                # that all time out just before the model responds.
+                call_timeout = max(1, int(min(remaining, remaining * 0.60)))
+            else:
+                call_timeout = max(1, int(remaining / calls_left))
+        else:
+            call_timeout = OLLAMA_TIMEOUT_S
         prompt = SKELETON_PROMPT.format(goal=goal)
         if hints:
             prompt += "\nHINTS: Prefer using " + ", ".join(sorted(set(hints))) + " if applicable.\n"
-        raw = _generate_simple(
-            prompt=prompt,
-            model=model or DEFAULT_MODEL,
-            temperature=float(t),
-            timeout_s=OLLAMA_TIMEOUT_S,
-        )
-        sk = Skeleton(text=_sanitize_outline(raw, goal=goal, force_outline=force_outline),
-                      holes=[])
+        if theory_preamble.strip():
+            prompt += (
+                "\nTHEORY CONTEXT (already declared before the lemma; do not repeat it):\n"
+                + theory_preamble.strip()
+                + "\nEND THEORY CONTEXT\n"
+            )
+        try:
+            raw = _generate_simple(
+                prompt=prompt,
+                model=model or DEFAULT_MODEL,
+                temperature=float(t),
+                timeout_s=min(OLLAMA_TIMEOUT_S, call_timeout),
+            )
+        except Exception:
+            raw = ""
+        if _generation_failed(raw):
+            continue
+        cleaned = _sanitize_outline(raw, goal=goal, force_outline=force_outline)
+        if theory_preamble.strip():
+            cleaned = theory_preamble.strip() + "\n\n" + cleaned.lstrip()
+        sk = Skeleton(text=cleaned, holes=[])
         sk.holes = find_sorry_spans(sk.text)
         key = sk.text.strip()
         if key not in seen:
@@ -644,11 +782,23 @@ def propose_isar_skeletons(
         if k is not None and len(out) >= int(k):
             break
     if not out:
-        return [propose_isar_skeleton(goal, model=model, temp=0.3, force_outline=force_outline, hints=hints)]
+        # Do not spend the final second retrying the same unavailable backend.
+        # Use a known-valid structural template so exact-context automation can
+        # still solve the theorem locally.
+        fallback = _lib_templates_for_goal(goal)[0]
+        if theory_preamble.strip():
+            fallback.text = theory_preamble.strip() + "\n\n" + fallback.text.lstrip()
+            fallback.holes = find_sorry_spans(fallback.text)
+        return [fallback]
     return out
 
 def _lib_templates_for_goal(goal: str) -> List[Skeleton]:
     toks = _tokenize_goal(goal)
+    used_names = set(re.findall(r"[A-Za-z][A-Za-z0-9_']*", goal))
+    head_name = next(
+        (name for name in ("a", "x1", "elem", "hd1") if name not in used_names),
+        "fresh_head",
+    )
     lib: List[str] = []
     if ("@" in toks or "map" in toks) and "xs" in toks:
         lib.append(
@@ -657,8 +807,9 @@ proof (induction xs)
   case Nil
   show ?case by simp
 next
-  case (Cons x xs)
+  case (Cons {head_name} xs)
   show ?case
+    using Cons.IH
     sorry
 qed
 ''')
@@ -671,6 +822,7 @@ proof (induction n)
 next
   case (Suc n)
   show ?case
+    using Suc.IH
     sorry
 qed
 ''')
@@ -687,18 +839,10 @@ next
     sorry
 qed
 ''')
-    lib.append(
-f'''lemma "{goal}"
-proof -
-  have f1: "(* fill a useful intermediate statement *)"
-    sorry
-  have f2: "(* another useful intermediate *)"
-    using f1
-    sorry
-  show ?thesis
-    using f1 f2
-    sorry
-qed
+    # A safe neutral candidate.  Never invent placeholder propositions: a
+    # quoted comment is not a valid HOL term and cannot be repaired by tactics.
+    lib.append(f'''lemma "{goal}"
+  sorry
 ''')
     return [Skeleton(text=s if s.endswith("\n") else s+"\n", holes=find_sorry_spans(s)) for s in lib]
 
@@ -721,6 +865,8 @@ def propose_isar_skeleton_diverse_best(
     # NEW: hint lexicon
     hintlex_path: Optional[str] = None,
     hintlex_top: int = 8,
+    total_budget_s: Optional[float] = None,
+    theory_preamble: str = "",
 ) -> Tuple[Skeleton, Dict[str, Any]]:
     """
     Generate K outlines, optionally inject context & hintlex hints, run one-shot sketch checks,
@@ -730,37 +876,79 @@ def propose_isar_skeleton_diverse_best(
     # Optional context hints from Isabelle state + hint lexicon
     rec_hints: List[str] = []
     if context_hints:
-        state_block = _state_block_for_goal(isabelle, session_id, goal)
+        state_block = _state_block_for_goal(
+            isabelle, session_id, goal, theory_preamble
+        )
         rec_hints += _facts_from_state(state_block)[:8]
     hintlex = _load_hintlex(hintlex_path)
     if hintlex:
         rec_hints += _hints_from_hintlex(goal, hintlex, top=hintlex_top)
     rec_hints = list(dict.fromkeys(rec_hints))[:12]  # stable de-dup + cap
 
-    # Outline candidates (LLM) + optional library templates
-    cands = propose_isar_skeletons(goal, model=model, temps=temps, k=k,
-                                   force_outline=force_outline, hints=rec_hints)
+    # Outline generation and scoring must leave time for the actual filler.
+    # The old code allowed each of K LLM calls and every state probe to consume
+    # its full independent timeout.
+    started = time.monotonic()
+    total_budget = max(4.0, float(total_budget_s)) if total_budget_s is not None else None
+    generation_budget = total_budget * 0.60 if total_budget is not None else None
+    cands = propose_isar_skeletons(
+        goal, model=model, temps=temps, k=k,
+        force_outline=force_outline, hints=rec_hints,
+        total_timeout_s=generation_budget,
+        theory_preamble=theory_preamble,
+    )
     if lib_templates:
-        cands = _lib_templates_for_goal(goal) + cands
+        templates = _lib_templates_for_goal(goal)
+        if theory_preamble.strip():
+            for template in templates:
+                template.text = theory_preamble.strip() + "\n\n" + template.text.lstrip()
+                template.holes = find_sorry_spans(template.text)
+        cands = templates + cands
 
     # Load optional priors/rules
     rules = _load_priors(priors_path)
 
     scored: List[Tuple[float, int, int]] = []  # (score, n_subgoals, idx)
     for i, sk in enumerate(cands):
-        n = _quick_sketch_score(isabelle, session_id, sk.text)
+        if total_budget is None:
+            score_budget = None
+        else:
+            remaining = max(1.0, total_budget - (time.monotonic() - started))
+            score_budget = remaining / max(1, len(cands) - i)
+        n = _quick_sketch_score(
+            isabelle, session_id, sk.text, budget_s=score_budget
+        )
         pat_pen = _pattern_penalty(goal, sk.text, rules)
         hint_b = _hint_bonus_from_outline(sk.text, rec_hints)
         score = alpha * float(n) + beta * float(pat_pen) - gamma * float(hint_b)
         scored.append((score, n, i))
 
     scored.sort(key=lambda x: (x[0], x[1], x[2]))
-    best = cands[scored[0][2]]
+    if scored and scored[0][1] < 10**6:
+        best = cands[scored[0][2]]
+        rejected_all = False
+    else:
+        # Do not feed a known-unreachable outline into fill/repair merely
+        # because every generated candidate failed sketch checking.  A neutral
+        # theorem-shaped hole is reachable and lets the verified prover search
+        # the actual goal instead of repairing a false intermediate claim.
+        best = _lib_templates_for_goal(goal)[-1]
+        if theory_preamble.strip():
+            best.text = theory_preamble.strip() + "\n\n" + best.text.lstrip()
+            best.holes = find_sorry_spans(best.text)
+        rejected_all = True
     diag = {
         "scores": scored,
+        # Internal planner consumers use this ordered archive for bounded
+        # backtracking when the best-looking outline reaches a dead frontier.
+        "ranked_candidates": [
+            cands[index].text for _score, n_subgoals, index in scored
+            if n_subgoals < 10**6
+        ],
         "num_candidates": len(cands),
         "used_hints": rec_hints[:12],
         "priors_rules": len(rules),
         "alpha_beta_gamma": (alpha, beta, gamma),
+        "all_generated_outlines_rejected": rejected_all,
     }
     return best, diag

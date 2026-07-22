@@ -163,7 +163,8 @@ int insertPos = caretInsideLemma ? (ta.getLineEndOffset(caretLine) - 1) : afterL
 // Call server
 String payload = "{"
   + "\"goal\":\"" + jsonEsc(goal) + "\","
-  + "\"timeout\":" + BUDGET
+  + "\"timeout\":" + BUDGET + ","
+  + "\"mode\":\"plan-fill\""
   + (MODEL.length()>0 ? ",\"model\":\"" + jsonEsc(MODEL) + "\"" : "")
   + "}";
 
